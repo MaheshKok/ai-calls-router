@@ -1,0 +1,874 @@
+{
+  "generator": {
+    "python": "3.10.4",
+    "backend": "RoutedLiteLLMBackend"
+  },
+  "convert_messages": {
+    "string_content_user": {
+      "input": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ]
+    },
+    "string_content_assistant": {
+      "input": [
+        {
+          "role": "assistant",
+          "content": "hi there"
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": "hi there",
+          "reasoning_content": ""
+        }
+      ]
+    },
+    "missing_role_defaults_user": {
+      "input": [
+        {
+          "content": "no role"
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": "no role"
+        }
+      ]
+    },
+    "text_blocks_joined": {
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "line one"
+            },
+            {
+              "type": "text",
+              "text": "line two"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": "line one\nline two"
+        }
+      ]
+    },
+    "empty_content_list": {
+      "input": [
+        {
+          "role": "user",
+          "content": []
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": ""
+        }
+      ]
+    },
+    "non_dict_blocks_ignored": {
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            "raw string",
+            {
+              "type": "text",
+              "text": "kept"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": "kept"
+        }
+      ]
+    },
+    "tool_use_with_text": {
+      "input": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Let me check."
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_01",
+              "name": "Bash",
+              "input": {
+                "cmd": "ls"
+              }
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": "Let me check.",
+          "tool_calls": [
+            {
+              "id": "toolu_01",
+              "type": "function",
+              "function": {
+                "name": "Bash",
+                "arguments": "{\"cmd\": \"ls\"}"
+              }
+            }
+          ],
+          "reasoning_content": ""
+        }
+      ]
+    },
+    "tool_use_without_text": {
+      "input": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_02",
+              "name": "Read",
+              "input": {
+                "path": "/x"
+              }
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "toolu_02",
+              "type": "function",
+              "function": {
+                "name": "Read",
+                "arguments": "{\"path\": \"/x\"}"
+              }
+            }
+          ],
+          "reasoning_content": ""
+        }
+      ]
+    },
+    "tool_use_missing_input": {
+      "input": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_03",
+              "name": "Glob"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "toolu_03",
+              "type": "function",
+              "function": {
+                "name": "Glob",
+                "arguments": "{}"
+              }
+            }
+          ],
+          "reasoning_content": ""
+        }
+      ]
+    },
+    "tool_result_string_content": {
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_01",
+              "content": "file.txt"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "tool",
+          "tool_call_id": "toolu_01",
+          "content": "file.txt"
+        }
+      ]
+    },
+    "tool_result_list_content": {
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_01",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "part one"
+                },
+                {
+                  "type": "image",
+                  "source": {}
+                },
+                {
+                  "type": "text",
+                  "text": "part two"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "tool",
+          "tool_call_id": "toolu_01",
+          "content": "part one\npart two"
+        }
+      ]
+    },
+    "tool_result_text_alongside_discarded": {
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "this text is discarded"
+            },
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_01",
+              "content": "result"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "tool",
+          "tool_call_id": "toolu_01",
+          "content": "result"
+        }
+      ]
+    },
+    "tool_result_missing_content": {
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_09"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "tool",
+          "tool_call_id": "toolu_09",
+          "content": ""
+        }
+      ]
+    },
+    "multiple_tool_results": {
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_01",
+              "content": "first"
+            },
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_02",
+              "content": "second"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "tool",
+          "tool_call_id": "toolu_01",
+          "content": "first"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "toolu_02",
+          "content": "second"
+        }
+      ]
+    },
+    "non_string_non_list_content_dropped": {
+      "input": [
+        {
+          "role": "user",
+          "content": null
+        },
+        {
+          "role": "user",
+          "content": "kept"
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": "kept"
+        }
+      ]
+    },
+    "full_tool_round_trip": {
+      "input": [
+        {
+          "role": "user",
+          "content": "list files"
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Running ls."
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_01",
+              "name": "Bash",
+              "input": {
+                "cmd": "ls"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_01",
+              "content": "a.py\nb.py"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": "list files"
+        },
+        {
+          "role": "assistant",
+          "content": "Running ls.",
+          "tool_calls": [
+            {
+              "id": "toolu_01",
+              "type": "function",
+              "function": {
+                "name": "Bash",
+                "arguments": "{\"cmd\": \"ls\"}"
+              }
+            }
+          ],
+          "reasoning_content": ""
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "toolu_01",
+          "content": "a.py\nb.py"
+        }
+      ]
+    }
+  },
+  "convert_tool": {
+    "full_tool": {
+      "input": {
+        "name": "Bash",
+        "description": "Run a command",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "cmd": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "expected": {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run a command",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "no_description": {
+      "input": {
+        "name": "Read",
+        "input_schema": {
+          "type": "object"
+        }
+      },
+      "expected": {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "no_input_schema": {
+      "input": {
+        "name": "Glob",
+        "description": "Find files"
+      },
+      "expected": {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files"
+        }
+      }
+    },
+    "empty_tool": {
+      "input": {},
+      "expected": {
+        "type": "function",
+        "function": {
+          "name": ""
+        }
+      }
+    }
+  },
+  "convert_tool_choice": {
+    "string_auto": {
+      "input": "auto",
+      "expected": "auto"
+    },
+    "string_none": {
+      "input": "none",
+      "expected": "none"
+    },
+    "dict_auto": {
+      "input": {
+        "type": "auto"
+      },
+      "expected": "auto"
+    },
+    "dict_any": {
+      "input": {
+        "type": "any"
+      },
+      "expected": "required"
+    },
+    "dict_tool": {
+      "input": {
+        "type": "tool",
+        "name": "Bash"
+      },
+      "expected": {
+        "type": "function",
+        "function": {
+          "name": "Bash"
+        }
+      }
+    },
+    "dict_tool_no_name": {
+      "input": {
+        "type": "tool"
+      },
+      "expected": {
+        "type": "function",
+        "function": {
+          "name": ""
+        }
+      }
+    },
+    "dict_unknown_type": {
+      "input": {
+        "type": "mystery"
+      },
+      "expected": "auto"
+    },
+    "empty_dict": {
+      "input": {},
+      "expected": "auto"
+    },
+    "non_str_non_dict": {
+      "input": 42,
+      "expected": "auto"
+    }
+  },
+  "parse_tool_arguments": {
+    "valid_json_string": {
+      "input": "{\"cmd\": \"ls\", \"n\": 1}",
+      "expected": {
+        "cmd": "ls",
+        "n": 1
+      }
+    },
+    "invalid_json_string": {
+      "input": "not json at all",
+      "expected": "not json at all"
+    },
+    "json_null_string": {
+      "input": "null",
+      "expected": null
+    },
+    "empty_string": {
+      "input": "",
+      "expected": ""
+    },
+    "dict_passthrough": {
+      "input": {
+        "already": "parsed"
+      },
+      "expected": {
+        "already": "parsed"
+      }
+    },
+    "none_passthrough": {
+      "input": null,
+      "expected": null
+    }
+  },
+  "to_anthropic_response": {
+    "text_stop": {
+      "input": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "message": {
+              "content": "Done.",
+              "tool_calls": null
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 100,
+          "completion_tokens": 20
+        }
+      },
+      "expected": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Done."
+          }
+        ],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 20
+        }
+      }
+    },
+    "tool_calls_finish": {
+      "input": {
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "message": {
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_1",
+                  "function": {
+                    "name": "Bash",
+                    "arguments": "{\"cmd\": \"ls\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 50,
+          "completion_tokens": 10
+        }
+      },
+      "expected": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "Bash",
+            "input": {
+              "cmd": "ls"
+            }
+          }
+        ],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 50,
+          "output_tokens": 10
+        }
+      }
+    },
+    "text_and_tool_calls": {
+      "input": {
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "message": {
+              "content": "Checking now.",
+              "tool_calls": [
+                {
+                  "id": "call_2",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "broken{json"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 7,
+          "completion_tokens": 3
+        }
+      },
+      "expected": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Checking now."
+          },
+          {
+            "type": "tool_use",
+            "id": "call_2",
+            "name": "Read",
+            "input": "broken{json"
+          }
+        ],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 7,
+          "output_tokens": 3
+        }
+      }
+    },
+    "length_finish": {
+      "input": {
+        "choices": [
+          {
+            "finish_reason": "length",
+            "message": {
+              "content": "truncat",
+              "tool_calls": null
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1,
+          "completion_tokens": 2
+        }
+      },
+      "expected": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "truncat"
+          }
+        ],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "max_tokens",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 2
+        }
+      }
+    },
+    "content_filter_finish": {
+      "input": {
+        "choices": [
+          {
+            "finish_reason": "content_filter",
+            "message": {
+              "content": "x",
+              "tool_calls": null
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1,
+          "completion_tokens": 1
+        }
+      },
+      "expected": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "x"
+          }
+        ],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      }
+    },
+    "unknown_finish_reason": {
+      "input": {
+        "choices": [
+          {
+            "finish_reason": "weird",
+            "message": {
+              "content": "y",
+              "tool_calls": null
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1,
+          "completion_tokens": 1
+        }
+      },
+      "expected": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "y"
+          }
+        ],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      }
+    },
+    "empty_content_no_text_block": {
+      "input": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "message": {
+              "content": "",
+              "tool_calls": null
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1,
+          "completion_tokens": 0
+        }
+      },
+      "expected": {
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 0
+        }
+      }
+    },
+    "missing_usage_fields": {
+      "input": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "message": {
+              "content": "z",
+              "tool_calls": null
+            }
+          }
+        ],
+        "usage": {}
+      },
+      "expected": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "z"
+          }
+        ],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    }
+  }
+}
