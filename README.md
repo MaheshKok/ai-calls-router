@@ -63,45 +63,84 @@ These hold on every turn:
 
 Requires Python 3.11 or newer.
 
-```bash
-pip install ai-calls-router
-```
-
-For local development:
+Recommended isolated installs:
 
 ```bash
-make install   # creates .venv, installs the package with dev extras
-make test      # run the suite
-make coverage  # suite with coverage, fails under 98%
+uv tool install ai-calls-router
+# or
+pipx install ai-calls-router
 ```
+
+For local development from a checkout, use the repo-managed virtual environment:
+
+```bash
+make install
+```
+
+`make install` creates `.venv` when missing, reuses it when present, and installs
+`ai-calls-router` with development dependencies. Plain `pip install
+ai-calls-router` also works, but `uv tool`/`pipx` avoid mixing acr with unrelated
+site-packages.
 
 ## Quick start
 
-1. Create a config interactively and provide your cheap provider's API key:
+1. Write the default config:
 
    ```bash
    acr init
-   export DEEPSEEK_API_KEY=sk-...        # or the key_env your config names
    ```
 
    `acr init` writes `~/.ai-calls-router/config.yaml`. See
    [`config.example.yaml`](config.example.yaml) for the full annotated schema.
 
-2. Launch Claude Code through the proxy:
+2. Export the API key required by your configured cheap tier:
+
+   ```bash
+   export DEEPSEEK_API_KEY=sk-... # or the key_env your config names
+   ```
+
+3. Run Claude Code through acr for one session:
 
    ```bash
    acr code -- -p "explain this repo"
    ```
 
-   `acr code` boots the daemon if it is not already running, sets
-   `ANTHROPIC_BASE_URL` for the child process, and runs `claude` with any
-   arguments you pass after `--`.
+   `acr code` starts the proxy if needed, injects `ANTHROPIC_BASE_URL` for the
+   child process only, and runs `claude` with any arguments passed after `--`.
 
-3. Check what you saved:
+## Persistent setup vs per-session
 
-   ```bash
-   acr savings
-   ```
+Use one routing surface at a time:
+
+- `acr code` is per-session. It injects `ANTHROPIC_BASE_URL` only for the child
+  `claude` process. Nothing persists and there is nothing to revert.
+- `acr desktop on` is persistent. It updates Claude's settings file so future
+  Claude Code sessions that read `~/.claude/settings.json` route through acr
+  until you run `acr desktop off`.
+- `acr desktop off` restores the previous `ANTHROPIC_BASE_URL` value, or removes
+  acr's value if none existed before `on`.
+
+If `~/.claude/settings.json` already sets `ANTHROPIC_BASE_URL` for another proxy
+(for example Headroom), `acr desktop on` backs up that value before overwriting
+it. Mixing persistent settings with `acr code` is redundant and can make it
+unclear which proxy is receiving traffic; pick `acr code` for temporary terminal
+sessions or `acr desktop on` for persistent desktop/IDE routing.
+
+To inspect or change persistent routing:
+
+```bash
+acr desktop status
+acr desktop on
+acr desktop off
+```
+
+All desktop commands accept `--config PATH` for tests or alternate Claude
+settings stores.
+
+Troubleshooting: if Claude seems to ignore the proxy, check for a conflicting
+`ANTHROPIC_BASE_URL` in `~/.claude/settings.json` with `acr desktop status`,
+confirm the proxy is running with `acr status`, and inspect
+`~/.ai-calls-router/acr.log` to verify which proxy receives traffic.
 
 ## Commands
 

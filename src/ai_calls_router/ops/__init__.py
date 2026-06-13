@@ -1,4 +1,7 @@
-"""Operations layer: lifecycle and setup. daemon manages the background proxy
-process (pidfile, logs, health poll), and wizard drives the interactive `acr
-init` config flow. Depends on the _lib foundation and the routing layer.
+"""Operations layer: lifecycle, setup, and user-facing integrations.
+
+``daemon`` manages the background proxy process (pidfile, logs, health poll),
+``wizard`` drives the interactive ``acr init`` config flow, and ``desktop``
+manages persistent Claude settings routing. Depends on the _lib foundation and
+the routing layer.
 """

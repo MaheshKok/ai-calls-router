@@ -1,7 +1,7 @@
 """Command-line interface for the ai-calls-router proxy.
 
-Exposes the acr subcommands -- init, start, stop, status, code, savings,
-serve, version -- dispatching each to the daemon, wizard, ledger, and server
+Exposes the acr subcommands -- init, start, stop, status, code, desktop,
+savings, serve, and version -- while keeping the concrete work delegated to small
 modules through module references so every layer stays independently
 testable. Operational errors surface as exit code 1 with a message on stderr
 rather than a traceback; daemon state is reported through exit codes.
@@ -20,7 +20,7 @@ import uvicorn
 from ai_calls_router import __version__
 from ai_calls_router._lib import config
 from ai_calls_router.accounting import ledger
-from ai_calls_router.ops import daemon, wizard
+from ai_calls_router.ops import daemon, desktop, wizard
 from ai_calls_router.proxy import server
 from ai_calls_router.routing import decide as routing
 
@@ -66,6 +66,20 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status", help="Report daemon status.")
     code = subparsers.add_parser("code", help="Launch claude through the proxy.")
     code.add_argument("claude_args", nargs=argparse.REMAINDER)
+    desktop_parser = subparsers.add_parser(
+        "desktop", help="Manage persistent Claude settings routing."
+    )
+    desktop_subparsers = desktop_parser.add_subparsers(dest="desktop_command", required=True)
+    for action, help_text in (
+        ("on", "Persistently route Claude through the acr proxy."),
+        ("off", "Restore the previous persistent Claude routing setting."),
+        ("status", "Report persistent Claude routing state."),
+    ):
+        action_parser = desktop_subparsers.add_parser(action, help=help_text)
+        action_parser.add_argument(
+            "--config",
+            help="Claude settings JSON path (defaults to ~/.claude/settings.json).",
+        )
     subparsers.add_parser("savings", help="Show the routing savings report.")
     subparsers.add_parser("serve", help="Run the proxy in the foreground.")
     subparsers.add_parser("version", help="Print the acr version.")
@@ -131,6 +145,24 @@ def _cmd_code(args: argparse.Namespace) -> int:
     return result.returncode
 
 
+def _cmd_desktop(args: argparse.Namespace) -> int:
+    """Manage persistent Claude settings routing for desktop-style clients."""
+    settings_path = desktop.resolve_settings_path(args.config)
+    proxy_url = _listen_url()
+    try:
+        if args.desktop_command == "on":
+            result = desktop.enable(settings_path=settings_path, proxy_url=proxy_url)
+        elif args.desktop_command == "off":
+            result = desktop.disable(settings_path=settings_path, proxy_url=proxy_url)
+        else:
+            result = desktop.status(settings_path=settings_path, proxy_url=proxy_url)
+    except desktop.DesktopError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(result.message)
+    return 0
+
+
 def _cmd_savings(args: argparse.Namespace) -> int:
     """Print the aggregated routing savings report."""
     summary = ledger.aggregate(ledger.load_entries())
@@ -163,6 +195,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "stop": _cmd_stop,
     "status": _cmd_status,
     "code": _cmd_code,
+    "desktop": _cmd_desktop,
     "savings": _cmd_savings,
     "serve": _cmd_serve,
     "version": _cmd_version,
