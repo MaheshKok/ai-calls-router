@@ -226,6 +226,30 @@ class TestStop:
         assert (4242, 9) in recorder.signals
         assert not config.pid_path().exists()
 
+    def test_stop_tolerates_process_exiting_before_signal(
+        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A process that vanishes between the liveness probe and the signal
+        must not crash stop(): _signal swallows ProcessLookupError so the
+        pidfile is still cleaned up (daemon.py:192-193).
+
+        The kill stand-in reports the process as alive for signal 0 (the
+        liveness probe) but raises ProcessLookupError for any real signal,
+        modelling the race where the daemon dies just before SIGTERM lands.
+        """
+        config.pid_path().write_text("4242", encoding="utf-8")
+
+        def _kill(pid: int, sig: int) -> None:
+            if sig == 0:
+                return
+            raise ProcessLookupError(pid)
+
+        monkeypatch.setattr(os, "kill", _kill)
+        monkeypatch.setattr(daemon, "STOP_TIMEOUT_SECONDS", 0.05)
+
+        assert daemon.stop() is True
+        assert not config.pid_path().exists()
+
 
 class TestWaitHealthy:
     def test_returns_true_when_health_answers(

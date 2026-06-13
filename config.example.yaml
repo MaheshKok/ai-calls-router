@@ -45,31 +45,40 @@ settings:
 # environment variable holding that provider's API key (never the Anthropic
 # credential). `max_tokens` caps the routed completion.
 #
-# input_cost_per_1m / output_cost_per_1m are OPTIONAL price overrides in USD per
-# one million tokens. Supply them only when LiteLLM does not already price the
-# model (the `acr savings` ledger uses LiteLLM's own pricing table first). The
-# values below are PLACEHOLDERS -- verify against each provider's published
-# rates before trusting the savings report. An unpriced model is never guessed
-# at: it is simply omitted from the ledger.
+# input_cost_per_1m / output_cost_per_1m are price overrides in USD per one
+# million tokens; input_cached_cost_per_1m is the cheaper rate a provider bills
+# for prompt tokens served from its prefix cache. Supply prices when LiteLLM
+# does not already price the model (the `acr savings` ledger uses LiteLLM's own
+# table first). The DeepSeek tiers below route through DeepSeek's native
+# Anthropic endpoint -- bypassing LiteLLM entirely so consecutive turns keep
+# byte-identical prefixes for the provider's cache -- so their ids are not in
+# LiteLLM's table and the ledger depends on these overrides: cache hits bill at
+# input_cached_cost_per_1m, misses at input_cost_per_1m. The values are
+# PLACEHOLDERS -- verify against each provider's published rates before trusting
+# the savings report. An unpriced model is never guessed at: it is simply
+# omitted from the ledger.
 tiers:
   fast:
     model: deepseek/deepseek-v4-flash
     key_env: DEEPSEEK_API_KEY
     max_tokens: 8192
-    input_cost_per_1m: 0.28        # placeholder -- verify against published rates
-    output_cost_per_1m: 0.42       # placeholder -- verify against published rates
+    input_cost_per_1m: 0.14            # cache miss -- placeholder, verify
+    input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
+    output_cost_per_1m: 0.28           # placeholder, verify
   code:
     model: deepseek/deepseek-v4-pro
     key_env: DEEPSEEK_API_KEY
     max_tokens: 8192
-    input_cost_per_1m: 0.28        # placeholder -- verify against published rates
-    output_cost_per_1m: 0.42       # placeholder -- verify against published rates
+    input_cost_per_1m: 0.435           # cache miss -- placeholder, verify
+    input_cached_cost_per_1m: 0.003625 # cache hit  -- placeholder, verify
+    output_cost_per_1m: 0.87           # placeholder, verify
   crud:
     model: deepseek/deepseek-v4-flash
     key_env: DEEPSEEK_API_KEY
     max_tokens: 4096
-    input_cost_per_1m: 0.28        # placeholder -- verify against published rates
-    output_cost_per_1m: 0.42       # placeholder -- verify against published rates
+    input_cost_per_1m: 0.14            # cache miss -- placeholder, verify
+    input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
+    output_cost_per_1m: 0.28           # placeholder, verify
 
 # Tool -> tier mapping. Exact names match first, then trailing-`*` globs.
 # Any tool not listed here (and any unresolvable tool) routes to premium.

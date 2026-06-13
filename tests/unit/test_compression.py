@@ -351,3 +351,87 @@ class TestRtkIntegration:
         truncated = result["messages"][1]["content"][0]["content"]
         assert truncated.startswith("n" * 100)
         assert "truncated" in truncated
+
+
+class TestCompressBodyFailOpen:
+    """compress_body is an optimization, never a gate: any internal failure
+    returns the original body object unchanged so the turn still routes."""
+
+    def test_internal_error_returns_original_body_object(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When a helper raises after the guards pass, the original body is
+        returned (identity-equal), not a copy and not an exception
+        (compression.py:245-247).
+        """
+        body = {
+            "messages": [{"role": "user", "content": f"msg {i}"} for i in range(10)]
+        }
+        settings = {
+            "compress_routed": True,
+            "compression": {
+                "keep_recent_messages": 2,
+                "max_tool_result_chars": 100,
+            },
+        }
+
+        def _boom(_messages: Any) -> dict[str, str]:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(compression, "_tool_names_by_id", _boom)
+        result = compression.compress_body(body, settings)
+        assert result is body
+
+
+class TestMixedContentToolNameResolution:
+    """An assistant turn often interleaves a text block with its tool_use
+    block; tool-name resolution must skip the text block and still map the
+    tool_use id to its name so the matching tool_result is compressed."""
+
+    def test_text_block_is_skipped_and_tool_use_still_resolves(self) -> None:
+        """A text block in the assistant content list is skipped
+        (compression.py:93) while the sibling tool_use block populates the id
+        map, so the older tool_result is truncated to the char budget.
+        """
+        long_text = "x" * 500
+        body = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "let me run that"},
+                        {
+                            "type": "tool_use",
+                            "id": "t1",
+                            "name": "Bash",
+                            "input": {},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": long_text,
+                        }
+                    ],
+                },
+                *_padding(8),
+            ]
+        }
+        settings = {
+            "compress_routed": True,
+            "compression": {
+                "keep_recent_messages": 2,
+                "max_tool_result_chars": 100,
+                "use_rtk": "never",
+            },
+        }
+        result = compression.compress_body(body, settings)
+        truncated = result["messages"][1]["content"][0]["content"]
+        assert truncated.startswith("x" * 100)
+        assert "truncated" in truncated
+        # Immutability: the original body must be left untouched.
+        assert body["messages"][1]["content"][0]["content"] == long_text

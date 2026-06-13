@@ -14,7 +14,6 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-import pytest
 from starlette.responses import Response
 
 from ai_calls_router import passthrough as pt

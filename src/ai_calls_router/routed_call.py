@@ -1,13 +1,16 @@
 """Routed call engine: serve a tool-result turn on a cheap tier model.
 
 routed_call rewrites the client's Anthropic request for the tier model
-(_prepare_routed_body), sends it through litellm with only the tier API key,
-and converts the result back to Anthropic format. Responses that invoke a
-premium tool are discarded (escalates) so the caller replays the turn on
-premium passthrough, savings are recorded under the true routed model before
-the served body is masked to the client-requested model, and synthesize_sse
-renders the finished response as the Messages SSE stream streaming clients
-expect. Every failure path returns None so routing never breaks a turn.
+(_prepare_routed_body) and serves it on one of two paths: providers with a
+native Anthropic endpoint (DeepSeek) receive the body directly -- no LiteLLM
+conversion, no compression -- so consecutive tool-result turns keep
+byte-identical prefixes for the provider's prefix cache; every other provider
+goes through LiteLLM with built-in compression. Responses that invoke a premium
+tool are discarded (escalates) so the caller replays the turn on premium
+passthrough, savings are recorded under the true routed model before the served
+body is masked to the client-requested model, and synthesize_sse renders the
+finished response as the Messages SSE stream streaming clients expect. Every
+failure path returns None so routing never breaks a turn.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ import logging
 import time
 from typing import Any
 
-from ai_calls_router import compression, savings
+from ai_calls_router import anthropic_direct, compression, savings
 from ai_calls_router.conversion import (
     BackendResponse,
     completion_kwargs,
@@ -106,6 +109,61 @@ def escalates(response_body: dict[str, Any], settings: dict[str, Any]) -> bool:
     )
 
 
+async def _serve_via_litellm(
+    body: dict[str, Any],
+    tier_cfg: dict[str, Any],
+    api_key: str,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    """Serve a turn through LiteLLM with built-in compression.
+
+    Compresses old tool results, rewrites the body for the tier model,
+    converts it to OpenAI format, calls the provider through litellm with only
+    the tier key, and converts the result back to Anthropic format. This is the
+    provider-agnostic path for every provider without a native Anthropic
+    endpoint.
+
+    Args:
+        body: Anthropic-format request body from the client.
+        tier_cfg: Tier config with "model" and optional "max_tokens".
+        api_key: The tier API key.
+        settings: The config "settings" section (drives compression).
+
+    Returns:
+        The routed response in Anthropic format, tagged with the tier model.
+    """
+    compressed = compression.compress_body(body, settings)
+    routed_body = _prepare_routed_body(compressed, tier_cfg)
+    kwargs = completion_kwargs(routed_body, api_key)
+    litellm = load_litellm()
+    raw = await litellm.acompletion(**kwargs)
+    return to_anthropic_response(raw, tier_cfg["model"])
+
+
+async def _serve_via_direct(
+    body: dict[str, Any],
+    tier_cfg: dict[str, Any],
+    api_key: str,
+) -> dict[str, Any] | None:
+    """Serve a turn directly on the provider's native Anthropic endpoint.
+
+    Skips compression and LiteLLM conversion entirely so consecutive
+    tool-result turns keep byte-identical prefixes, letting the provider's
+    prefix cache do the work its own caching outperforms our compression.
+
+    Args:
+        body: Anthropic-format request body from the client.
+        tier_cfg: Tier config with "model" and optional "max_tokens".
+        api_key: The tier API key.
+
+    Returns:
+        The routed response in Anthropic format, or None when the direct call
+        fails (non-200, transport error) and the turn must pass through.
+    """
+    routed_body = _prepare_routed_body(body, tier_cfg)
+    return await anthropic_direct.direct_call(routed_body, tier_cfg, api_key)
+
+
 async def routed_call(
     body: dict[str, Any],
     tier_name: str,
@@ -115,11 +173,12 @@ async def routed_call(
 ) -> BackendResponse | None:
     """Serve a request on the tier model, falling back to None on any failure.
 
-    Compresses old tool results, rewrites the body for the tier model, calls
-    the provider through litellm with only the tier API key, and converts the
-    result to Anthropic format. Escalating responses (premium tool calls) are
-    discarded. On success, savings are recorded under the true routed model
-    and the served body is then masked to claim the client-requested model.
+    Dispatches on the tier model: providers with a native Anthropic endpoint
+    (DeepSeek) are served directly with no compression or LiteLLM conversion;
+    every other provider goes through LiteLLM. Escalating responses (premium
+    tool calls) are discarded. On success, savings are recorded under the true
+    routed model and the served body is then masked to claim the
+    client-requested model.
 
     Args:
         body: Anthropic-format request body from the client.
@@ -133,20 +192,31 @@ async def routed_call(
         caller must replay the turn on premium passthrough.
     """
     premium_model = body.get("model")
+    model = tier_cfg.get("model")
+    direct = anthropic_direct.direct_endpoint(model) is not None
     try:
-        compressed = compression.compress_body(body, settings)
-        routed_body = _prepare_routed_body(compressed, tier_cfg)
-        kwargs = completion_kwargs(routed_body, api_key)
-        litellm = load_litellm()
         started = time.monotonic()
-        raw = await litellm.acompletion(**kwargs)
+        if direct:
+            anthropic_body = await _serve_via_direct(body, tier_cfg, api_key)
+        else:
+            anthropic_body = await _serve_via_litellm(
+                body, tier_cfg, api_key, settings
+            )
         elapsed = time.monotonic() - started
-        anthropic_body = to_anthropic_response(raw, tier_cfg["model"])
+        if anthropic_body is None:
+            logger.warning(
+                "acr: tier=%s model=%s direct call returned no body (%.2fs);"
+                " passing through",
+                tier_name,
+                model,
+                elapsed,
+            )
+            return None
         if escalates(anthropic_body, settings):
             logger.info(
                 "acr: tier=%s model=%s escalated to premium (%.2fs)",
                 tier_name,
-                tier_cfg["model"],
+                model,
                 elapsed,
             )
             return None
@@ -154,19 +224,20 @@ async def routed_call(
         logger.warning(
             "acr: tier=%s model=%s routed call failed (%s); passing through",
             tier_name,
-            tier_cfg.get("model"),
+            model,
             exc,
         )
         return None
 
     logger.info(
-        "acr: /v1/messages -> tier=%s model=%s (%.2fs)",
+        "acr: /v1/messages -> tier=%s model=%s%s (%.2fs)",
         tier_name,
-        tier_cfg["model"],
+        model,
+        " [direct]" if direct else "",
         elapsed,
     )
     savings.record_savings_from_response(
-        premium_model, tier_cfg["model"], anthropic_body
+        premium_model, model, anthropic_body, tier_cfg=tier_cfg
     )
     if isinstance(premium_model, str) and premium_model:
         anthropic_body = {**anthropic_body, "model": premium_model}

@@ -66,7 +66,7 @@ For local development:
 ```bash
 make install   # creates .venv, installs the package with dev extras
 make test      # run the suite
-make coverage  # suite with coverage, fails under 80%
+make coverage  # suite with coverage, fails under 98%
 ```
 
 ## Quick start

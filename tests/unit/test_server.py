@@ -19,8 +19,8 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from ai_calls_router import routing
 from ai_calls_router import routed_call as rc
+from ai_calls_router import routing
 from ai_calls_router.conversion import BackendResponse
 from ai_calls_router.server import create_app
 

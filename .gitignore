@@ -6,6 +6,9 @@ build/
 *.egg-info/
 .pytest_cache/
 .coverage
+coverage.json
+htmlcov/
 .ruff_cache/
 .claude/
+.serena/
 .idea/

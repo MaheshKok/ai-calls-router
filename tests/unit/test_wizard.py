@@ -98,6 +98,15 @@ class TestAnswers:
         path = wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", "not-a-port"]))
         assert _written_config(path)["server"]["port"] == config.DEFAULT_PORT
 
+    def test_out_of_range_port_falls_back_to_default(self, acr_home: Path) -> None:
+        """A numeric-but-out-of-range port (>65535) is rejected for the default.
+
+        "70000" passes the isdigit() guard but fails the 1..65535 range check,
+        exercising the second fallback branch in _ask_port (wizard.py:99).
+        """
+        path = wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", "70000"]))
+        assert _written_config(path)["server"]["port"] == config.DEFAULT_PORT
+
     def test_unknown_provider_falls_back_to_default_preset(
         self, acr_home: Path
     ) -> None:
@@ -142,7 +151,64 @@ class TestCustomProvider:
         written = _written_config(path)
         for tier in ("fast", "code", "crud"):
             assert "input_cost_per_1m" not in written["tiers"][tier]
+            assert "input_cached_cost_per_1m" not in written["tiers"][tier]
             assert "output_cost_per_1m" not in written["tiers"][tier]
+
+
+class TestPresetPricing:
+    """DeepSeek routes through its native endpoint (bypassing LiteLLM), so the
+    generated config must carry cache-aware prices for it; LiteLLM-routed
+    presets must not, leaving pricing to LiteLLM's own table."""
+
+    def test_deepseek_preset_writes_cache_aware_prices(self, acr_home: Path) -> None:
+        path = wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""]))
+        tiers = _written_config(path)["tiers"]
+        for tier in ("fast", "code", "crud"):
+            cfg = tiers[tier]
+            miss = cfg["input_cost_per_1m"]
+            hit = cfg["input_cached_cost_per_1m"]
+            out = cfg["output_cost_per_1m"]
+            assert all(isinstance(v, (int, float)) for v in (miss, hit, out))
+            assert miss > 0 and hit > 0 and out > 0
+            # The whole point of the direct path: a cache hit is far cheaper
+            # than a miss. A swapped hit/miss rate fails here.
+            assert hit < miss
+
+    def test_deepseek_code_tier_pricier_than_fast_tier(self, acr_home: Path) -> None:
+        # The code tier runs the pro model; it must not be cheaper than fast,
+        # which would mean the flash/pro prices were transposed.
+        tiers = _written_config(
+            wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""]))
+        )["tiers"]
+        assert tiers["code"]["input_cost_per_1m"] >= tiers["fast"]["input_cost_per_1m"]
+
+    def test_deepseek_prices_match_example_config(self, acr_home: Path) -> None:
+        # The wizard preset and the shipped config.example.yaml must agree so
+        # the documented rates are exactly what `acr init` writes.
+        example = yaml.safe_load(
+            (Path(__file__).resolve().parents[2] / "config.example.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        written = _written_config(
+            wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""]))
+        )
+        price_keys = (
+            "input_cost_per_1m",
+            "input_cached_cost_per_1m",
+            "output_cost_per_1m",
+        )
+        for tier in ("fast", "code", "crud"):
+            for key in price_keys:
+                assert written["tiers"][tier][key] == example["tiers"][tier][key]
+
+    def test_groq_preset_carries_no_price_overrides(self, acr_home: Path) -> None:
+        path = wizard.run_wizard(ask=_ScriptedAsk(["groq", "", ""]))
+        tiers = _written_config(path)["tiers"]
+        for tier in ("fast", "code", "crud"):
+            assert "input_cost_per_1m" not in tiers[tier]
+            assert "input_cached_cost_per_1m" not in tiers[tier]
+            assert "output_cost_per_1m" not in tiers[tier]
 
 
 class TestOverwrite:

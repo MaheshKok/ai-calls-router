@@ -20,8 +20,8 @@ test: ## Run the test suite
 lint: ## Run ruff checks
 	$(PY) -m ruff check src tests
 
-coverage: ## Run tests with coverage report (fails under 80%)
-	$(PY) -m pytest -q --cov --cov-report=term-missing --cov-fail-under=80
+coverage: ## Run tests with coverage report (fails under 98%)
+	$(PY) -m pytest -q --cov --cov-report=term-missing --cov-fail-under=98
 
 build: ## Build sdist and wheel into dist/
 	$(PY) -m build

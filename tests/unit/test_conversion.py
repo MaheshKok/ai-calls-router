@@ -22,7 +22,9 @@ import pytest
 from ai_calls_router import conversion
 
 GOLDEN: dict[str, Any] = json.loads(
-    (Path(__file__).parent / "fixtures" / "conversion_golden.json").read_text(encoding="utf-8")
+    (Path(__file__).resolve().parent.parent / "fixtures" / "conversion_golden.json").read_text(
+        encoding="utf-8"
+    )
 )
 
 MSG_ID_PATTERN = re.compile(r"^msg_[0-9a-f]{24}$")

@@ -20,12 +20,16 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from acr_testkit import FakeLitellm
+from acr_testkit import make_response as _fake_response
 
 from ai_calls_router import routed_call as rc
 from ai_calls_router import savings
 
-CHEAP_MODEL = "deepseek/acr-test-cheap"
-PREMIUM_MODEL = "deepseek/acr-test-premium"
+# Non-DeepSeek ids keep these tests on the LiteLLM path: DeepSeek tier models
+# are diverted to the native direct path (see TestRoutedCallDeepSeekDirect).
+CHEAP_MODEL = "groq/acr-test-cheap"
+PREMIUM_MODEL = "groq/acr-test-premium"
 
 PRICED_ROUTES: dict[str, Any] = {
     "tiers": {
@@ -91,40 +95,9 @@ def _fake_tool_call(call_id: str, name: str, arguments: str) -> Any:
     )
 
 
-def _fake_response(
-    text: str | None = "done",
-    tool_calls: list[Any] | None = None,
-    finish_reason: str = "stop",
-    prompt_tokens: int = 1000,
-    completion_tokens: int = 200,
-) -> Any:
-    """Build a litellm ModelResponse stand-in (attribute access only)."""
-    message = SimpleNamespace(content=text, tool_calls=tool_calls)
-    choice = SimpleNamespace(message=message, finish_reason=finish_reason)
-    usage = SimpleNamespace(
-        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
-    )
-    return SimpleNamespace(choices=[choice], usage=usage)
-
-
-class _FakeLitellm:
-    """litellm module stand-in capturing acompletion kwargs."""
-
-    def __init__(self, response: Any = None, error: Exception | None = None) -> None:
-        self.calls: list[dict[str, Any]] = []
-        self._response = response
-        self._error = error
-
-    async def acompletion(self, **kwargs: Any) -> Any:
-        self.calls.append(kwargs)
-        if self._error is not None:
-            raise self._error
-        return self._response
-
-
 def _call(
     monkeypatch: pytest.MonkeyPatch,
-    fake: _FakeLitellm,
+    fake: FakeLitellm,
     body: dict[str, Any] | None = None,
     settings: dict[str, Any] | None = None,
     api_key: str = "test-tier-key",
@@ -262,7 +235,7 @@ class TestRoutedCall:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Invariant 1: the served body claims the client-requested model.
-        response = _call(monkeypatch, _FakeLitellm(_fake_response()))
+        response = _call(monkeypatch, FakeLitellm(_fake_response()))
         assert response is not None
         assert response.status_code == 200
         assert response.body["model"] == PREMIUM_MODEL
@@ -271,7 +244,7 @@ class TestRoutedCall:
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
     ) -> None:
         # Invariant 4: accounting reads the true routed model, pre-mask.
-        _call(monkeypatch, _FakeLitellm(_fake_response()))
+        _call(monkeypatch, FakeLitellm(_fake_response()))
         entries = [json.loads(line) for line in ledger_file.read_text().splitlines()]
         assert len(entries) == 1
         assert entries[0]["routed_model"] == CHEAP_MODEL
@@ -280,20 +253,20 @@ class TestRoutedCall:
 
     def test_provider_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Invariant 3: every failure path falls back to passthrough.
-        response = _call(monkeypatch, _FakeLitellm(error=RuntimeError("boom")))
+        response = _call(monkeypatch, FakeLitellm(error=RuntimeError("boom")))
         assert response is None
 
     def test_no_ledger_entry_when_provider_fails(
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
     ) -> None:
-        _call(monkeypatch, _FakeLitellm(error=RuntimeError("boom")))
+        _call(monkeypatch, FakeLitellm(error=RuntimeError("boom")))
         assert not ledger_file.exists()
 
     def test_escalating_response_returns_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         tool_calls = [_fake_tool_call("c1", "Edit", '{"file_path": "x"}')]
-        fake = _FakeLitellm(
+        fake = FakeLitellm(
             _fake_response(text=None, tool_calls=tool_calls, finish_reason="tool_calls")
         )
         assert _call(monkeypatch, fake) is None
@@ -302,7 +275,7 @@ class TestRoutedCall:
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
     ) -> None:
         tool_calls = [_fake_tool_call("c1", "Write", '{"file_path": "x"}')]
-        fake = _FakeLitellm(
+        fake = FakeLitellm(
             _fake_response(text=None, tool_calls=tool_calls, finish_reason="tool_calls")
         )
         _call(monkeypatch, fake)
@@ -312,7 +285,7 @@ class TestRoutedCall:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         tool_calls = [_fake_tool_call("c1", "Bash", '{"command": "ls"}')]
-        fake = _FakeLitellm(
+        fake = FakeLitellm(
             _fake_response(text=None, tool_calls=tool_calls, finish_reason="tool_calls")
         )
         response = _call(monkeypatch, fake)
@@ -326,21 +299,21 @@ class TestRoutedCall:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Invariant 2: routed calls carry only the tier key.
-        fake = _FakeLitellm(_fake_response())
+        fake = FakeLitellm(_fake_response())
         _call(monkeypatch, fake, api_key="test-tier-key")
         kwargs = fake.calls[0]
         assert kwargs["api_key"] == "test-tier-key"
         assert not any("auth" in key.lower() for key in kwargs)
 
     def test_stream_flag_not_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        fake = _FakeLitellm(_fake_response())
+        fake = FakeLitellm(_fake_response())
         _call(monkeypatch, fake)
         assert "stream" not in fake.calls[0]
 
     def test_max_tokens_clamped_in_provider_call(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        fake = _FakeLitellm(_fake_response())
+        fake = FakeLitellm(_fake_response())
         _call(monkeypatch, fake)
         assert fake.calls[0]["max_tokens"] == 8192
         assert fake.calls[0]["model"] == CHEAP_MODEL
@@ -384,7 +357,7 @@ class TestRoutedCall:
                 "use_rtk": "never",
             },
         }
-        fake = _FakeLitellm(_fake_response())
+        fake = FakeLitellm(_fake_response())
         _call(monkeypatch, fake, body=body, settings=settings)
         sent = fake.calls[0]["messages"]
         old_result = next(m for m in sent if m.get("tool_call_id") == "t1")
@@ -397,10 +370,228 @@ class TestRoutedCall:
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
     ) -> None:
         # Invariant 5: no fabricated costs; zero-token usage writes nothing.
-        fake = _FakeLitellm(_fake_response(prompt_tokens=0, completion_tokens=0))
+        fake = FakeLitellm(_fake_response(prompt_tokens=0, completion_tokens=0))
         response = _call(monkeypatch, fake)
         assert response is not None
         assert not ledger_file.exists()
+
+
+# --- DeepSeek direct path -------------------------------------------------
+
+DS_MODEL = "deepseek/deepseek-v4-pro"
+
+# Cache-aware tier prices: misses cost 120x a hit, exercised by the savings math.
+DS_TIER: dict[str, Any] = {
+    "model": DS_MODEL,
+    "max_tokens": 8192,
+    "input_cost_per_1m": 0.435,
+    "input_cached_cost_per_1m": 0.003625,
+    "output_cost_per_1m": 0.87,
+}
+
+
+def _direct_body(
+    *,
+    text: str | None = "routed reply",
+    input_tokens: int = 200,
+    output_tokens: int = 50,
+    cache_read: int = 0,
+    cache_creation: int = 0,
+    tool_name: str | None = None,
+) -> dict[str, Any]:
+    """Build a DeepSeek-native Anthropic response body with a cache usage block.
+
+    The model field carries the native id (no provider prefix), mirroring what
+    the DeepSeek endpoint actually returns, so masking has something to rewrite.
+    """
+    if tool_name is not None:
+        content: list[dict[str, Any]] = [
+            {"type": "tool_use", "id": "t9", "name": tool_name, "input": {}}
+        ]
+    else:
+        content = [{"type": "text", "text": text or ""}]
+    return {
+        "id": "msg_ds",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-v4-pro",
+        "content": content,
+        "stop_reason": "tool_use" if tool_name else "end_turn",
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation,
+        },
+    }
+
+
+def _call_direct(
+    monkeypatch: pytest.MonkeyPatch,
+    direct_response: dict[str, Any] | None | Exception,
+    *,
+    body: dict[str, Any] | None = None,
+    settings: dict[str, Any] | None = None,
+    api_key: str = "ds-tier-key",
+    tier_cfg: dict[str, Any] | None = None,
+) -> tuple[Any, dict[str, Any], list[Any]]:
+    """Run routed_call on the DeepSeek direct path with direct_call stubbed.
+
+    Guards that the direct path never touches LiteLLM or the compressor, and
+    captures the arguments handed to direct_call so the caller can assert
+    credential isolation and body preparation.
+
+    Returns:
+        (routed_call result, captured direct_call args, compressor call log).
+    """
+    captured: dict[str, Any] = {}
+
+    async def _fake_direct(
+        prepared: dict[str, Any], cfg: dict[str, Any], key: str, **_kw: Any
+    ) -> dict[str, Any] | None:
+        captured["body"] = prepared
+        captured["tier_cfg"] = cfg
+        captured["api_key"] = key
+        if isinstance(direct_response, Exception):
+            raise direct_response
+        return direct_response
+
+    def _no_litellm() -> Any:
+        raise AssertionError("load_litellm must not run on the direct path")
+
+    compress_calls: list[Any] = []
+
+    def _spy_compress(b: dict[str, Any], s: dict[str, Any]) -> dict[str, Any]:
+        compress_calls.append(b)
+        return b
+
+    monkeypatch.setattr(rc.anthropic_direct, "direct_call", _fake_direct)
+    monkeypatch.setattr(rc, "load_litellm", _no_litellm)
+    monkeypatch.setattr(rc.compression, "compress_body", _spy_compress)
+
+    result = asyncio.run(
+        rc.routed_call(
+            body if body is not None else _request_body(),
+            "code",
+            tier_cfg if tier_cfg is not None else DS_TIER,
+            api_key,
+            settings if settings is not None else SETTINGS,
+        )
+    )
+    return result, captured, compress_calls
+
+
+class TestRoutedCallDeepSeekDirect:
+    def test_deepseek_tier_takes_direct_path_not_litellm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The guard in _call_direct raises if load_litellm runs; reaching a
+        # served response proves the DeepSeek tier bypassed LiteLLM entirely.
+        result, captured, _ = _call_direct(monkeypatch, _direct_body())
+        assert result is not None
+        assert captured["api_key"] == "ds-tier-key"
+
+    def test_direct_path_skips_compression(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DeepSeek's prefix cache outperforms our compression, so the direct
+        # path must never compress -- compressing would break byte-identical
+        # prefixes and defeat the cache.
+        settings = {**SETTINGS, "compress_routed": True}
+        _, _, compress_calls = _call_direct(
+            monkeypatch, _direct_body(), settings=settings
+        )
+        assert compress_calls == []
+
+    def test_direct_path_prepares_body_and_strips_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # _prepare_routed_body still runs: model swapped to the tier id, the
+        # stream flag dropped, max_tokens clamped to the tier ceiling.
+        _, captured, _ = _call_direct(monkeypatch, _direct_body())
+        sent = captured["body"]
+        assert sent["model"] == DS_MODEL
+        assert "stream" not in sent
+        assert sent["max_tokens"] == 8192
+
+    def test_direct_path_forwards_only_tier_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Invariant 2: the client's credential never reaches the routed
+        # provider; only the tier key is handed to direct_call.
+        _, captured, _ = _call_direct(
+            monkeypatch, _direct_body(), api_key="only-the-tier-key"
+        )
+        assert captured["api_key"] == "only-the-tier-key"
+
+    def test_direct_path_masks_response_to_client_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Invariant 1: the served body claims the client-requested model, not
+        # the DeepSeek native id the endpoint returned.
+        result, _, _ = _call_direct(monkeypatch, _direct_body())
+        assert result.body["model"] == PREMIUM_MODEL
+
+    def test_direct_path_escalates_on_premium_tool(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result, _, _ = _call_direct(
+            monkeypatch, _direct_body(text=None, tool_name="Edit")
+        )
+        assert result is None
+
+    def test_direct_path_no_ledger_entry_when_escalated(
+        self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
+    ) -> None:
+        _call_direct(monkeypatch, _direct_body(text=None, tool_name="Write"))
+        assert not ledger_file.exists()
+
+    def test_direct_path_none_response_falls_through(
+        self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
+    ) -> None:
+        # Invariant 3: a failed direct call (None) must fall back to passthrough
+        # and record nothing.
+        result, _, _ = _call_direct(monkeypatch, None)
+        assert result is None
+        assert not ledger_file.exists()
+
+    def test_direct_path_exception_falls_through(
+        self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
+    ) -> None:
+        result, _, _ = _call_direct(monkeypatch, RuntimeError("transport down"))
+        assert result is None
+        assert not ledger_file.exists()
+
+    def test_direct_path_records_cache_aware_savings(
+        self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
+    ) -> None:
+        # 900k cache-read tokens billed at the hit rate, 100k creation at the
+        # miss rate, 1k output. Premium counterfactual prices the full 1M prompt
+        # at groq/acr-test-premium (10/20 per 1M).
+        #   routed = 100_000*0.435/1e6 + 900_000*0.003625/1e6 + 1_000*0.87/1e6
+        #          = 0.0435 + 0.0032625 + 0.00087 = 0.0476325
+        #   premium = 1_000_000*10/1e6 + 1_000*20/1e6 = 10.00 + 0.02 = 10.02
+        result, _, _ = _call_direct(
+            monkeypatch,
+            _direct_body(
+                input_tokens=0,
+                output_tokens=1_000,
+                cache_read=900_000,
+                cache_creation=100_000,
+            ),
+        )
+        assert result is not None
+        entries = [json.loads(line) for line in ledger_file.read_text().splitlines()]
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["routed_model"] == DS_MODEL
+        assert entry["premium_model"] == PREMIUM_MODEL
+        assert entry["input_tokens"] == 1_000_000
+        assert entry["cache_read_input_tokens"] == 900_000
+        assert entry["cache_creation_input_tokens"] == 100_000
+        assert entry["routed_usd"] == pytest.approx(0.0476325, abs=1e-7)
+        assert entry["premium_usd"] == pytest.approx(10.02, abs=1e-6)
+        assert entry["saved_usd"] == pytest.approx(9.9723675, abs=1e-6)
 
 
 def _parse_sse(payload: bytes) -> list[tuple[str, dict[str, Any]]]:

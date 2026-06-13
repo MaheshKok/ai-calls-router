@@ -47,6 +47,13 @@ packages = ["src/ai_calls_router"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "--import-mode=importlib"
+pythonpath = ["tests"]
+markers = [
+    "unit: unit-level test (single module, fully isolated).",
+    "integration: integration-level test (full app, mocked network boundaries).",
+    "e2e: end-to-end test (HTTP surface or subprocess entry point).",
+]
 
 [tool.ruff]
 line-length = 100

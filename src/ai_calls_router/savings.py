@@ -94,51 +94,114 @@ def register_tier_prices(routes: dict[str, Any]) -> None:
         logger.warning("tier price registration failed: %s", exc)
 
 
+def _routed_prices_from_tier(
+    tier_cfg: Any,
+) -> tuple[float, float, float] | None:
+    """Derive per-token (miss, cached, output) rates from a tier config.
+
+    The DeepSeek direct path bills cache hits at a separate, far cheaper read
+    rate than cache misses, which LiteLLM's single input price cannot express.
+    When the tier declares numeric input and output prices, this returns the
+    three per-token rates so cache hits are priced honestly; a cache-read price
+    is used when declared, otherwise the miss rate (a conservative upper bound
+    that never overstates savings). Returns None when the tier lacks numeric
+    prices, signalling the LiteLLM single-rate path instead.
+
+    Args:
+        tier_cfg: Tier config mapping, or None on the LiteLLM path.
+
+    Returns:
+        (miss_per_token, cached_per_token, output_per_token) or None.
+    """
+    if not isinstance(tier_cfg, dict):
+        return None
+    input_per_1m = tier_cfg.get("input_cost_per_1m")
+    output_per_1m = tier_cfg.get("output_cost_per_1m")
+    if not _is_number(input_per_1m) or not _is_number(output_per_1m):
+        return None
+    cached_per_1m = tier_cfg.get("input_cached_cost_per_1m")
+    if not _is_number(cached_per_1m):
+        cached_per_1m = input_per_1m
+    return (
+        float(input_per_1m) / 1_000_000,
+        float(cached_per_1m) / 1_000_000,
+        float(output_per_1m) / 1_000_000,
+    )
+
+
 def record_routing_savings(
     premium_model: str | None,
     routed_model: str,
     input_tokens: int,
     output_tokens: int,
     ledger: Path | None = None,
+    *,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    routed_prices: tuple[float, float, float] | None = None,
 ) -> None:
     """Append one savings entry comparing routed cost against premium cost.
 
     Skips silently when the premium model is missing or equal to the routed
-    model (no substitution happened), or when either side cannot be priced
-    by LiteLLM -- a savings figure is only written when both costs are real
-    and the premium cost is positive. Never raises.
+    model (no substitution happened), or when either side cannot be priced --
+    a savings figure is only written when both costs are real and the premium
+    cost is positive. Token counts are reconciled cache-aware: cache_read
+    tokens are billed at the cheap cached rate, while reported input plus
+    cache_creation tokens are billed at the miss rate; the premium
+    counterfactual always prices the entire prompt at the premium standard
+    rate. When routed_prices is given those per-token rates bill the routed
+    side; otherwise LiteLLM prices the full prompt at its single input rate.
+    Never raises.
 
     Args:
         premium_model: Model the client originally requested.
         routed_model: Model that actually served the call (true id, unmasked).
-        input_tokens: Prompt tokens reported by the routed response.
+        input_tokens: Non-cached prompt tokens reported by the routed response.
         output_tokens: Completion tokens reported by the routed response.
         ledger: Ledger path override; defaults to config.ledger_path().
+        cache_read_tokens: Tokens served from the provider's prefix cache.
+        cache_creation_tokens: Tokens written into the prefix cache this turn.
+        routed_prices: Optional (miss, cached, output) per-token rates for the
+            routed side; when None, LiteLLM prices the full prompt instead.
     """
     if not premium_model or premium_model == routed_model:
         return
     try:
+        hit_tokens = max(int(cache_read_tokens), 0)
+        miss_tokens = max(int(input_tokens), 0) + max(int(cache_creation_tokens), 0)
+        total_input = hit_tokens + miss_tokens
+        output_tokens = max(int(output_tokens), 0)
         litellm = load_litellm()
-        routed_in, routed_out = litellm.cost_per_token(
-            model=routed_model,
-            prompt_tokens=input_tokens,
-            completion_tokens=output_tokens,
-        )
         premium_in, premium_out = litellm.cost_per_token(
             model=premium_model,
-            prompt_tokens=input_tokens,
+            prompt_tokens=total_input,
             completion_tokens=output_tokens,
         )
-        routed_usd = routed_in + routed_out
         premium_usd = premium_in + premium_out
         if premium_usd <= 0:
             return
+        if routed_prices is not None:
+            miss_rate, cached_rate, out_rate = routed_prices
+            routed_usd = (
+                miss_tokens * miss_rate
+                + hit_tokens * cached_rate
+                + output_tokens * out_rate
+            )
+        else:
+            routed_in, routed_out = litellm.cost_per_token(
+                model=routed_model,
+                prompt_tokens=total_input,
+                completion_tokens=output_tokens,
+            )
+            routed_usd = routed_in + routed_out
         entry = {
             "ts": int(time.time()),
             "premium_model": premium_model,
             "routed_model": routed_model,
-            "input_tokens": input_tokens,
+            "input_tokens": total_input,
             "output_tokens": output_tokens,
+            "cache_read_input_tokens": hit_tokens,
+            "cache_creation_input_tokens": max(int(cache_creation_tokens), 0),
             "routed_usd": round(routed_usd, 8),
             "premium_usd": round(premium_usd, 8),
             "saved_usd": round(premium_usd - routed_usd, 8),
@@ -157,21 +220,39 @@ def record_savings_from_response(
     routed_model: str,
     response_body: Any,
     ledger: Path | None = None,
+    *,
+    tier_cfg: Any = None,
 ) -> None:
     """Record savings using token counts taken from a routed response body.
+
+    Extracts the Anthropic usage breakdown -- including cache_read and
+    cache_creation tokens emitted by the DeepSeek direct path -- and prices the
+    routed side cache-aware when the tier declares numeric prices.
 
     Args:
         premium_model: Model the client originally requested.
         routed_model: Model that actually served the call.
         response_body: Anthropic-format response body carrying a usage block.
         ledger: Ledger path override; defaults to config.ledger_path().
+        tier_cfg: Tier config; supplies cache-aware per-token rates when present.
     """
     try:
         usage = response_body.get("usage") if isinstance(response_body, dict) else None
         usage = usage if isinstance(usage, dict) else {}
         input_tokens = int(usage.get("input_tokens", 0) or 0)
         output_tokens = int(usage.get("output_tokens", 0) or 0)
+        cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+        cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
     except Exception as exc:
         logger.warning("usage extraction failed: %s", exc)
         return
-    record_routing_savings(premium_model, routed_model, input_tokens, output_tokens, ledger)
+    record_routing_savings(
+        premium_model,
+        routed_model,
+        input_tokens,
+        output_tokens,
+        ledger,
+        cache_read_tokens=cache_read,
+        cache_creation_tokens=cache_creation,
+        routed_prices=_routed_prices_from_tier(tier_cfg),
+    )

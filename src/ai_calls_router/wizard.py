@@ -4,8 +4,10 @@ Interviews the user through an injectable ask function -- provider preset
 (deepseek, groq, kimi, openrouter) or fully custom per-tier models, key
 environment variable, and listen port -- and writes a complete config.yaml
 that the proxy can serve immediately, with an overwrite confirmation when a
-config already exists. Presets never carry price overrides: cost accounting
-relies on LiteLLM's own pricing table so the ledger never fabricates numbers.
+config already exists. LiteLLM-routed presets carry no price overrides (cost
+accounting uses LiteLLM's own table); the DeepSeek preset carries cache-aware
+overrides because its native Anthropic endpoint bypasses LiteLLM, leaving its
+ids unpriced unless the config supplies the rates.
 """
 
 from __future__ import annotations
@@ -46,6 +48,34 @@ PRESETS: dict[str, dict[str, str]] = {
         "code": "openrouter/moonshotai/kimi-k2",
         "crud": "openrouter/qwen/qwen3-coder",
         "key_env": "OPENROUTER_API_KEY",
+    },
+}
+
+# Cache-aware price overrides (USD per 1M tokens) for direct-endpoint presets.
+# DeepSeek serves its native Anthropic endpoint directly, bypassing LiteLLM, so
+# its fictional V4 ids are absent from LiteLLM's pricing table; without these
+# the cache-aware ledger has nothing to price the routed side with and stays
+# empty. Cache reads bill at input_cached_cost_per_1m, misses at
+# input_cost_per_1m. PLACEHOLDERS -- verify against DeepSeek's published rates.
+# LiteLLM-routed presets (groq, kimi, openrouter) intentionally appear here with
+# no entry so they rely on LiteLLM's own table.
+PRESET_PRICES: dict[str, dict[str, dict[str, float]]] = {
+    "deepseek": {
+        "fast": {
+            "input_cost_per_1m": 0.14,
+            "input_cached_cost_per_1m": 0.0028,
+            "output_cost_per_1m": 0.28,
+        },
+        "code": {
+            "input_cost_per_1m": 0.435,
+            "input_cached_cost_per_1m": 0.003625,
+            "output_cost_per_1m": 0.87,
+        },
+        "crud": {
+            "input_cost_per_1m": 0.14,
+            "input_cached_cost_per_1m": 0.0028,
+            "output_cost_per_1m": 0.28,
+        },
     },
 }
 
@@ -142,23 +172,30 @@ def _default_key_env(provider: str, models: dict[str, str]) -> str:
     return f"{prefix.upper().replace('-', '_')}_API_KEY"
 
 
-def _build_config(port: int, models: dict[str, str], key_env: str) -> dict[str, Any]:
+def _build_config(
+    port: int, models: dict[str, str], key_env: str, provider: str
+) -> dict[str, Any]:
     """Assemble the full config.yaml mapping.
 
     Args:
         port: Proxy listen port.
         models: Per-tier LiteLLM model ids.
         key_env: API key environment variable shared by all tiers.
+        provider: Normalized provider answer; selects cache-aware price
+            overrides from PRESET_PRICES for direct-endpoint presets.
 
     Returns:
-        The config mapping ready to serialize as YAML. Tiers carry no price
-        overrides; LiteLLM's pricing table is the only cost source.
+        The config mapping ready to serialize as YAML. Direct-endpoint presets
+        carry cache-aware price overrides; every other tier omits prices so
+        LiteLLM's pricing table is the only cost source.
     """
+    prices = PRESET_PRICES.get(provider, {})
     tiers = {
         tier: {
             "model": models[tier],
             "key_env": key_env,
             "max_tokens": TIER_MAX_TOKENS[tier],
+            **prices.get(tier, {}),
         }
         for tier in TIER_MAX_TOKENS
     }
@@ -214,7 +251,7 @@ def run_wizard(ask: AskFn = input) -> Path:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        yaml.safe_dump(_build_config(port, models, key_env), sort_keys=False),
+        yaml.safe_dump(_build_config(port, models, key_env, provider), sort_keys=False),
         encoding="utf-8",
     )
     return path
