@@ -23,7 +23,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from ai_calls_router import config, passthrough, routed_call, routing
+from ai_calls_router import config, passthrough, routed_call, routing, savings
 
 logger = logging.getLogger("acr.server")
 
@@ -98,6 +98,7 @@ async def _try_route(body_bytes: bytes) -> Response | None:
         if not api_key:
             logger.info("acr: tier=%s has no API key; passing through", tier)
             return None
+        savings.register_tier_prices(routes)
         result = await routed_call.routed_call(
             body, tier, tier_cfg, api_key, settings_cfg
         )

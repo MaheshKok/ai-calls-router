@@ -1,0 +1,90 @@
+# ai-calls-router example configuration.
+#
+# Copy to ~/.ai-calls-router/config.yaml (or run `acr init` to generate one
+# interactively) and edit. The proxy hot-reloads this file on every request by
+# mtime, so edits take effect without a restart.
+#
+# Routing model: each pending tool-result turn is served on the tier mapped to
+# the tool that produced it. Decision-making turns (no pending tool results)
+# and any tool mapped to "premium" pass straight through to Anthropic with the
+# client's OAuth/api-key untouched. Any failure falls back to passthrough.
+
+server:
+  host: 127.0.0.1
+  port: 8747
+  upstream: https://api.anthropic.com   # premium passthrough target
+
+# v1 supports the Anthropic passthrough only. The block is reserved so future
+# versions can add user-selectable premium providers without a schema break;
+# any provider other than "anthropic" is rejected at startup today.
+premium:
+  provider: anthropic
+
+settings:
+  # Optional KEY=VALUE fallback for tier API keys not present in the process
+  # environment. Process environment variables always win. Tilde-expanded.
+  env_file: ~/.ai-calls-router/.env
+
+  # Highest-to-lowest tier ranking. When one turn carries tool results from
+  # several tiers, the highest-ranked tier serves it; "premium" always wins
+  # and forces passthrough.
+  tier_precedence: [premium, code, fast, crud]
+
+  compress_routed: true
+  compression:
+    keep_recent_messages: 6        # never truncate the last N messages
+    max_tool_result_chars: 4000    # char budget for older tool_result text
+    use_rtk: auto                  # auto = use the rtk CLI when on PATH; never = built-in only
+
+  # Tools whose appearance in a routed response means the cheap model is trying
+  # to take a premium action. The turn is escalated back to passthrough.
+  premium_tools: [Edit, Write, MultiEdit, NotebookEdit, Task, ExitPlanMode, AskUserQuestion]
+  escalate_on_premium_tools: true   # false disables the guard (routed responses are served as-is)
+
+# Cheap serving tiers. `model` is any LiteLLM-supported id; `key_env` names the
+# environment variable holding that provider's API key (never the Anthropic
+# credential). `max_tokens` caps the routed completion.
+#
+# input_cost_per_1m / output_cost_per_1m are OPTIONAL price overrides in USD per
+# one million tokens. Supply them only when LiteLLM does not already price the
+# model (the `acr savings` ledger uses LiteLLM's own pricing table first). The
+# values below are PLACEHOLDERS -- verify against each provider's published
+# rates before trusting the savings report. An unpriced model is never guessed
+# at: it is simply omitted from the ledger.
+tiers:
+  fast:
+    model: deepseek/deepseek-v4-flash
+    key_env: DEEPSEEK_API_KEY
+    max_tokens: 8192
+    input_cost_per_1m: 0.28        # placeholder -- verify against published rates
+    output_cost_per_1m: 0.42       # placeholder -- verify against published rates
+  code:
+    model: deepseek/deepseek-v4-pro
+    key_env: DEEPSEEK_API_KEY
+    max_tokens: 8192
+    input_cost_per_1m: 0.28        # placeholder -- verify against published rates
+    output_cost_per_1m: 0.42       # placeholder -- verify against published rates
+  crud:
+    model: deepseek/deepseek-v4-flash
+    key_env: DEEPSEEK_API_KEY
+    max_tokens: 4096
+    input_cost_per_1m: 0.28        # placeholder -- verify against published rates
+    output_cost_per_1m: 0.42       # placeholder -- verify against published rates
+
+# Tool -> tier mapping. Exact names match first, then trailing-`*` globs.
+# Any tool not listed here (and any unresolvable tool) routes to premium.
+tools:
+  Bash: fast
+  WebFetch: fast
+  WebSearch: fast
+  Read: code
+  Grep: code
+  Glob: code
+  TodoWrite: crud
+  Edit: premium
+  Write: premium
+  MultiEdit: premium
+  NotebookEdit: premium
+  Task: premium
+  ExitPlanMode: premium
+  AskUserQuestion: premium
