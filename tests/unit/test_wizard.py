@@ -167,7 +167,7 @@ class TestPresetPricing:
             miss = cfg["input_cost_per_1m"]
             hit = cfg["input_cached_cost_per_1m"]
             out = cfg["output_cost_per_1m"]
-            assert all(isinstance(v, (int, float)) for v in (miss, hit, out))
+            assert all(isinstance(v, int | float) for v in (miss, hit, out))
             assert miss > 0 and hit > 0 and out > 0
             # The whole point of the direct path: a cache hit is far cheaper
             # than a miss. A swapped hit/miss rate fails here.

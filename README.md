@@ -1,5 +1,11 @@
 # ai-calls-router
 
+[![CI](https://github.com/maheshkokare/ai-calls-router/actions/workflows/ci.yml/badge.svg)](https://github.com/maheshkokare/ai-calls-router/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ai-calls-router.svg)](https://pypi.org/project/ai-calls-router/)
+[![Python versions](https://img.shields.io/pypi/pyversions/ai-calls-router.svg)](https://pypi.org/project/ai-calls-router/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen)](https://github.com/pre-commit/pre-commit)
+
 Per-tool-result model routing proxy for Claude Code. It serves the cheap
 tool-result-processing turns of a Claude Code session on any LiteLLM-supported
 model (DeepSeek, Groq, Kimi, OpenRouter, and others) while keeping every
@@ -55,7 +61,7 @@ These hold on every turn:
 
 ## Install
 
-Requires Python 3.13 or newer.
+Requires Python 3.11 or newer.
 
 ```bash
 pip install ai-calls-router
@@ -157,6 +163,12 @@ otherwise a built-in compressor runs. `rtk` is never required.
   through passthrough.
 - v1 supports the Anthropic passthrough only for the premium path.
 - The desktop Claude app is out of scope for v1; `acr code` covers the terminal.
+
+## Contributing
+
+See `CONTRIBUTING.md` for development setup and contribution guidelines,
+`CODE_OF_CONDUCT.md` for community standards, and `SECURITY.md` for reporting
+vulnerabilities.
 
 ## License
 

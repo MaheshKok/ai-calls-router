@@ -19,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
 ]
 dependencies = [
     "litellm>=1.70",
@@ -35,6 +36,7 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
     "build>=1.2",
+    "pre-commit>=3.5",
 ]
 
 [project.scripts]

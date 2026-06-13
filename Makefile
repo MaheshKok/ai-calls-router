@@ -5,13 +5,17 @@ VENV := .venv
 PY := $(VENV)/bin/python
 PIP := uv pip install --python $(PY)
 
-.PHONY: help install test lint coverage build run clean
+.PHONY: help install test lint format coverage build run clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "%-12s %s\n", $$1, $$2}'
 
-install: ## Create venv and install package with dev dependencies
-	uv venv $(VENV) --python 3.13
+install: ## Create or reuse venv and install package with dev dependencies
+	@if [ ! -x "$(PY)" ]; then \
+		uv venv $(VENV) --python 3.13; \
+	else \
+		echo "Using existing virtual environment at $(VENV)"; \
+	fi
 	$(PIP) -e ".[dev]"
 
 test: ## Run the test suite
@@ -19,6 +23,9 @@ test: ## Run the test suite
 
 lint: ## Run ruff checks
 	$(PY) -m ruff check src tests
+
+format: ## Format source and tests with ruff
+	$(PY) -m ruff format src tests
 
 coverage: ## Run tests with coverage report (fails under 98%)
 	$(PY) -m pytest -q --cov --cov-report=term-missing --cov-fail-under=98

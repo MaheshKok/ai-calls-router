@@ -23,6 +23,7 @@ jobs:
           python-version: "3.13"
       - run: uv pip install --system -e ".[dev]"
       - run: ruff check src tests
+      - run: ruff format --check src tests
 
   test:
     name: Test (py${{ matrix.python-version }})
