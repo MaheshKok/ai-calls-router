@@ -18,8 +18,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ai_calls_router import config
-from ai_calls_router.litellm_guard import load_litellm
+from ai_calls_router._lib import config
+from ai_calls_router._lib.litellm_guard import load_litellm
 
 logger = logging.getLogger("acr.savings")
 

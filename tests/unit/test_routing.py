@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from ai_calls_router import routing
+from ai_calls_router.routing import decide as routing
 
 
 def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, Any]:

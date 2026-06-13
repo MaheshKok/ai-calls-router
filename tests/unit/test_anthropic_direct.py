@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 import pytest
 
-from ai_calls_router import anthropic_direct as ad
+from ai_calls_router.routing import direct as ad
 
 TIER_CFG: dict[str, Any] = {"model": "deepseek/deepseek-v4-pro", "max_tokens": 8192}
 RESPONSE_JSON: dict[str, Any] = {

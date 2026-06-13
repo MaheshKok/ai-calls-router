@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from ai_calls_router import ledger
+from ai_calls_router.accounting import ledger
 
 
 def _entry(**overrides: Any) -> dict[str, Any]:

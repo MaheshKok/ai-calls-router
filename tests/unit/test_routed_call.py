@@ -1,4 +1,4 @@
-"""Spec-derived tests for ai_calls_router.routed_call.
+"""Spec-derived tests for the routing engine and its SSE synthesis.
 
 Contract under test: _prepare_routed_body swaps in the tier model, clamps
 max_tokens, and strips Claude-specific thinking blocks without mutating the
@@ -6,8 +6,8 @@ input; escalates flags routed responses that call premium tools; routed_call
 serves a request on the tier provider with only the tier key, records honest
 savings under the true routed model, masks the served body to the client's
 requested model, and returns None on escalation or any provider failure
-(invariants 1-4); synthesize_sse renders a finished Anthropic response as
-the Messages SSE stream Claude Code expects.
+(invariants 1-4); synthesis.synthesize_sse renders a finished Anthropic response
+as the Messages SSE stream Claude Code expects.
 """
 
 from __future__ import annotations
@@ -23,8 +23,9 @@ import pytest
 from acr_testkit import FakeLitellm
 from acr_testkit import make_response as _fake_response
 
-from ai_calls_router import routed_call as rc
-from ai_calls_router import savings
+from ai_calls_router.accounting import savings
+from ai_calls_router.routing import engine as rc
+from ai_calls_router.routing import synthesis
 
 # Non-DeepSeek ids keep these tests on the LiteLLM path: DeepSeek tier models
 # are diverted to the native direct path (see TestRoutedCallDeepSeekDirect).
@@ -622,12 +623,12 @@ class TestSynthesizeSse:
         }
 
     def test_starts_with_message_start_and_ends_with_message_stop(self) -> None:
-        events = _parse_sse(rc.synthesize_sse(self._response_body()))
+        events = _parse_sse(synthesis.synthesize_sse(self._response_body()))
         assert events[0][0] == "message_start"
         assert events[-1][0] == "message_stop"
 
     def test_message_start_carries_id_model_and_input_tokens(self) -> None:
-        events = _parse_sse(rc.synthesize_sse(self._response_body()))
+        events = _parse_sse(synthesis.synthesize_sse(self._response_body()))
         message = events[0][1]["message"]
         assert message["id"] == "msg_test123"
         assert message["model"] == "claude-fable-5"
@@ -636,7 +637,7 @@ class TestSynthesizeSse:
         assert message["stop_reason"] is None
 
     def test_text_block_streamed_as_text_delta(self) -> None:
-        events = _parse_sse(rc.synthesize_sse(self._response_body()))
+        events = _parse_sse(synthesis.synthesize_sse(self._response_body()))
         starts = [d for n, d in events if n == "content_block_start"]
         deltas = [d for n, d in events if n == "content_block_delta"]
         assert starts[0]["content_block"] == {"type": "text", "text": ""}
@@ -644,7 +645,7 @@ class TestSynthesizeSse:
         assert deltas[0]["index"] == 0
 
     def test_tool_use_block_streamed_as_input_json_delta(self) -> None:
-        events = _parse_sse(rc.synthesize_sse(self._response_body()))
+        events = _parse_sse(synthesis.synthesize_sse(self._response_body()))
         starts = [d for n, d in events if n == "content_block_start"]
         deltas = [d for n, d in events if n == "content_block_delta"]
         assert starts[1]["content_block"]["type"] == "tool_use"
@@ -655,12 +656,12 @@ class TestSynthesizeSse:
         assert json.loads(deltas[1]["delta"]["partial_json"]) == {"command": "ls"}
 
     def test_every_block_gets_a_content_block_stop(self) -> None:
-        events = _parse_sse(rc.synthesize_sse(self._response_body()))
+        events = _parse_sse(synthesis.synthesize_sse(self._response_body()))
         stops = [d for n, d in events if n == "content_block_stop"]
         assert [s["index"] for s in stops] == [0, 1]
 
     def test_message_delta_carries_stop_reason_and_output_tokens(self) -> None:
-        events = _parse_sse(rc.synthesize_sse(self._response_body()))
+        events = _parse_sse(synthesis.synthesize_sse(self._response_body()))
         delta = next(d for n, d in events if n == "message_delta")
         assert delta["delta"]["stop_reason"] == "tool_use"
         assert delta["usage"] == {"output_tokens": 25}
@@ -668,14 +669,14 @@ class TestSynthesizeSse:
     def test_empty_content_still_produces_valid_stream(self) -> None:
         body = self._response_body()
         body["content"] = []
-        events = _parse_sse(rc.synthesize_sse(body))
+        events = _parse_sse(synthesis.synthesize_sse(body))
         names = [n for n, _ in events]
         assert names == ["message_start", "message_delta", "message_stop"]
 
     def test_non_dict_blocks_skipped(self) -> None:
         body = self._response_body()
         body["content"] = [None, {"type": "text", "text": "kept"}]
-        events = _parse_sse(rc.synthesize_sse(body))
+        events = _parse_sse(synthesis.synthesize_sse(body))
         deltas = [d for n, d in events if n == "content_block_delta"]
         assert len(deltas) == 1
         assert deltas[0]["index"] == 1
@@ -684,7 +685,7 @@ class TestSynthesizeSse:
     def test_missing_usage_defaults_to_zero(self) -> None:
         body = self._response_body()
         del body["usage"]
-        events = _parse_sse(rc.synthesize_sse(body))
+        events = _parse_sse(synthesis.synthesize_sse(body))
         assert events[0][1]["message"]["usage"]["input_tokens"] == 0
         delta = next(d for n, d in events if n == "message_delta")
         assert delta["usage"] == {"output_tokens": 0}

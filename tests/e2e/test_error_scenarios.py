@@ -152,7 +152,7 @@ class TestPendingToolNamesDefensiveSkips:
         # Inject a FakeLitellm that returns a simple routed response so the
         # request actually routes (not passthrough).
         fake = FakeLitellm(response=make_response(text="routed"))
-        import ai_calls_router.routed_call as rc
+        import ai_calls_router.routing.engine as rc
         monkeypatch.setattr(rc, "load_litellm", lambda: fake)
 
         with make_client(FULL_CONFIG, tmp_path, monkeypatch, upstream) as client:

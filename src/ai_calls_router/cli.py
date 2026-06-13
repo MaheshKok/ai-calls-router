@@ -17,7 +17,12 @@ from collections.abc import Callable
 
 import uvicorn
 
-from ai_calls_router import __version__, config, daemon, ledger, routing, server, wizard
+from ai_calls_router import __version__
+from ai_calls_router._lib import config
+from ai_calls_router.accounting import ledger
+from ai_calls_router.ops import daemon, wizard
+from ai_calls_router.proxy import server
+from ai_calls_router.routing import decide as routing
 
 
 class _AcrParser(argparse.ArgumentParser):

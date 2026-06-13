@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 import yaml
 
-from ai_calls_router import config, wizard
+from ai_calls_router._lib import config
+from ai_calls_router.ops import wizard
 
 
 class _ScriptedAsk:

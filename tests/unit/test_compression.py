@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from ai_calls_router import compression
+from ai_calls_router.routing import compression
 
 
 def _tool_round(

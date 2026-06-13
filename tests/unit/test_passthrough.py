@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 from starlette.responses import Response
 
-from ai_calls_router import passthrough as pt
+from ai_calls_router.proxy import passthrough as pt
 
 UPSTREAM = "https://upstream.example"
 

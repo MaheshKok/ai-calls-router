@@ -23,7 +23,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from ai_calls_router import config, passthrough, routed_call, routing, savings
+from ai_calls_router._lib import config
+from ai_calls_router.accounting import savings
+from ai_calls_router.proxy import passthrough
+from ai_calls_router.routing import decide as routing
+from ai_calls_router.routing import engine as routed_call
+from ai_calls_router.routing import synthesis
 
 logger = logging.getLogger("acr.server")
 
@@ -106,7 +111,7 @@ async def _try_route(body_bytes: bytes) -> Response | None:
             return None
         if body.get("stream"):
             return Response(
-                routed_call.synthesize_sse(result.body),
+                synthesis.synthesize_sse(result.body),
                 media_type="text/event-stream",
             )
         return JSONResponse(result.body)

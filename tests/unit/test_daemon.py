@@ -19,7 +19,8 @@ from typing import Any
 import httpx
 import pytest
 
-from ai_calls_router import config, daemon
+from ai_calls_router._lib import config
+from ai_calls_router.ops import daemon
 
 CONFIG_YAML = """
 server:

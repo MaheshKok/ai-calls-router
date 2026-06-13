@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from ai_calls_router import conversion
+from ai_calls_router._lib import conversion
 
 GOLDEN: dict[str, Any] = json.loads(
     (Path(__file__).resolve().parent.parent / "fixtures" / "conversion_golden.json").read_text(

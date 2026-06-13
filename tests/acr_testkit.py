@@ -18,7 +18,7 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from ai_calls_router.server import create_app
+from ai_calls_router.proxy.server import create_app
 
 
 class FakeLitellm:

@@ -17,7 +17,8 @@ import time
 
 import httpx
 
-from ai_calls_router import config, routing
+from ai_calls_router._lib import config
+from ai_calls_router.routing import decide as routing
 
 logger = logging.getLogger("acr.daemon")
 

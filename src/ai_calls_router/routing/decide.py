@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from ai_calls_router import config
+from ai_calls_router._lib import config
 
 logger = logging.getLogger("acr.routing")
 

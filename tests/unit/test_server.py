@@ -19,10 +19,10 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from ai_calls_router import routed_call as rc
-from ai_calls_router import routing
-from ai_calls_router.conversion import BackendResponse
-from ai_calls_router.server import create_app
+from ai_calls_router._lib.conversion import BackendResponse
+from ai_calls_router.proxy.server import create_app
+from ai_calls_router.routing import decide as routing
+from ai_calls_router.routing import engine as rc
 
 CONFIG_YAML = """
 server:

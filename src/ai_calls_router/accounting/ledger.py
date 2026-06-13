@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ai_calls_router import config
+from ai_calls_router._lib import config
 
 _INT_FIELDS = ("input_tokens", "output_tokens")
 _FLOAT_FIELDS = ("routed_usd", "premium_usd", "saved_usd")

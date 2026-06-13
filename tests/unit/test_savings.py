@@ -16,8 +16,8 @@ from typing import Any
 
 import pytest
 
-from ai_calls_router import savings
-from ai_calls_router.litellm_guard import load_litellm
+from ai_calls_router._lib.litellm_guard import load_litellm
+from ai_calls_router.accounting import savings
 
 CHEAP_MODEL = "deepseek/acr-test-cheap"
 PREMIUM_MODEL = "deepseek/acr-test-premium"

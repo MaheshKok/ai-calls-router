@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 from acr_testkit import FakeLitellm, Upstream, make_client, make_response, read_ledger
 
-from ai_calls_router import routed_call as rc
+from ai_calls_router.routing import engine as rc
 
 # Non-DeepSeek ids keep the integration flow on the LiteLLM path; DeepSeek tier
 # models take the native direct path, exercised separately in the unit suite.

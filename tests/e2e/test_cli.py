@@ -20,7 +20,9 @@ from typing import Any
 import pytest
 import uvicorn
 
-from ai_calls_router import cli, config, daemon, wizard
+from ai_calls_router import cli
+from ai_calls_router._lib import config
+from ai_calls_router.ops import daemon, wizard
 
 CONFIG_YAML = """
 server:

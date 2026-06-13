@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_calls_router import config
+from ai_calls_router._lib import config
 
 
 class TestPaths:

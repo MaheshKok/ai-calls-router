@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from ai_calls_router import config
+from ai_calls_router._lib import config
 
 DEFAULT_PROVIDER = "deepseek"
 
