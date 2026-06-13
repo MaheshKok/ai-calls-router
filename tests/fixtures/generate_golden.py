@@ -79,9 +79,7 @@ MESSAGE_CASES: dict[str, list[dict[str, Any]]] = {
     "tool_result_string_content": [
         {
             "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": "toolu_01", "content": "file.txt"}
-            ],
+            "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "file.txt"}],
         }
     ],
     "tool_result_list_content": [
@@ -179,9 +177,7 @@ PARSE_ARGS_CASES: dict[str, Any] = {
 # attribute-style objects from it before calling the converter.
 RESPONSE_CASES: dict[str, dict[str, Any]] = {
     "text_stop": {
-        "choices": [
-            {"finish_reason": "stop", "message": {"content": "Done.", "tool_calls": None}}
-        ],
+        "choices": [{"finish_reason": "stop", "message": {"content": "Done.", "tool_calls": None}}],
         "usage": {"prompt_tokens": 100, "completion_tokens": 20},
     },
     "tool_calls_finish": {
@@ -231,9 +227,7 @@ RESPONSE_CASES: dict[str, dict[str, Any]] = {
         "usage": {"prompt_tokens": 1, "completion_tokens": 1},
     },
     "unknown_finish_reason": {
-        "choices": [
-            {"finish_reason": "weird", "message": {"content": "y", "tool_calls": None}}
-        ],
+        "choices": [{"finish_reason": "weird", "message": {"content": "y", "tool_calls": None}}],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1},
     },
     "empty_content_no_text_block": {
@@ -241,9 +235,7 @@ RESPONSE_CASES: dict[str, dict[str, Any]] = {
         "usage": {"prompt_tokens": 1, "completion_tokens": 0},
     },
     "missing_usage_fields": {
-        "choices": [
-            {"finish_reason": "stop", "message": {"content": "z", "tool_calls": None}}
-        ],
+        "choices": [{"finish_reason": "stop", "message": {"content": "z", "tool_calls": None}}],
         "usage": {},
     },
 }
@@ -274,9 +266,7 @@ def make_response(spec: dict[str, Any]) -> SimpleNamespace:
                 for tc in tool_calls
             ]
         message = SimpleNamespace(content=msg_spec.get("content"), tool_calls=tool_calls)
-        choices.append(
-            SimpleNamespace(finish_reason=choice_spec["finish_reason"], message=message)
-        )
+        choices.append(SimpleNamespace(finish_reason=choice_spec["finish_reason"], message=message))
     return SimpleNamespace(choices=choices, usage=SimpleNamespace(**spec.get("usage", {})))
 
 

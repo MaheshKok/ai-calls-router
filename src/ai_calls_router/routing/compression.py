@@ -132,9 +132,7 @@ def _compress_text(text: str, budget: int, rtk_filter: str | None) -> str:
     return _truncate(text, budget)
 
 
-def _compress_tool_result_content(
-    content: Any, budget: int, rtk_filter: str | None
-) -> Any:
+def _compress_tool_result_content(content: Any, budget: int, rtk_filter: str | None) -> Any:
     """Compress a tool_result content payload to the character budget.
 
     String content is compressed directly; list content shares one budget
@@ -195,9 +193,7 @@ def _compress_message(
             tool_use_id = block.get("tool_use_id")
             tool_name = tool_names.get(tool_use_id) if isinstance(tool_use_id, str) else None
             rtk_filter = RTK_FILTERS.get(tool_name) if tool_name is not None else None
-        block["content"] = _compress_tool_result_content(
-            block.get("content"), budget, rtk_filter
-        )
+        block["content"] = _compress_tool_result_content(block.get("content"), budget, rtk_filter)
 
 
 def compress_body(body: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
@@ -227,12 +223,8 @@ def compress_body(body: dict[str, Any], settings: dict[str, Any]) -> dict[str, A
             return body
         cfg = settings.get("compression")
         cfg = cfg if isinstance(cfg, dict) else {}
-        keep_recent = _positive_int(
-            cfg.get("keep_recent_messages"), DEFAULT_KEEP_RECENT_MESSAGES
-        )
-        budget = _positive_int(
-            cfg.get("max_tool_result_chars"), DEFAULT_MAX_TOOL_RESULT_CHARS
-        )
+        keep_recent = _positive_int(cfg.get("keep_recent_messages"), DEFAULT_KEEP_RECENT_MESSAGES)
+        budget = _positive_int(cfg.get("max_tool_result_chars"), DEFAULT_MAX_TOOL_RESULT_CHARS)
         cutoff = len(messages) - keep_recent
         if cutoff <= 0:
             return body

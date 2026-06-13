@@ -21,16 +21,12 @@ import pytest
 from ai_calls_router.routing import compression
 
 
-def _tool_round(
-    tool_use_id: str, tool_name: str, result_content: Any
-) -> list[dict[str, Any]]:
+def _tool_round(tool_use_id: str, tool_name: str, result_content: Any) -> list[dict[str, Any]]:
     """Build an assistant tool_use + user tool_result message pair."""
     return [
         {
             "role": "assistant",
-            "content": [
-                {"type": "tool_use", "id": tool_use_id, "name": tool_name, "input": {}}
-            ],
+            "content": [{"type": "tool_use", "id": tool_use_id, "name": tool_name, "input": {}}],
         },
         {
             "role": "user",
@@ -198,9 +194,7 @@ class TestTruncation:
         ],
         ids=["non-dict-compression", "str-keep-recent", "none-budget"],
     )
-    def test_malformed_settings_fall_back_to_defaults(
-        self, bad_settings: dict[str, Any]
-    ) -> None:
+    def test_malformed_settings_fall_back_to_defaults(self, bad_settings: dict[str, Any]) -> None:
         bad_settings["compress_routed"] = True
         messages = _tool_round("t1", "Bash", "j" * 10_000) + _padding(6)
         body = {"messages": messages}
@@ -210,9 +204,7 @@ class TestTruncation:
 
 
 class TestRunRtk:
-    def test_returns_filtered_stdout_on_success(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_returns_filtered_stdout_on_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def fake_run(*args: Any, **kwargs: Any) -> Any:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="compact\n")
 
@@ -262,9 +254,7 @@ class TestRtkIntegration:
         settings = _settings(keep_recent_messages=6, max_tool_result_chars=100)
         compression.compress_body(self._grep_body(), settings)
 
-    def test_auto_mode_without_rtk_on_path_skips(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_auto_mode_without_rtk_on_path_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(compression.shutil, "which", lambda _: None)
 
         def boom(*args: Any, **kwargs: Any) -> Any:
@@ -316,9 +306,7 @@ class TestRtkIntegration:
         result = compression.compress_body({"messages": messages}, settings)
         assert "truncated" in result["messages"][1]["content"][0]["content"]
 
-    def test_rtk_failure_falls_back_to_truncation(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rtk_failure_falls_back_to_truncation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(compression.shutil, "which", lambda _: "/usr/local/bin/rtk")
         monkeypatch.setattr(compression, "run_rtk", lambda text, f: None)
         settings = {
@@ -364,9 +352,7 @@ class TestCompressBodyFailOpen:
         returned (identity-equal), not a copy and not an exception
         (compression.py:245-247).
         """
-        body = {
-            "messages": [{"role": "user", "content": f"msg {i}"} for i in range(10)]
-        }
+        body = {"messages": [{"role": "user", "content": f"msg {i}"} for i in range(10)]}
         settings = {
             "compress_routed": True,
             "compression": {

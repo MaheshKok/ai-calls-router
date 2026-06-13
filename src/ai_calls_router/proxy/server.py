@@ -104,9 +104,7 @@ async def _try_route(body_bytes: bytes) -> Response | None:
             logger.info("acr: tier=%s has no API key; passing through", tier)
             return None
         savings.register_tier_prices(routes)
-        result = await routed_call.routed_call(
-            body, tier, tier_cfg, api_key, settings_cfg
-        )
+        result = await routed_call.routed_call(body, tier, tier_cfg, api_key, settings_cfg)
         if result is None:
             return None
         if body.get("stream"):
@@ -162,9 +160,7 @@ async def _lifespan(
     Yields:
         None while the application serves requests.
     """
-    app.state.client = httpx.AsyncClient(
-        transport=transport, timeout=passthrough.UPSTREAM_TIMEOUT
-    )
+    app.state.client = httpx.AsyncClient(transport=transport, timeout=passthrough.UPSTREAM_TIMEOUT)
     try:
         yield
     finally:

@@ -49,9 +49,7 @@ def _read_entries(ledger: Path) -> list[dict[str, Any]]:
     if not ledger.exists():
         return []
     return [
-        json.loads(line)
-        for line in ledger.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
 
 
@@ -65,9 +63,7 @@ class TestRegisterTierPrices:
         assert out_usd == pytest.approx(2.0)
 
     def test_tier_without_prices_is_not_registered(self) -> None:
-        savings.register_tier_prices(
-            {"tiers": {"x": {"model": "deepseek/acr-test-no-price"}}}
-        )
+        savings.register_tier_prices({"tiers": {"x": {"model": "deepseek/acr-test-no-price"}}})
         litellm = load_litellm()
         with pytest.raises(Exception, match="isn't mapped yet"):
             litellm.cost_per_token(
@@ -279,9 +275,7 @@ class TestRoutedPricesFromTier:
         assert savings._routed_prices_from_tier(tier_cfg) is None
 
     def test_returns_none_when_output_price_missing(self) -> None:
-        assert (
-            savings._routed_prices_from_tier({"input_cost_per_1m": 0.5}) is None
-        )
+        assert savings._routed_prices_from_tier({"input_cost_per_1m": 0.5}) is None
 
     @pytest.mark.parametrize("bad", ["0.5", True, None], ids=["str", "bool", "none"])
     def test_returns_none_when_input_price_not_a_number(self, bad: Any) -> None:
@@ -329,9 +323,7 @@ class TestCacheAwareSavings:
     plus cache_creation) at the miss rate, and the premium counterfactual
     always prices the entire prompt (hit + miss) at the premium standard rate."""
 
-    def test_splits_hit_miss_output_at_independent_rates(
-        self, tmp_path: Path
-    ) -> None:
+    def test_splits_hit_miss_output_at_independent_rates(self, tmp_path: Path) -> None:
         # hit=700k @ 0.003625/1M, miss=200k+100k=300k @ 0.435/1M, out=50k @ 0.87/1M
         #   routed  = 0.1305 + 0.0025375 + 0.0435           = 0.1765375
         # premium prices the full 1M prompt + 50k out at 10/20 per 1M
@@ -361,11 +353,20 @@ class TestCacheAwareSavings:
         hit_ledger = tmp_path / "hit.jsonl"
         miss_ledger = tmp_path / "miss.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL, CHEAP_MODEL, 0, 0, hit_ledger,
-            cache_read_tokens=1_000_000, routed_prices=DS_ROUTED_PRICES,
+            PREMIUM_MODEL,
+            CHEAP_MODEL,
+            0,
+            0,
+            hit_ledger,
+            cache_read_tokens=1_000_000,
+            routed_prices=DS_ROUTED_PRICES,
         )
         savings.record_routing_savings(
-            PREMIUM_MODEL, CHEAP_MODEL, 1_000_000, 0, miss_ledger,
+            PREMIUM_MODEL,
+            CHEAP_MODEL,
+            1_000_000,
+            0,
+            miss_ledger,
             routed_prices=DS_ROUTED_PRICES,
         )
         hit_usd = _read_entries(hit_ledger)[0]["routed_usd"]
@@ -373,42 +374,51 @@ class TestCacheAwareSavings:
         assert hit_usd == pytest.approx(0.003625, abs=1e-7)
         assert miss_usd == pytest.approx(0.435, abs=1e-7)
 
-    def test_cache_creation_bills_at_miss_rate_not_cached_rate(
-        self, tmp_path: Path
-    ) -> None:
+    def test_cache_creation_bills_at_miss_rate_not_cached_rate(self, tmp_path: Path) -> None:
         # cache_creation tokens are written-not-read, so they cost a full miss.
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL, CHEAP_MODEL, 0, 0, ledger,
-            cache_creation_tokens=1_000_000, routed_prices=DS_ROUTED_PRICES,
+            PREMIUM_MODEL,
+            CHEAP_MODEL,
+            0,
+            0,
+            ledger,
+            cache_creation_tokens=1_000_000,
+            routed_prices=DS_ROUTED_PRICES,
         )
         entry = _read_entries(ledger)[0]
         assert entry["cache_creation_input_tokens"] == 1_000_000
         assert entry["cache_read_input_tokens"] == 0
         assert entry["routed_usd"] == pytest.approx(0.435, abs=1e-7)
 
-    def test_premium_counterfactual_prices_full_prompt_including_hits(
-        self, tmp_path: Path
-    ) -> None:
+    def test_premium_counterfactual_prices_full_prompt_including_hits(self, tmp_path: Path) -> None:
         # Premium has no prefix cache: it would re-read all 1M tokens. The
         # counterfactual must price hit+miss, not misses alone.
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL, CHEAP_MODEL, 0, 0, ledger,
-            cache_read_tokens=1_000_000, routed_prices=DS_ROUTED_PRICES,
+            PREMIUM_MODEL,
+            CHEAP_MODEL,
+            0,
+            0,
+            ledger,
+            cache_read_tokens=1_000_000,
+            routed_prices=DS_ROUTED_PRICES,
         )
         # 1M @ $10/1M = $10 even though every routed token was a cheap cache hit.
         assert _read_entries(ledger)[0]["premium_usd"] == pytest.approx(10.0)
 
-    def test_cache_tokens_fold_into_total_on_litellm_path(
-        self, tmp_path: Path
-    ) -> None:
+    def test_cache_tokens_fold_into_total_on_litellm_path(self, tmp_path: Path) -> None:
         # Without routed_prices the routed side is priced by LiteLLM, but cache
         # tokens must still count toward the prompt total on both sides.
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL, CHEAP_MODEL, 0, 0, ledger,
-            cache_read_tokens=600_000, cache_creation_tokens=400_000,
+            PREMIUM_MODEL,
+            CHEAP_MODEL,
+            0,
+            0,
+            ledger,
+            cache_read_tokens=600_000,
+            cache_creation_tokens=400_000,
         )
         entry = _read_entries(ledger)[0]
         assert entry["input_tokens"] == 1_000_000
@@ -419,8 +429,13 @@ class TestCacheAwareSavings:
     def test_negative_cache_counts_are_clamped_to_zero(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL, CHEAP_MODEL, 1_000_000, 0, ledger,
-            cache_read_tokens=-5, cache_creation_tokens=-9,
+            PREMIUM_MODEL,
+            CHEAP_MODEL,
+            1_000_000,
+            0,
+            ledger,
+            cache_read_tokens=-5,
+            cache_creation_tokens=-9,
             routed_prices=DS_ROUTED_PRICES,
         )
         entry = _read_entries(ledger)[0]
@@ -434,7 +449,11 @@ class TestCacheAwareSavings:
         # never credited as a discount against the routed cost.
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL, CHEAP_MODEL, 1_000_000, -100, ledger,
+            PREMIUM_MODEL,
+            CHEAP_MODEL,
+            1_000_000,
+            -100,
+            ledger,
             routed_prices=DS_ROUTED_PRICES,
         )
         entry = _read_entries(ledger)[0]
@@ -444,9 +463,7 @@ class TestCacheAwareSavings:
         # premium prices 1M input @ $10/1M with zero output.
         assert entry["premium_usd"] == pytest.approx(10.0, abs=1e-6)
 
-    def test_round_trip_from_response_with_cache_usage_and_tier_cfg(
-        self, tmp_path: Path
-    ) -> None:
+    def test_round_trip_from_response_with_cache_usage_and_tier_cfg(self, tmp_path: Path) -> None:
         # The DeepSeek direct path hands a usage block with cache fields plus the
         # tier config; record_savings_from_response must price it cache-aware.
         ledger = tmp_path / "savings.jsonl"
@@ -473,16 +490,12 @@ class TestCacheAwareSavings:
         assert entry["routed_usd"] == pytest.approx(0.1765375, abs=1e-7)
         assert entry["premium_usd"] == pytest.approx(11.0, abs=1e-6)
 
-    def test_without_tier_cfg_response_path_stays_single_rate(
-        self, tmp_path: Path
-    ) -> None:
+    def test_without_tier_cfg_response_path_stays_single_rate(self, tmp_path: Path) -> None:
         # No tier_cfg -> routed_prices is None -> LiteLLM single-rate pricing,
         # and cache fields default to zero.
         ledger = tmp_path / "savings.jsonl"
         response = {"usage": {"input_tokens": 1_000_000, "output_tokens": 0}}
-        savings.record_savings_from_response(
-            PREMIUM_MODEL, CHEAP_MODEL, response, ledger
-        )
+        savings.record_savings_from_response(PREMIUM_MODEL, CHEAP_MODEL, response, ledger)
         entry = _read_entries(ledger)[0]
         assert entry["cache_read_input_tokens"] == 0
         assert entry["routed_usd"] == pytest.approx(1.0, abs=1e-6)
@@ -492,9 +505,7 @@ class TestFailOpen:
     """Accounting must never break a served turn: registration and usage
     extraction swallow every error rather than propagating it."""
 
-    def test_register_model_failure_is_swallowed(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_register_model_failure_is_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A LiteLLM register_model error during price registration must not
         propagate (savings.py:93-94). The model+price below is unique so the
         loop reaches register_model rather than short-circuiting on an
@@ -527,7 +538,5 @@ class TestFailOpen:
         """
         ledger = tmp_path / "savings.jsonl"
         response = {"usage": {"input_tokens": "abc", "output_tokens": 5}}
-        savings.record_savings_from_response(
-            PREMIUM_MODEL, CHEAP_MODEL, response, ledger
-        )
+        savings.record_savings_from_response(PREMIUM_MODEL, CHEAP_MODEL, response, ledger)
         assert not ledger.exists()

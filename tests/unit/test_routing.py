@@ -120,9 +120,7 @@ class TestPendingToolNames:
 
     def test_partial_resolution_still_returns_unknown(self) -> None:
         body = _body_with_tool_results(("t1", "Bash"))
-        body["messages"][-1]["content"].append(
-            {"type": "tool_result", "tool_use_id": "ghost"}
-        )
+        body["messages"][-1]["content"].append({"type": "tool_result", "tool_use_id": "ghost"})
         assert routing.pending_tool_names(body) == ["<unknown>"]
 
     def test_tool_result_without_id_is_ignored(self) -> None:
@@ -199,9 +197,7 @@ class TestResolveApiKey:
         monkeypatch.delenv("ACR_TEST_KEY", raising=False)
         env_file = tmp_path / ".env"
         env_file.write_text("# comment\n\nACR_TEST_KEY=from-file\n", encoding="utf-8")
-        key = routing.resolve_api_key(
-            {"key_env": "ACR_TEST_KEY"}, {"env_file": str(env_file)}
-        )
+        key = routing.resolve_api_key({"key_env": "ACR_TEST_KEY"}, {"env_file": str(env_file)})
         assert key == "from-file"
 
     def test_env_file_export_prefix_and_quotes(
@@ -210,9 +206,7 @@ class TestResolveApiKey:
         monkeypatch.delenv("ACR_TEST_KEY", raising=False)
         env_file = tmp_path / ".env"
         env_file.write_text('export ACR_TEST_KEY="quoted-value"\n', encoding="utf-8")
-        key = routing.resolve_api_key(
-            {"key_env": "ACR_TEST_KEY"}, {"env_file": str(env_file)}
-        )
+        key = routing.resolve_api_key({"key_env": "ACR_TEST_KEY"}, {"env_file": str(env_file)})
         assert key == "quoted-value"
 
     def test_missing_key_env_returns_none(self) -> None:
@@ -224,9 +218,7 @@ class TestResolveApiKey:
         monkeypatch.delenv("ACR_TEST_KEY", raising=False)
         env_file = tmp_path / ".env"
         env_file.write_text("OTHER=x\n", encoding="utf-8")
-        key = routing.resolve_api_key(
-            {"key_env": "ACR_TEST_KEY"}, {"env_file": str(env_file)}
-        )
+        key = routing.resolve_api_key({"key_env": "ACR_TEST_KEY"}, {"env_file": str(env_file)})
         assert key is None
 
     def test_missing_env_file_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,7 +243,5 @@ class TestResolveApiKey:
         monkeypatch.delenv("ACR_TEST_KEY", raising=False)
         env_file = tmp_path / ".env"
         env_file.write_text("ACR_TEST_KEY=\n", encoding="utf-8")
-        key = routing.resolve_api_key(
-            {"key_env": "ACR_TEST_KEY"}, {"env_file": str(env_file)}
-        )
+        key = routing.resolve_api_key({"key_env": "ACR_TEST_KEY"}, {"env_file": str(env_file)})
         assert key is None

@@ -83,9 +83,7 @@ def make_response(
     """
     message = SimpleNamespace(content=text, tool_calls=tool_calls)
     choice = SimpleNamespace(message=message, finish_reason=finish_reason)
-    usage = SimpleNamespace(
-        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
-    )
+    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
     return SimpleNamespace(choices=[choice], usage=usage)
 
 
@@ -156,7 +154,5 @@ def read_ledger(tmp_path: Path) -> list[dict[str, Any]]:
     if not ledger.exists():
         return []
     return [
-        json.loads(line)
-        for line in ledger.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()
     ]

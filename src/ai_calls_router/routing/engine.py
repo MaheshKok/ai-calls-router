@@ -69,10 +69,7 @@ def _prepare_routed_body(body: dict[str, Any], tier_cfg: dict[str, Any]) -> dict
             blocks = [
                 b
                 for b in content
-                if not (
-                    isinstance(b, dict)
-                    and b.get("type") in ("thinking", "redacted_thinking")
-                )
+                if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
             ]
             if not blocks and msg.get("role") == "assistant":
                 continue
@@ -200,14 +197,11 @@ async def routed_call(
         if direct:
             anthropic_body = await _serve_via_direct(body, tier_cfg, api_key)
         else:
-            anthropic_body = await _serve_via_litellm(
-                body, tier_cfg, api_key, settings
-            )
+            anthropic_body = await _serve_via_litellm(body, tier_cfg, api_key, settings)
         elapsed = time.monotonic() - started
         if anthropic_body is None:
             logger.warning(
-                "acr: tier=%s model=%s direct call returned no body (%.2fs);"
-                " passing through",
+                "acr: tier=%s model=%s direct call returned no body (%.2fs); passing through",
                 tier_name,
                 model,
                 elapsed,
@@ -237,9 +231,7 @@ async def routed_call(
         " [direct]" if direct else "",
         elapsed,
     )
-    savings.record_savings_from_response(
-        premium_model, model, anthropic_body, tier_cfg=tier_cfg
-    )
+    savings.record_savings_from_response(premium_model, model, anthropic_body, tier_cfg=tier_cfg)
     if isinstance(premium_model, str) and premium_model:
         anthropic_body = {**anthropic_body, "model": premium_model}
     return BackendResponse(body=anthropic_body)

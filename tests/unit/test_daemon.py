@@ -91,9 +91,7 @@ class TestIsRunning:
         monkeypatch.setattr(os, "kill", _KillRecorder(alive=False))
         assert daemon.is_running(99999) is False
 
-    def test_permission_error_counts_as_running(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_permission_error_counts_as_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _denied(pid: int, sig: int) -> None:
             raise PermissionError(pid)
 
@@ -253,18 +251,14 @@ class TestStop:
 
 
 class TestWaitHealthy:
-    def test_returns_true_when_health_answers(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_returns_true_when_health_answers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _ok(url: str, timeout: float) -> httpx.Response:
             return httpx.Response(200, json={"status": "ok"})
 
         monkeypatch.setattr(httpx, "get", _ok)
         assert daemon._wait_healthy("http://127.0.0.1:9321/health") is True
 
-    def test_returns_false_when_never_reachable(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_returns_false_when_never_reachable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _refused(url: str, timeout: float) -> httpx.Response:
             raise httpx.ConnectError("connection refused")
 
@@ -272,9 +266,7 @@ class TestWaitHealthy:
         monkeypatch.setattr(daemon, "HEALTH_TIMEOUT_SECONDS", 0.05)
         assert daemon._wait_healthy("http://127.0.0.1:9321/health") is False
 
-    def test_non_200_keeps_polling_until_timeout(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_200_keeps_polling_until_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _error(url: str, timeout: float) -> httpx.Response:
             return httpx.Response(503)
 

@@ -183,9 +183,7 @@ def record_routing_savings(
         if routed_prices is not None:
             miss_rate, cached_rate, out_rate = routed_prices
             routed_usd = (
-                miss_tokens * miss_rate
-                + hit_tokens * cached_rate
-                + output_tokens * out_rate
+                miss_tokens * miss_rate + hit_tokens * cached_rate + output_tokens * out_rate
             )
         else:
             routed_in, routed_out = litellm.cost_per_token(

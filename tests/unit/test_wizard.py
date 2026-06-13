@@ -108,9 +108,7 @@ class TestAnswers:
         path = wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", "70000"]))
         assert _written_config(path)["server"]["port"] == config.DEFAULT_PORT
 
-    def test_unknown_provider_falls_back_to_default_preset(
-        self, acr_home: Path
-    ) -> None:
+    def test_unknown_provider_falls_back_to_default_preset(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk(["no-such-provider", "", ""]))
         written = _written_config(path)
         assert written["tiers"]["fast"]["model"].startswith("deepseek/")
@@ -178,9 +176,7 @@ class TestPresetPricing:
     def test_deepseek_code_tier_pricier_than_fast_tier(self, acr_home: Path) -> None:
         # The code tier runs the pro model; it must not be cheaper than fast,
         # which would mean the flash/pro prices were transposed.
-        tiers = _written_config(
-            wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""]))
-        )["tiers"]
+        tiers = _written_config(wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""])))["tiers"]
         assert tiers["code"]["input_cost_per_1m"] >= tiers["fast"]["input_cost_per_1m"]
 
     def test_deepseek_prices_match_example_config(self, acr_home: Path) -> None:
@@ -191,9 +187,7 @@ class TestPresetPricing:
                 encoding="utf-8"
             )
         )
-        written = _written_config(
-            wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""]))
-        )
+        written = _written_config(wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""])))
         price_keys = (
             "input_cost_per_1m",
             "input_cached_cost_per_1m",

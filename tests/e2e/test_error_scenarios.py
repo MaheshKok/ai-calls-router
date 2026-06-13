@@ -54,6 +54,7 @@ tools:
 # Helper: build an Anthropic body with a Bash tool_result in the last message
 # ---------------------------------------------------------------------------
 
+
 def _body(*, system: str = "You are a bot.", tool_result_text: str = "ok") -> dict:
     """Return a minimal /v1/messages body with a Bash tool_result."""
     return {
@@ -90,6 +91,7 @@ def _body(*, system: str = "You are a bot.", tool_result_text: str = "ok") -> di
 # server.py line 84: JSON array body → passthrough
 # ---------------------------------------------------------------------------
 
+
 class TestJsonArrayBodyPassthrough:
     """A POST body that is a JSON array (not an object) must fall back to passthrough."""
 
@@ -113,17 +115,14 @@ class TestJsonArrayBodyPassthrough:
 # server.py line 95: malformed tier cfg (string value) → passthrough
 # ---------------------------------------------------------------------------
 
+
 class TestMalformedTierConfigPassthrough:
     """When the tier entry in the config is not a dict, routing falls back."""
 
-    def test_string_tier_cfg_falls_back_to_passthrough(
-        self, tmp_path, monkeypatch
-    ):
+    def test_string_tier_cfg_falls_back_to_passthrough(self, tmp_path, monkeypatch):
         """tier_cfg is a bare string → _try_route returns None → upstream serves."""
         upstream = Upstream()
-        with make_client(
-            MALFORMED_TIER_CONFIG, tmp_path, monkeypatch, upstream
-        ) as client:
+        with make_client(MALFORMED_TIER_CONFIG, tmp_path, monkeypatch, upstream) as client:
             body = _body()
             response = client.post("/v1/messages", json=body)
             assert response.status_code == 200
@@ -134,6 +133,7 @@ class TestMalformedTierConfigPassthrough:
 # routing.py line 101: leading user message in history
 # routing.py line 104: assistant with string content
 # ---------------------------------------------------------------------------
+
 
 class TestPendingToolNamesDefensiveSkips:
     """Messages with non-assistant roles or string content are skipped gracefully."""
@@ -153,6 +153,7 @@ class TestPendingToolNamesDefensiveSkips:
         # request actually routes (not passthrough).
         fake = FakeLitellm(response=make_response(text="routed"))
         import ai_calls_router.routing.engine as rc
+
         monkeypatch.setattr(rc, "load_litellm", lambda: fake)
 
         with make_client(FULL_CONFIG, tmp_path, monkeypatch, upstream) as client:

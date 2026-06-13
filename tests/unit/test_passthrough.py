@@ -41,9 +41,7 @@ class _Upstream:
         self.requests.append(request)
         if self._error is not None:
             raise self._error
-        return httpx.Response(
-            self._status_code, content=self._content, headers=self._headers
-        )
+        return httpx.Response(self._status_code, content=self._content, headers=self._headers)
 
 
 def _client(upstream: _Upstream) -> httpx.AsyncClient:
@@ -54,9 +52,7 @@ def _client(upstream: _Upstream) -> httpx.AsyncClient:
 async def _drain(response: Response) -> bytes:
     """Consume a StreamingResponse body iterator into bytes."""
     chunks = [chunk async for chunk in response.body_iterator]
-    return b"".join(
-        chunk.encode("utf-8") if isinstance(chunk, str) else chunk for chunk in chunks
-    )
+    return b"".join(chunk.encode("utf-8") if isinstance(chunk, str) else chunk for chunk in chunks)
 
 
 CLIENT_HEADERS = {
@@ -94,8 +90,13 @@ class TestForward:
         upstream = _Upstream()
         async with _client(upstream) as client:
             response = await pt.forward(
-                client, UPSTREAM, "POST", "/v1/messages", CLIENT_HEADERS,
-                b'{"model": "m"}', query="beta=true",
+                client,
+                UPSTREAM,
+                "POST",
+                "/v1/messages",
+                CLIENT_HEADERS,
+                b'{"model": "m"}',
+                query="beta=true",
             )
             await _drain(response)
         request = upstream.requests[0]

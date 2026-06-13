@@ -74,9 +74,7 @@ def _make_response(spec: dict[str, Any]) -> SimpleNamespace:
                 for tc in tool_calls
             ]
         message = SimpleNamespace(content=msg_spec.get("content"), tool_calls=tool_calls)
-        choices.append(
-            SimpleNamespace(finish_reason=choice_spec["finish_reason"], message=message)
-        )
+        choices.append(SimpleNamespace(finish_reason=choice_spec["finish_reason"], message=message))
     return SimpleNamespace(choices=choices, usage=SimpleNamespace(**spec.get("usage", {})))
 
 
@@ -136,9 +134,7 @@ class TestToAnthropicResponseSpec:
         # hasattr(message, "tool_calls") is False for raw objects without it.
         response = SimpleNamespace(
             choices=[
-                SimpleNamespace(
-                    finish_reason="stop", message=SimpleNamespace(content="plain")
-                )
+                SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content="plain"))
             ],
             usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1),
         )
@@ -155,9 +151,7 @@ class TestConvertMessagesSpec:
         assert body == snapshot
 
     def test_reasoning_content_not_added_to_user_messages(self) -> None:
-        converted = conversion.convert_messages_for_litellm(
-            [{"role": "user", "content": "hi"}]
-        )
+        converted = conversion.convert_messages_for_litellm([{"role": "user", "content": "hi"}])
         assert "reasoning_content" not in converted[0]
 
     def test_reasoning_content_preserved_if_already_set(self) -> None:

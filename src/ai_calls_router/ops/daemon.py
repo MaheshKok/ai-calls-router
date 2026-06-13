@@ -147,9 +147,7 @@ def start() -> int:
     if not _wait_healthy(_health_url()):
         child.terminate()
         config.pid_path().unlink(missing_ok=True)
-        raise DaemonError(
-            f"acr daemon did not become healthy; see {config.log_path()}"
-        )
+        raise DaemonError(f"acr daemon did not become healthy; see {config.log_path()}")
     return child.pid
 
 

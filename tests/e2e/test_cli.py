@@ -118,9 +118,7 @@ class TestStartStop:
 
 
 class TestInit:
-    def test_init_runs_wizard(
-        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_init_runs_wizard(self, acr_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[bool] = []
 
         def _wizard(**kwargs: Any) -> Path:
@@ -204,9 +202,7 @@ class TestServe:
         self, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
     ) -> None:
         config_file = Path(os.environ["ACR_CONFIG"])
-        config_file.write_text(
-            CONFIG_YAML + "premium:\n  provider: openai\n", encoding="utf-8"
-        )
+        config_file.write_text(CONFIG_YAML + "premium:\n  provider: openai\n", encoding="utf-8")
         runs: list[Any] = []
         monkeypatch.setattr(uvicorn, "run", lambda *a, **k: runs.append(a))
         assert cli.main(["serve"]) == 1

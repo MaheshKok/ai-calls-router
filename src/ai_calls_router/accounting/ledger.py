@@ -124,7 +124,5 @@ def format_report(summary: dict[str, Any]) -> str:
     ]
     for model in sorted(summary["by_model"]):
         bucket = summary["by_model"][model]
-        lines.append(
-            f"  {model}: {bucket['requests']} requests, saved ${bucket['saved_usd']:.2f}"
-        )
+        lines.append(f"  {model}: {bucket['requests']} requests, saved ${bucket['saved_usd']:.2f}")
     return "\n".join(lines)

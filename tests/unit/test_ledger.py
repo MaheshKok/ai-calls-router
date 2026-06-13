@@ -121,9 +121,7 @@ class TestAggregate:
         assert totals["savings_pct"] == 0.0
 
     def test_savings_pct_rounded_to_one_decimal(self) -> None:
-        summary = ledger.aggregate(
-            [_entry(saved_usd=1.0, premium_usd=3.0, routed_usd=2.0)]
-        )
+        summary = ledger.aggregate([_entry(saved_usd=1.0, premium_usd=3.0, routed_usd=2.0)])
         # 1/3 * 100 = 33.333... -> 33.3
         assert summary["totals"]["savings_pct"] == 33.3
 
@@ -151,7 +149,5 @@ class TestFormatReport:
     def test_report_is_provider_neutral(self) -> None:
         # The standalone proxy routes to any LiteLLM provider; the report
         # must not hardcode a provider name outside the per-model lines.
-        report = ledger.format_report(
-            ledger.aggregate([_entry(routed_model="groq/kimi-k2")])
-        )
+        report = ledger.format_report(ledger.aggregate([_entry(routed_model="groq/kimi-k2")]))
         assert "DeepSeek" not in report

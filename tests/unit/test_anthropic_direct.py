@@ -60,9 +60,7 @@ def _run_direct(
     """Drive direct_call with an injected MockTransport client."""
 
     async def _go() -> dict[str, Any] | None:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(recorder.handler)
-        ) as client:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(recorder.handler)) as client:
             return await ad.direct_call(body, tier_cfg, api_key, client=client)
 
     return asyncio.run(_go())
@@ -92,8 +90,7 @@ class TestProviderPrefix:
 class TestDirectEndpoint:
     def test_deepseek_prefix_maps_to_endpoint(self) -> None:
         assert (
-            ad.direct_endpoint("deepseek/deepseek-v4-flash")
-            == "https://api.deepseek.com/anthropic"
+            ad.direct_endpoint("deepseek/deepseek-v4-flash") == "https://api.deepseek.com/anthropic"
         )
 
     def test_any_deepseek_model_maps(self) -> None:
@@ -137,9 +134,7 @@ class TestDirectCall:
     def test_posts_to_anthropic_v1_messages(self) -> None:
         rec = _Recorder()
         _run_direct({"messages": []}, TIER_CFG, "KEY", rec)
-        assert (
-            str(rec.requests[0].url) == "https://api.deepseek.com/anthropic/v1/messages"
-        )
+        assert str(rec.requests[0].url) == "https://api.deepseek.com/anthropic/v1/messages"
         assert rec.requests[0].method == "POST"
 
     def test_payload_uses_native_model_id(self) -> None:
@@ -192,9 +187,7 @@ class TestDirectCall:
         assert result is None
         assert rec.requests == []
 
-    def test_creates_own_client_when_none_provided(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_creates_own_client_when_none_provided(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Covers the transient-client branch (own_client True -> aclose).
         rec = _Recorder()
         real_async_client = httpx.AsyncClient

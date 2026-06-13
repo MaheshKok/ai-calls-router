@@ -86,9 +86,7 @@ def upstream() -> _Upstream:
 
 
 @pytest.fixture()
-def client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: _Upstream
-) -> Any:
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: _Upstream) -> Any:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(CONFIG_YAML, encoding="utf-8")
     monkeypatch.setenv("ACR_CONFIG", str(config_file))
@@ -107,15 +105,11 @@ def _tool_result_body(tool_name: str = "Bash", stream: bool = False) -> dict[str
         "messages": [
             {
                 "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "id": "t1", "name": tool_name, "input": {}}
-                ],
+                "content": [{"type": "tool_use", "id": "t1", "name": tool_name, "input": {}}],
             },
             {
                 "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "output"}
-                ],
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "output"}],
             },
         ],
     }
@@ -142,17 +136,13 @@ class TestHealth:
 
 
 class TestMessagesPassthrough:
-    def test_opener_passes_through_to_upstream(
-        self, client: Any, upstream: _Upstream
-    ) -> None:
+    def test_opener_passes_through_to_upstream(self, client: Any, upstream: _Upstream) -> None:
         response = client.post("/v1/messages", json=_opener_body())
         assert response.json() == {"marker": "upstream"}
         assert upstream.requests[0].url.path == "/v1/messages"
         assert json.loads(upstream.requests[0].content) == _opener_body()
 
-    def test_client_auth_headers_reach_upstream(
-        self, client: Any, upstream: _Upstream
-    ) -> None:
+    def test_client_auth_headers_reach_upstream(self, client: Any, upstream: _Upstream) -> None:
         client.post(
             "/v1/messages",
             json=_opener_body(),
@@ -162,23 +152,17 @@ class TestMessagesPassthrough:
         assert request.headers["authorization"] == "Bearer oauth"
         assert request.headers["anthropic-version"] == "2023-06-01"
 
-    def test_premium_tool_result_passes_through(
-        self, client: Any, upstream: _Upstream
-    ) -> None:
+    def test_premium_tool_result_passes_through(self, client: Any, upstream: _Upstream) -> None:
         response = client.post("/v1/messages", json=_tool_result_body("Edit"))
         assert response.json() == {"marker": "upstream"}
         assert len(upstream.requests) == 1
 
-    def test_unmapped_tool_result_passes_through(
-        self, client: Any, upstream: _Upstream
-    ) -> None:
+    def test_unmapped_tool_result_passes_through(self, client: Any, upstream: _Upstream) -> None:
         response = client.post("/v1/messages", json=_tool_result_body("Mystery"))
         assert response.json() == {"marker": "upstream"}
         assert len(upstream.requests) == 1
 
-    def test_invalid_json_passes_through_verbatim(
-        self, client: Any, upstream: _Upstream
-    ) -> None:
+    def test_invalid_json_passes_through_verbatim(self, client: Any, upstream: _Upstream) -> None:
         response = client.post(
             "/v1/messages",
             content=b"not json at all",

@@ -101,9 +101,7 @@ def _fake_response(text: str = "routed reply") -> Any:
         A litellm ModelResponse stand-in carrying 1,000,000 prompt and 500,000
         completion tokens.
     """
-    return make_response(
-        text=text, prompt_tokens=1_000_000, completion_tokens=500_000
-    )
+    return make_response(text=text, prompt_tokens=1_000_000, completion_tokens=500_000)
 
 
 def _bash_tool_result_body(stream: bool = False) -> dict[str, Any]:
@@ -114,15 +112,11 @@ def _bash_tool_result_body(stream: bool = False) -> dict[str, Any]:
         "messages": [
             {
                 "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}
-                ],
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
             },
             {
                 "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "files"}
-                ],
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "files"}],
             },
         ],
     }
@@ -235,9 +229,7 @@ class TestStreamingRoutedTurn:
     ) -> None:
         monkeypatch.setattr(rc, "load_litellm", lambda: FakeLitellm(_fake_response()))
         with make_client(PRICED_CONFIG, tmp_path, monkeypatch, upstream) as client:
-            response = client.post(
-                "/v1/messages", json=_bash_tool_result_body(stream=True)
-            )
+            response = client.post("/v1/messages", json=_bash_tool_result_body(stream=True))
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
         assert "event: message_start" in response.text

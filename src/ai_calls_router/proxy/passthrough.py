@@ -22,9 +22,7 @@ logger = logging.getLogger("acr.passthrough")
 # Client-supplied values that must not be forwarded: httpx computes correct
 # host/content-length itself, and accept-encoding is forced to identity so
 # the relayed bytes match the relayed headers.
-HOP_BY_HOP_REQUEST_HEADERS = frozenset(
-    {"host", "content-length", "connection", "accept-encoding"}
-)
+HOP_BY_HOP_REQUEST_HEADERS = frozenset({"host", "content-length", "connection", "accept-encoding"})
 
 # Upstream framing headers that no longer describe the re-chunked relay.
 FRAMING_RESPONSE_HEADERS = frozenset(
@@ -60,9 +58,7 @@ def filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
         Headers safe to relay to the client of the streamed response.
     """
     return {
-        key: value
-        for key, value in headers.items()
-        if key.lower() not in FRAMING_RESPONSE_HEADERS
+        key: value for key, value in headers.items() if key.lower() not in FRAMING_RESPONSE_HEADERS
     }
 
 
@@ -104,9 +100,7 @@ def _bad_gateway(exc: Exception) -> Response:
         "type": "error",
         "error": {"type": "api_error", "message": f"acr upstream unreachable: {exc}"},
     }
-    return Response(
-        json.dumps(body), status_code=502, media_type="application/json"
-    )
+    return Response(json.dumps(body), status_code=502, media_type="application/json")
 
 
 async def forward(
