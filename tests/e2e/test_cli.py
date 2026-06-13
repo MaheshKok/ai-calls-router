@@ -68,7 +68,7 @@ class TestParser:
 
 class TestStatus:
     def test_running_daemon_reports_pid_and_url(
-        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+        self, *, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
     ) -> None:
         monkeypatch.setattr(daemon, "status", lambda: 4242)
         assert cli.main(["status"]) == 0
@@ -77,7 +77,7 @@ class TestStatus:
         assert "http://127.0.0.1:9321" in out
 
     def test_stopped_daemon_exits_nonzero(
-        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+        self, *, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
     ) -> None:
         monkeypatch.setattr(daemon, "status", lambda: None)
         assert cli.main(["status"]) == 1
@@ -86,14 +86,14 @@ class TestStatus:
 
 class TestStartStop:
     def test_start_reports_listen_url(
-        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+        self, *, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
     ) -> None:
         monkeypatch.setattr(daemon, "start", lambda: 4242)
         assert cli.main(["start"]) == 0
         assert "http://127.0.0.1:9321" in capsys.readouterr().out
 
     def test_start_failure_reports_error_without_traceback(
-        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+        self, *, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
     ) -> None:
         def _fail() -> int:
             raise daemon.DaemonError("did not become healthy")
@@ -103,14 +103,14 @@ class TestStartStop:
         assert "did not become healthy" in capsys.readouterr().err
 
     def test_stop_running_daemon(
-        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+        self, *, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
     ) -> None:
         monkeypatch.setattr(daemon, "stop", lambda: True)
         assert cli.main(["stop"]) == 0
         assert "stopped" in capsys.readouterr().out
 
     def test_stop_when_not_running_is_not_an_error(
-        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+        self, *, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
     ) -> None:
         monkeypatch.setattr(daemon, "stop", lambda: False)
         assert cli.main(["stop"]) == 0
@@ -149,7 +149,7 @@ class TestCode:
         assert env.get("PATH") == os.environ.get("PATH")
 
     def test_code_aborts_when_daemon_cannot_start(
-        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+        self, *, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
     ) -> None:
         def _fail() -> int:
             raise daemon.DaemonError("boom")
@@ -199,7 +199,7 @@ class TestServe:
         assert runs[0]["port"] == 9321
 
     def test_serve_rejects_unsupported_premium_provider(
-        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+        self, *, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
     ) -> None:
         config_file = Path(os.environ["ACR_CONFIG"])
         config_file.write_text(CONFIG_YAML + "premium:\n  provider: openai\n", encoding="utf-8")

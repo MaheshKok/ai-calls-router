@@ -38,6 +38,7 @@ class _Recorder:
 
     def __init__(
         self,
+        *,
         status: int = 200,
         payload: dict[str, Any] | None = None,
         raise_exc: Exception | None = None,
@@ -55,13 +56,15 @@ class _Recorder:
 
 
 def _run_direct(
-    body: dict[str, Any], tier_cfg: dict[str, Any], api_key: str, recorder: _Recorder
+    *, body: dict[str, Any], tier_cfg: dict[str, Any], api_key: str, recorder: _Recorder
 ) -> dict[str, Any] | None:
     """Drive direct_call with an injected MockTransport client."""
 
     async def _go() -> dict[str, Any] | None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(recorder.handler)) as client:
-            return await ad.direct_call(body, tier_cfg, api_key, client=client)
+            return await ad.direct_call(
+                body=body, tier_cfg=tier_cfg, api_key=api_key, client=client
+            )
 
     return asyncio.run(_go())
 
@@ -128,31 +131,38 @@ class TestNativeModelId:
 class TestDirectCall:
     def test_returns_parsed_body_on_200(self) -> None:
         rec = _Recorder()
-        result = _run_direct({"messages": []}, TIER_CFG, "KEY", rec)
+        result = _run_direct(body={"messages": []}, tier_cfg=TIER_CFG, api_key="KEY", recorder=rec)
         assert result == RESPONSE_JSON
 
     def test_posts_to_anthropic_v1_messages(self) -> None:
         rec = _Recorder()
-        _run_direct({"messages": []}, TIER_CFG, "KEY", rec)
+        _run_direct(body={"messages": []}, tier_cfg=TIER_CFG, api_key="KEY", recorder=rec)
         assert str(rec.requests[0].url) == "https://api.deepseek.com/anthropic/v1/messages"
         assert rec.requests[0].method == "POST"
 
     def test_payload_uses_native_model_id(self) -> None:
         rec = _Recorder()
-        _run_direct({"messages": [], "model": "claude-sonnet-4"}, TIER_CFG, "KEY", rec)
+        _run_direct(
+            body={"messages": [], "model": "claude-sonnet-4"},
+            tier_cfg=TIER_CFG,
+            api_key="KEY",
+            recorder=rec,
+        )
         sent = json.loads(rec.requests[0].content)
         assert sent["model"] == "deepseek-v4-pro"
 
     def test_payload_disables_thinking_even_when_client_enabled_it(self) -> None:
         rec = _Recorder()
         body = {"messages": [], "thinking": {"type": "enabled", "budget_tokens": 5000}}
-        _run_direct(body, TIER_CFG, "KEY", rec)
+        _run_direct(body=body, tier_cfg=TIER_CFG, api_key="KEY", recorder=rec)
         sent = json.loads(rec.requests[0].content)
         assert sent["thinking"] == {"type": "disabled"}
 
     def test_authorization_carries_only_tier_key(self) -> None:
         rec = _Recorder()
-        _run_direct({"messages": []}, TIER_CFG, "sk-tier-secret", rec)
+        _run_direct(
+            body={"messages": []}, tier_cfg=TIER_CFG, api_key="sk-tier-secret", recorder=rec
+        )
         headers = rec.requests[0].headers
         assert headers["authorization"] == "Bearer sk-tier-secret"
         assert headers["anthropic-version"] == "2023-06-01"
@@ -163,27 +173,40 @@ class TestDirectCall:
         rec = _Recorder()
         body = {"messages": [{"role": "user", "content": "hi"}], "model": "claude-x"}
         snapshot = json.loads(json.dumps(body))
-        _run_direct(body, TIER_CFG, "KEY", rec)
+        _run_direct(body=body, tier_cfg=TIER_CFG, api_key="KEY", recorder=rec)
         assert body == snapshot
 
     @pytest.mark.parametrize("status", [400, 401, 429, 500, 503])
     def test_non_200_returns_none(self, status: int) -> None:
         rec = _Recorder(status=status, payload={"error": "nope"})
-        assert _run_direct({"messages": []}, TIER_CFG, "KEY", rec) is None
+        assert (
+            _run_direct(body={"messages": []}, tier_cfg=TIER_CFG, api_key="KEY", recorder=rec)
+            is None
+        )
 
     def test_transport_error_returns_none(self) -> None:
         rec = _Recorder(raise_exc=httpx.ConnectError("boom"))
-        assert _run_direct({"messages": []}, TIER_CFG, "KEY", rec) is None
+        assert (
+            _run_direct(body={"messages": []}, tier_cfg=TIER_CFG, api_key="KEY", recorder=rec)
+            is None
+        )
 
     def test_unmapped_model_returns_none_without_request(self) -> None:
         rec = _Recorder()
-        result = _run_direct({"messages": []}, {"model": "groq/llama-3.3-70b"}, "KEY", rec)
+        result = _run_direct(
+            body={"messages": []},
+            tier_cfg={"model": "groq/llama-3.3-70b"},
+            api_key="KEY",
+            recorder=rec,
+        )
         assert result is None
         assert rec.requests == []
 
     def test_missing_model_returns_none_without_request(self) -> None:
         rec = _Recorder()
-        result = _run_direct({"messages": []}, {"max_tokens": 8192}, "KEY", rec)
+        result = _run_direct(
+            body={"messages": []}, tier_cfg={"max_tokens": 8192}, api_key="KEY", recorder=rec
+        )
         assert result is None
         assert rec.requests == []
 
@@ -198,7 +221,7 @@ class TestDirectCall:
         monkeypatch.setattr(ad.httpx, "AsyncClient", _factory)
 
         async def _go() -> dict[str, Any] | None:
-            return await ad.direct_call({"messages": []}, TIER_CFG, "KEY")
+            return await ad.direct_call(body={"messages": []}, tier_cfg=TIER_CFG, api_key="KEY")
 
         result = asyncio.run(_go())
         assert result == RESPONSE_JSON

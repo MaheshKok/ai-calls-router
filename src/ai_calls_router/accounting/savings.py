@@ -130,12 +130,12 @@ def _routed_prices_from_tier(
 
 
 def record_routing_savings(
+    *,
     premium_model: str | None,
     routed_model: str,
     input_tokens: int,
     output_tokens: int,
     ledger: Path | None = None,
-    *,
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
     routed_prices: tuple[float, float, float] | None = None,
@@ -214,11 +214,11 @@ def record_routing_savings(
 
 
 def record_savings_from_response(
+    *,
     premium_model: str | None,
     routed_model: str,
     response_body: Any,
     ledger: Path | None = None,
-    *,
     tier_cfg: Any = None,
 ) -> None:
     """Record savings using token counts taken from a routed response body.
@@ -245,11 +245,11 @@ def record_savings_from_response(
         logger.warning("usage extraction failed: %s", exc)
         return
     record_routing_savings(
-        premium_model,
-        routed_model,
-        input_tokens,
-        output_tokens,
-        ledger,
+        premium_model=premium_model,
+        routed_model=routed_model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        ledger=ledger,
         cache_read_tokens=cache_read,
         cache_creation_tokens=cache_creation,
         routed_prices=_routed_prices_from_tier(tier_cfg),

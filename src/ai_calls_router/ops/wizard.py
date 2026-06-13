@@ -172,7 +172,9 @@ def _default_key_env(provider: str, models: dict[str, str]) -> str:
     return f"{prefix.upper().replace('-', '_')}_API_KEY"
 
 
-def _build_config(port: int, models: dict[str, str], key_env: str, provider: str) -> dict[str, Any]:
+def _build_config(
+    *, port: int, models: dict[str, str], key_env: str, provider: str
+) -> dict[str, Any]:
     """Assemble the full config.yaml mapping.
 
     Args:
@@ -249,7 +251,10 @@ def run_wizard(ask: AskFn = input) -> Path:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        yaml.safe_dump(_build_config(port, models, key_env, provider), sort_keys=False),
+        yaml.safe_dump(
+            _build_config(port=port, models=models, key_env=key_env, provider=provider),
+            sort_keys=False,
+        ),
         encoding="utf-8",
     )
     return path

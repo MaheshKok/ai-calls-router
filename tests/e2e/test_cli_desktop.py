@@ -10,6 +10,7 @@ from ai_calls_router import cli
 
 
 def test_desktop_on_status_off_round_trip_with_tmp_config(
+    *,
     tmp_path: Path,
     monkeypatch: Any,
     capsys: Any,

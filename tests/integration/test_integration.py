@@ -129,10 +129,12 @@ class TestInvariant1ModelMasking:
     """Invariant 1: served body claims the client-requested model."""
 
     def test_served_body_reports_client_model_not_routed_model(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
+        self, *, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
     ) -> None:
         monkeypatch.setattr(rc, "load_litellm", lambda: FakeLitellm(_fake_response()))
-        with make_client(PRICED_CONFIG, tmp_path, monkeypatch, upstream) as client:
+        with make_client(
+            config_yaml=PRICED_CONFIG, tmp_path=tmp_path, monkeypatch=monkeypatch, upstream=upstream
+        ) as client:
             response = client.post("/v1/messages", json=_bash_tool_result_body())
         assert response.status_code == 200
         body = response.json()
@@ -145,11 +147,13 @@ class TestInvariant2KeyIsolation:
     """Invariant 2: only the tier key reaches the routed provider."""
 
     def test_client_auth_never_forwarded_only_tier_key_sent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
+        self, *, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
     ) -> None:
         fake = FakeLitellm(_fake_response())
         monkeypatch.setattr(rc, "load_litellm", lambda: fake)
-        with make_client(PRICED_CONFIG, tmp_path, monkeypatch, upstream) as client:
+        with make_client(
+            config_yaml=PRICED_CONFIG, tmp_path=tmp_path, monkeypatch=monkeypatch, upstream=upstream
+        ) as client:
             client.post(
                 "/v1/messages",
                 json=_bash_tool_result_body(),
@@ -171,11 +175,13 @@ class TestInvariant3FailureFallsBackToPassthrough:
     """Invariant 3: a routed-call failure never breaks the turn."""
 
     def test_provider_error_falls_back_to_premium_upstream(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
+        self, *, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
     ) -> None:
         fake = FakeLitellm(error=RuntimeError("provider down"))
         monkeypatch.setattr(rc, "load_litellm", lambda: fake)
-        with make_client(PRICED_CONFIG, tmp_path, monkeypatch, upstream) as client:
+        with make_client(
+            config_yaml=PRICED_CONFIG, tmp_path=tmp_path, monkeypatch=monkeypatch, upstream=upstream
+        ) as client:
             response = client.post("/v1/messages", json=_bash_tool_result_body())
         assert response.json() == {"marker": "upstream"}
         assert len(upstream.requests) == 1
@@ -186,10 +192,12 @@ class TestInvariant4LedgerRecordsTrueModel:
     """Invariant 4: the ledger records the true routed model and prices it."""
 
     def test_ledger_entry_uses_routed_model_with_config_prices(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
+        self, *, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
     ) -> None:
         monkeypatch.setattr(rc, "load_litellm", lambda: FakeLitellm(_fake_response()))
-        with make_client(PRICED_CONFIG, tmp_path, monkeypatch, upstream) as client:
+        with make_client(
+            config_yaml=PRICED_CONFIG, tmp_path=tmp_path, monkeypatch=monkeypatch, upstream=upstream
+        ) as client:
             response = client.post("/v1/messages", json=_bash_tool_result_body())
         assert response.json()["model"] == PREMIUM_MODEL
         entries = read_ledger(tmp_path)
@@ -208,10 +216,15 @@ class TestInvariant5UnpricedSkipsLedger:
     """Invariant 5: an unpriced routed model writes no ledger entry."""
 
     def test_unpriced_routed_model_serves_turn_without_ledger_entry(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
+        self, *, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
     ) -> None:
         monkeypatch.setattr(rc, "load_litellm", lambda: FakeLitellm(_fake_response()))
-        with make_client(UNPRICED_CONFIG, tmp_path, monkeypatch, upstream) as client:
+        with make_client(
+            config_yaml=UNPRICED_CONFIG,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            upstream=upstream,
+        ) as client:
             response = client.post("/v1/messages", json=_bash_tool_result_body())
         # The turn is still served on the cheap tier, masked to the client model.
         assert response.status_code == 200
@@ -225,10 +238,12 @@ class TestStreamingRoutedTurn:
     """A streaming routed turn is served as a synthesized Messages SSE stream."""
 
     def test_streaming_request_served_as_masked_sse(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
+        self, *, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
     ) -> None:
         monkeypatch.setattr(rc, "load_litellm", lambda: FakeLitellm(_fake_response()))
-        with make_client(PRICED_CONFIG, tmp_path, monkeypatch, upstream) as client:
+        with make_client(
+            config_yaml=PRICED_CONFIG, tmp_path=tmp_path, monkeypatch=monkeypatch, upstream=upstream
+        ) as client:
             response = client.post("/v1/messages", json=_bash_tool_result_body(stream=True))
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")

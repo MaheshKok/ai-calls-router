@@ -87,12 +87,13 @@ def _request_body(model: str = PREMIUM_MODEL) -> dict[str, Any]:
     }
 
 
-def _fake_tool_call(call_id: str, name: str, arguments: str) -> Any:
+def _fake_tool_call(*, call_id: str, name: str, arguments: str) -> Any:
     """Build an OpenAI-shaped tool call object."""
     return SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=arguments))
 
 
 def _call(
+    *,
     monkeypatch: pytest.MonkeyPatch,
     fake: FakeLitellm,
     body: dict[str, Any] | None = None,
@@ -103,11 +104,11 @@ def _call(
     monkeypatch.setattr(rc, "load_litellm", lambda: fake)
     return asyncio.run(
         rc.routed_call(
-            body if body is not None else _request_body(),
-            "fast",
-            TIER_CFG,
-            api_key,
-            settings if settings is not None else SETTINGS,
+            body=body if body is not None else _request_body(),
+            tier_name="fast",
+            tier_cfg=TIER_CFG,
+            api_key=api_key,
+            settings=settings if settings is not None else SETTINGS,
         )
     )
 
@@ -228,7 +229,7 @@ class TestRoutedCall:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Invariant 1: the served body claims the client-requested model.
-        response = _call(monkeypatch, FakeLitellm(_fake_response()))
+        response = _call(monkeypatch=monkeypatch, fake=FakeLitellm(_fake_response()))
         assert response is not None
         assert response.status_code == 200
         assert response.body["model"] == PREMIUM_MODEL
@@ -237,7 +238,7 @@ class TestRoutedCall:
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
     ) -> None:
         # Invariant 4: accounting reads the true routed model, pre-mask.
-        _call(monkeypatch, FakeLitellm(_fake_response()))
+        _call(monkeypatch=monkeypatch, fake=FakeLitellm(_fake_response()))
         entries = [json.loads(line) for line in ledger_file.read_text().splitlines()]
         assert len(entries) == 1
         assert entries[0]["routed_model"] == CHEAP_MODEL
@@ -246,38 +247,38 @@ class TestRoutedCall:
 
     def test_provider_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Invariant 3: every failure path falls back to passthrough.
-        response = _call(monkeypatch, FakeLitellm(error=RuntimeError("boom")))
+        response = _call(monkeypatch=monkeypatch, fake=FakeLitellm(error=RuntimeError("boom")))
         assert response is None
 
     def test_no_ledger_entry_when_provider_fails(
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
     ) -> None:
-        _call(monkeypatch, FakeLitellm(error=RuntimeError("boom")))
+        _call(monkeypatch=monkeypatch, fake=FakeLitellm(error=RuntimeError("boom")))
         assert not ledger_file.exists()
 
     def test_escalating_response_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        tool_calls = [_fake_tool_call("c1", "Edit", '{"file_path": "x"}')]
+        tool_calls = [_fake_tool_call(call_id="c1", name="Edit", arguments='{"file_path": "x"}')]
         fake = FakeLitellm(
             _fake_response(text=None, tool_calls=tool_calls, finish_reason="tool_calls")
         )
-        assert _call(monkeypatch, fake) is None
+        assert _call(monkeypatch=monkeypatch, fake=fake) is None
 
     def test_no_ledger_entry_when_escalated(
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
     ) -> None:
-        tool_calls = [_fake_tool_call("c1", "Write", '{"file_path": "x"}')]
+        tool_calls = [_fake_tool_call(call_id="c1", name="Write", arguments='{"file_path": "x"}')]
         fake = FakeLitellm(
             _fake_response(text=None, tool_calls=tool_calls, finish_reason="tool_calls")
         )
-        _call(monkeypatch, fake)
+        _call(monkeypatch=monkeypatch, fake=fake)
         assert not ledger_file.exists()
 
     def test_non_premium_tool_call_is_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        tool_calls = [_fake_tool_call("c1", "Bash", '{"command": "ls"}')]
+        tool_calls = [_fake_tool_call(call_id="c1", name="Bash", arguments='{"command": "ls"}')]
         fake = FakeLitellm(
             _fake_response(text=None, tool_calls=tool_calls, finish_reason="tool_calls")
         )
-        response = _call(monkeypatch, fake)
+        response = _call(monkeypatch=monkeypatch, fake=fake)
         assert response is not None
         blocks = response.body["content"]
         assert blocks[0]["type"] == "tool_use"
@@ -287,19 +288,19 @@ class TestRoutedCall:
     def test_only_tier_key_sent_to_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Invariant 2: routed calls carry only the tier key.
         fake = FakeLitellm(_fake_response())
-        _call(monkeypatch, fake, api_key="test-tier-key")
+        _call(monkeypatch=monkeypatch, fake=fake, api_key="test-tier-key")
         kwargs = fake.calls[0]
         assert kwargs["api_key"] == "test-tier-key"
         assert not any("auth" in key.lower() for key in kwargs)
 
     def test_stream_flag_not_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = FakeLitellm(_fake_response())
-        _call(monkeypatch, fake)
+        _call(monkeypatch=monkeypatch, fake=fake)
         assert "stream" not in fake.calls[0]
 
     def test_max_tokens_clamped_in_provider_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = FakeLitellm(_fake_response())
-        _call(monkeypatch, fake)
+        _call(monkeypatch=monkeypatch, fake=fake)
         assert fake.calls[0]["max_tokens"] == 8192
         assert fake.calls[0]["model"] == CHEAP_MODEL
 
@@ -335,7 +336,7 @@ class TestRoutedCall:
             },
         }
         fake = FakeLitellm(_fake_response())
-        _call(monkeypatch, fake, body=body, settings=settings)
+        _call(monkeypatch=monkeypatch, fake=fake, body=body, settings=settings)
         sent = fake.calls[0]["messages"]
         old_result = next(m for m in sent if m.get("tool_call_id") == "t1")
         assert "truncated" in old_result["content"]
@@ -348,7 +349,7 @@ class TestRoutedCall:
     ) -> None:
         # Invariant 5: no fabricated costs; zero-token usage writes nothing.
         fake = FakeLitellm(_fake_response(prompt_tokens=0, completion_tokens=0))
-        response = _call(monkeypatch, fake)
+        response = _call(monkeypatch=monkeypatch, fake=fake)
         assert response is not None
         assert not ledger_file.exists()
 
@@ -423,12 +424,10 @@ def _call_direct(
     """
     captured: dict[str, Any] = {}
 
-    async def _fake_direct(
-        prepared: dict[str, Any], cfg: dict[str, Any], key: str, **_kw: Any
-    ) -> dict[str, Any] | None:
-        captured["body"] = prepared
-        captured["tier_cfg"] = cfg
-        captured["api_key"] = key
+    async def _fake_direct(*, body: dict[str, Any], tier_cfg: dict[str, Any], api_key: str) -> Any:
+        captured["body"] = body
+        captured["tier_cfg"] = tier_cfg
+        captured["api_key"] = api_key
         if isinstance(direct_response, Exception):
             raise direct_response
         return direct_response
@@ -448,11 +447,11 @@ def _call_direct(
 
     result = asyncio.run(
         rc.routed_call(
-            body if body is not None else _request_body(),
-            "code",
-            tier_cfg if tier_cfg is not None else DS_TIER,
-            api_key,
-            settings if settings is not None else SETTINGS,
+            body=body if body is not None else _request_body(),
+            tier_name="code",
+            tier_cfg=tier_cfg if tier_cfg is not None else DS_TIER,
+            api_key=api_key,
+            settings=settings if settings is not None else SETTINGS,
         )
     )
     return result, captured, compress_calls

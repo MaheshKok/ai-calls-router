@@ -153,7 +153,13 @@ class TestRecordRoutingSavings:
         # 1M input at $1/1M = $1; 500k output at $2/1M = $1 -> routed $2.
         # Same volume at $10/$20 per 1M -> premium $20. Saved = $18.
         ledger = tmp_path / "savings.jsonl"
-        savings.record_routing_savings(PREMIUM_MODEL, CHEAP_MODEL, 1_000_000, 500_000, ledger)
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            ledger=ledger,
+        )
         entries = _read_entries(ledger)
         assert len(entries) == 1
         entry = entries[0]
@@ -168,46 +174,96 @@ class TestRecordRoutingSavings:
 
     def test_creates_parent_directories(self, tmp_path: Path) -> None:
         ledger = tmp_path / "nested" / "dir" / "savings.jsonl"
-        savings.record_routing_savings(PREMIUM_MODEL, CHEAP_MODEL, 1_000_000, 0, ledger)
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
+        )
         assert len(_read_entries(ledger)) == 1
 
     def test_appends_one_line_per_call(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"
-        savings.record_routing_savings(PREMIUM_MODEL, CHEAP_MODEL, 1_000_000, 0, ledger)
-        savings.record_routing_savings(PREMIUM_MODEL, CHEAP_MODEL, 2_000_000, 0, ledger)
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
+        )
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=2_000_000,
+            output_tokens=0,
+            ledger=ledger,
+        )
         entries = _read_entries(ledger)
         assert [e["input_tokens"] for e in entries] == [1_000_000, 2_000_000]
 
     def test_skips_when_premium_model_missing(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"
-        savings.record_routing_savings(None, CHEAP_MODEL, 1_000_000, 0, ledger)
-        savings.record_routing_savings("", CHEAP_MODEL, 1_000_000, 0, ledger)
+        savings.record_routing_savings(
+            premium_model=None,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
+        )
+        savings.record_routing_savings(
+            premium_model="",
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
+        )
         assert not ledger.exists()
 
     def test_skips_when_premium_equals_routed(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"
-        savings.record_routing_savings(CHEAP_MODEL, CHEAP_MODEL, 1_000_000, 0, ledger)
+        savings.record_routing_savings(
+            premium_model=CHEAP_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
+        )
         assert not ledger.exists()
 
     def test_skips_when_premium_unpriced(self, tmp_path: Path) -> None:
         # Invariant 5: never fabricate cost numbers.
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            "acr-unpriced/premium-xyz", CHEAP_MODEL, 1_000_000, 0, ledger
+            premium_model="acr-unpriced/premium-xyz",
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
         )
         assert not ledger.exists()
 
     def test_skips_when_routed_unpriced(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL, "acr-unpriced/routed-xyz", 1_000_000, 0, ledger
+            premium_model=PREMIUM_MODEL,
+            routed_model="acr-unpriced/routed-xyz",
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
         )
         assert not ledger.exists()
 
     def test_skips_when_zero_tokens(self, tmp_path: Path) -> None:
         # Zero volume prices to $0 premium -> no honest savings figure.
         ledger = tmp_path / "savings.jsonl"
-        savings.record_routing_savings(PREMIUM_MODEL, CHEAP_MODEL, 0, 0, ledger)
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=0,
+            output_tokens=0,
+            ledger=ledger,
+        )
         assert not ledger.exists()
 
     def test_default_ledger_honors_env_override(
@@ -215,19 +271,35 @@ class TestRecordRoutingSavings:
     ) -> None:
         ledger = tmp_path / "env-ledger.jsonl"
         monkeypatch.setenv("ACR_SAVINGS_LEDGER", str(ledger))
-        savings.record_routing_savings(PREMIUM_MODEL, CHEAP_MODEL, 1_000_000, 0)
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+        )
         assert len(_read_entries(ledger)) == 1
 
     def test_unwritable_ledger_never_raises(self, tmp_path: Path) -> None:
         # A directory path cannot be opened for append; must be swallowed.
-        savings.record_routing_savings(PREMIUM_MODEL, CHEAP_MODEL, 1_000_000, 0, tmp_path)
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=tmp_path,
+        )
 
 
 class TestRecordSavingsFromResponse:
     def test_extracts_usage_tokens(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"
         response = {"usage": {"input_tokens": 1_000_000, "output_tokens": 500_000}}
-        savings.record_savings_from_response(PREMIUM_MODEL, CHEAP_MODEL, response, ledger)
+        savings.record_savings_from_response(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            response_body=response,
+            ledger=ledger,
+        )
         entries = _read_entries(ledger)
         assert len(entries) == 1
         assert entries[0]["input_tokens"] == 1_000_000
@@ -235,19 +307,33 @@ class TestRecordSavingsFromResponse:
 
     def test_missing_usage_writes_nothing(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"
-        savings.record_savings_from_response(PREMIUM_MODEL, CHEAP_MODEL, {}, ledger)
+        savings.record_savings_from_response(
+            premium_model=PREMIUM_MODEL, routed_model=CHEAP_MODEL, response_body={}, ledger=ledger
+        )
         assert not ledger.exists()
 
     def test_non_dict_response_never_raises(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"
-        savings.record_savings_from_response(PREMIUM_MODEL, CHEAP_MODEL, None, ledger)
-        savings.record_savings_from_response(PREMIUM_MODEL, CHEAP_MODEL, "junk", ledger)
+        savings.record_savings_from_response(
+            premium_model=PREMIUM_MODEL, routed_model=CHEAP_MODEL, response_body=None, ledger=ledger
+        )
+        savings.record_savings_from_response(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            response_body="junk",
+            ledger=ledger,
+        )
         assert not ledger.exists()
 
     def test_null_usage_values_treated_as_zero(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"
         response = {"usage": {"input_tokens": None, "output_tokens": None}}
-        savings.record_savings_from_response(PREMIUM_MODEL, CHEAP_MODEL, response, ledger)
+        savings.record_savings_from_response(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            response_body=response,
+            ledger=ledger,
+        )
         assert not ledger.exists()
 
 
@@ -330,11 +416,11 @@ class TestCacheAwareSavings:
         #   premium = 10.0 + 1.0                            = 11.0
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL,
-            CHEAP_MODEL,
-            200_000,
-            50_000,
-            ledger,
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=200_000,
+            output_tokens=50_000,
+            ledger=ledger,
             cache_read_tokens=700_000,
             cache_creation_tokens=100_000,
             routed_prices=DS_ROUTED_PRICES,
@@ -353,20 +439,20 @@ class TestCacheAwareSavings:
         hit_ledger = tmp_path / "hit.jsonl"
         miss_ledger = tmp_path / "miss.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL,
-            CHEAP_MODEL,
-            0,
-            0,
-            hit_ledger,
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=0,
+            output_tokens=0,
+            ledger=hit_ledger,
             cache_read_tokens=1_000_000,
             routed_prices=DS_ROUTED_PRICES,
         )
         savings.record_routing_savings(
-            PREMIUM_MODEL,
-            CHEAP_MODEL,
-            1_000_000,
-            0,
-            miss_ledger,
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=miss_ledger,
             routed_prices=DS_ROUTED_PRICES,
         )
         hit_usd = _read_entries(hit_ledger)[0]["routed_usd"]
@@ -378,11 +464,11 @@ class TestCacheAwareSavings:
         # cache_creation tokens are written-not-read, so they cost a full miss.
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL,
-            CHEAP_MODEL,
-            0,
-            0,
-            ledger,
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=0,
+            output_tokens=0,
+            ledger=ledger,
             cache_creation_tokens=1_000_000,
             routed_prices=DS_ROUTED_PRICES,
         )
@@ -396,11 +482,11 @@ class TestCacheAwareSavings:
         # counterfactual must price hit+miss, not misses alone.
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL,
-            CHEAP_MODEL,
-            0,
-            0,
-            ledger,
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=0,
+            output_tokens=0,
+            ledger=ledger,
             cache_read_tokens=1_000_000,
             routed_prices=DS_ROUTED_PRICES,
         )
@@ -412,11 +498,11 @@ class TestCacheAwareSavings:
         # tokens must still count toward the prompt total on both sides.
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL,
-            CHEAP_MODEL,
-            0,
-            0,
-            ledger,
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=0,
+            output_tokens=0,
+            ledger=ledger,
             cache_read_tokens=600_000,
             cache_creation_tokens=400_000,
         )
@@ -429,11 +515,11 @@ class TestCacheAwareSavings:
     def test_negative_cache_counts_are_clamped_to_zero(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL,
-            CHEAP_MODEL,
-            1_000_000,
-            0,
-            ledger,
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
             cache_read_tokens=-5,
             cache_creation_tokens=-9,
             routed_prices=DS_ROUTED_PRICES,
@@ -449,11 +535,11 @@ class TestCacheAwareSavings:
         # never credited as a discount against the routed cost.
         ledger = tmp_path / "savings.jsonl"
         savings.record_routing_savings(
-            PREMIUM_MODEL,
-            CHEAP_MODEL,
-            1_000_000,
-            -100,
-            ledger,
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=-100,
+            ledger=ledger,
             routed_prices=DS_ROUTED_PRICES,
         )
         entry = _read_entries(ledger)[0]
@@ -482,7 +568,11 @@ class TestCacheAwareSavings:
             "output_cost_per_1m": 0.87,
         }
         savings.record_savings_from_response(
-            PREMIUM_MODEL, CHEAP_MODEL, response, ledger, tier_cfg=tier_cfg
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            response_body=response,
+            ledger=ledger,
+            tier_cfg=tier_cfg,
         )
         entry = _read_entries(ledger)[0]
         assert entry["cache_read_input_tokens"] == 700_000
@@ -495,7 +585,12 @@ class TestCacheAwareSavings:
         # and cache fields default to zero.
         ledger = tmp_path / "savings.jsonl"
         response = {"usage": {"input_tokens": 1_000_000, "output_tokens": 0}}
-        savings.record_savings_from_response(PREMIUM_MODEL, CHEAP_MODEL, response, ledger)
+        savings.record_savings_from_response(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            response_body=response,
+            ledger=ledger,
+        )
         entry = _read_entries(ledger)[0]
         assert entry["cache_read_input_tokens"] == 0
         assert entry["routed_usd"] == pytest.approx(1.0, abs=1e-6)
@@ -538,5 +633,10 @@ class TestFailOpen:
         """
         ledger = tmp_path / "savings.jsonl"
         response = {"usage": {"input_tokens": "abc", "output_tokens": 5}}
-        savings.record_savings_from_response(PREMIUM_MODEL, CHEAP_MODEL, response, ledger)
+        savings.record_savings_from_response(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            response_body=response,
+            ledger=ledger,
+        )
         assert not ledger.exists()

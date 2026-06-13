@@ -26,6 +26,7 @@ class _Upstream:
 
     def __init__(
         self,
+        *,
         status_code: int = 200,
         content: bytes = b'{"ok": true}',
         headers: dict[str, str] | None = None,
@@ -90,12 +91,12 @@ class TestForward:
         upstream = _Upstream()
         async with _client(upstream) as client:
             response = await pt.forward(
-                client,
-                UPSTREAM,
-                "POST",
-                "/v1/messages",
-                CLIENT_HEADERS,
-                b'{"model": "m"}',
+                client=client,
+                upstream=UPSTREAM,
+                method="POST",
+                path="/v1/messages",
+                headers=CLIENT_HEADERS,
+                body=b'{"model": "m"}',
                 query="beta=true",
             )
             await _drain(response)
@@ -109,7 +110,12 @@ class TestForward:
         upstream = _Upstream()
         async with _client(upstream) as client:
             response = await pt.forward(
-                client, UPSTREAM, "POST", "/v1/messages", CLIENT_HEADERS, b"{}"
+                client=client,
+                upstream=UPSTREAM,
+                method="POST",
+                path="/v1/messages",
+                headers=CLIENT_HEADERS,
+                body=b"{}",
             )
             await _drain(response)
         request = upstream.requests[0]
@@ -120,7 +126,12 @@ class TestForward:
         upstream = _Upstream()
         async with _client(upstream) as client:
             response = await pt.forward(
-                client, UPSTREAM, "POST", "/v1/messages", CLIENT_HEADERS, b"{}"
+                client=client,
+                upstream=UPSTREAM,
+                method="POST",
+                path="/v1/messages",
+                headers=CLIENT_HEADERS,
+                body=b"{}",
             )
             await _drain(response)
         request = upstream.requests[0]
@@ -132,7 +143,12 @@ class TestForward:
         upstream = _Upstream(status_code=429, content=b'{"type": "error"}')
         async with _client(upstream) as client:
             response = await pt.forward(
-                client, UPSTREAM, "POST", "/v1/messages", CLIENT_HEADERS, b"{}"
+                client=client,
+                upstream=UPSTREAM,
+                method="POST",
+                path="/v1/messages",
+                headers=CLIENT_HEADERS,
+                body=b"{}",
             )
             body = await _drain(response)
         assert response.status_code == 429
@@ -147,7 +163,12 @@ class TestForward:
         )
         async with _client(upstream) as client:
             response = await pt.forward(
-                client, UPSTREAM, "POST", "/v1/messages", CLIENT_HEADERS, b"{}"
+                client=client,
+                upstream=UPSTREAM,
+                method="POST",
+                path="/v1/messages",
+                headers=CLIENT_HEADERS,
+                body=b"{}",
             )
             await _drain(response)
         assert response.headers["content-type"] == "text/event-stream"
@@ -158,7 +179,12 @@ class TestForward:
         upstream = _Upstream(content=sse, headers={"content-type": "text/event-stream"})
         async with _client(upstream) as client:
             response = await pt.forward(
-                client, UPSTREAM, "POST", "/v1/messages", CLIENT_HEADERS, b"{}"
+                client=client,
+                upstream=UPSTREAM,
+                method="POST",
+                path="/v1/messages",
+                headers=CLIENT_HEADERS,
+                body=b"{}",
             )
             body = await _drain(response)
         assert body == sse
@@ -167,7 +193,12 @@ class TestForward:
         upstream = _Upstream(error=httpx.ConnectError("connection refused"))
         async with _client(upstream) as client:
             response = await pt.forward(
-                client, UPSTREAM, "POST", "/v1/messages", CLIENT_HEADERS, b"{}"
+                client=client,
+                upstream=UPSTREAM,
+                method="POST",
+                path="/v1/messages",
+                headers=CLIENT_HEADERS,
+                body=b"{}",
             )
         assert response.status_code == 502
         assert b'"type": "error"' in response.body

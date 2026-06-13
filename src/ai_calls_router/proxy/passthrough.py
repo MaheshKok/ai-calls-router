@@ -104,6 +104,7 @@ def _bad_gateway(exc: Exception) -> Response:
 
 
 async def forward(
+    *,
     client: httpx.AsyncClient,
     upstream: str,
     method: str,

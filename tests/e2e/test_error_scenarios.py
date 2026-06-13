@@ -99,7 +99,9 @@ class TestJsonArrayBodyPassthrough:
         """A non-dict body makes _try_route return None, so the array reaches
         the upstream untouched (server.py:84)."""
         upstream = Upstream()
-        with make_client(FULL_CONFIG, tmp_path, monkeypatch, upstream) as client:
+        with make_client(
+            config_yaml=FULL_CONFIG, tmp_path=tmp_path, monkeypatch=monkeypatch, upstream=upstream
+        ) as client:
             response = client.post("/v1/messages", json=[1, 2, 3])
             assert response.status_code == 200
             assert upstream.requests
@@ -122,7 +124,12 @@ class TestMalformedTierConfigPassthrough:
     def test_string_tier_cfg_falls_back_to_passthrough(self, tmp_path, monkeypatch):
         """tier_cfg is a bare string → _try_route returns None → upstream serves."""
         upstream = Upstream()
-        with make_client(MALFORMED_TIER_CONFIG, tmp_path, monkeypatch, upstream) as client:
+        with make_client(
+            config_yaml=MALFORMED_TIER_CONFIG,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            upstream=upstream,
+        ) as client:
             body = _body()
             response = client.post("/v1/messages", json=body)
             assert response.status_code == 200
@@ -156,7 +163,9 @@ class TestPendingToolNamesDefensiveSkips:
 
         monkeypatch.setattr(rc, "load_litellm", lambda: fake)
 
-        with make_client(FULL_CONFIG, tmp_path, monkeypatch, upstream) as client:
+        with make_client(
+            config_yaml=FULL_CONFIG, tmp_path=tmp_path, monkeypatch=monkeypatch, upstream=upstream
+        ) as client:
             body = {
                 "model": "claude-sonnet-4-20250514",
                 "max_tokens": 1024,

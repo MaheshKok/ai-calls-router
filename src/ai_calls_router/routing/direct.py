@@ -85,10 +85,10 @@ def native_model_id(model: str) -> str:
 
 
 async def direct_call(
+    *,
     body: dict[str, Any],
     tier_cfg: dict[str, Any],
     api_key: str,
-    *,
     client: httpx.AsyncClient | None = None,
     timeout: float = DIRECT_CALL_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:

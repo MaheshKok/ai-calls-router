@@ -60,12 +60,12 @@ async def _serve_passthrough(request: Request, body_bytes: bytes) -> Response:
     routes = routing.load_routes()
     settings = config.server_settings(routes)
     return await passthrough.forward(
-        request.app.state.client,
-        settings.upstream,
-        request.method,
-        request.url.path,
-        request.headers,
-        body_bytes,
+        client=request.app.state.client,
+        upstream=settings.upstream,
+        method=request.method,
+        path=request.url.path,
+        headers=request.headers,
+        body=body_bytes,
         query=request.url.query,
     )
 
@@ -104,7 +104,9 @@ async def _try_route(body_bytes: bytes) -> Response | None:
             logger.info("acr: tier=%s has no API key; passing through", tier)
             return None
         savings.register_tier_prices(routes)
-        result = await routed_call.routed_call(body, tier, tier_cfg, api_key, settings_cfg)
+        result = await routed_call.routed_call(
+            body=body, tier_name=tier, tier_cfg=tier_cfg, api_key=api_key, settings=settings_cfg
+        )
         if result is None:
             return None
         if body.get("stream"):

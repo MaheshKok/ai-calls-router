@@ -75,8 +75,8 @@ class _FakeRoutedCall:
         self.calls: list[tuple[Any, ...]] = []
         self._result = result
 
-    async def __call__(self, *args: Any) -> BackendResponse | None:
-        self.calls.append(args)
+    async def __call__(self, **kwargs: Any) -> BackendResponse | None:
+        self.calls.append(kwargs)
         return self._result
 
 
@@ -86,7 +86,7 @@ def upstream() -> _Upstream:
 
 
 @pytest.fixture()
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: _Upstream) -> Any:
+def client(*, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: _Upstream) -> Any:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(CONFIG_YAML, encoding="utf-8")
     monkeypatch.setenv("ACR_CONFIG", str(config_file))
@@ -173,6 +173,7 @@ class TestMessagesPassthrough:
 
     def test_missing_api_key_passes_through_without_routing(
         self,
+        *,
         client: Any,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
@@ -186,6 +187,7 @@ class TestMessagesPassthrough:
 
     def test_routing_decision_error_passes_through(
         self,
+        *,
         client: Any,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
@@ -202,6 +204,7 @@ class TestMessagesPassthrough:
 class TestMessagesRouted:
     def test_cheap_tool_result_served_by_routed_call(
         self,
+        *,
         client: Any,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
@@ -215,6 +218,7 @@ class TestMessagesRouted:
 
     def test_routed_call_receives_tier_and_key(
         self,
+        *,
         client: Any,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
@@ -222,15 +226,16 @@ class TestMessagesRouted:
         fake = _FakeRoutedCall(BackendResponse(body=ROUTED_BODY))
         monkeypatch.setattr(rc, "routed_call", fake)
         client.post("/v1/messages", json=_tool_result_body())
-        body, tier_name, tier_cfg, api_key, settings_cfg = fake.calls[0]
-        assert tier_name == "fast"
-        assert tier_cfg["model"] == "deepseek/test-model"
-        assert api_key == "tier-key"
-        assert settings_cfg["premium_tools"] == ["Edit"]
-        assert body == _tool_result_body()
+        call = fake.calls[0]
+        assert call["tier_name"] == "fast"
+        assert call["tier_cfg"]["model"] == "deepseek/test-model"
+        assert call["api_key"] == "tier-key"
+        assert call["settings"]["premium_tools"] == ["Edit"]
+        assert call["body"] == _tool_result_body()
 
     def test_streaming_request_served_as_sse(
         self,
+        *,
         client: Any,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
@@ -247,6 +252,7 @@ class TestMessagesRouted:
 
     def test_routed_call_none_falls_back_to_passthrough(
         self,
+        *,
         client: Any,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,

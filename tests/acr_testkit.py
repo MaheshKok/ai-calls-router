@@ -59,6 +59,7 @@ class FakeLitellm:
 
 
 def make_response(
+    *,
     text: str | None = "done",
     tool_calls: list[Any] | None = None,
     finish_reason: str = "stop",
@@ -116,6 +117,7 @@ class Upstream:
 
 
 def make_client(
+    *,
     config_yaml: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

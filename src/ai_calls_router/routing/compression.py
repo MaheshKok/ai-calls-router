@@ -112,7 +112,7 @@ def _truncate(text: str, budget: int) -> str:
     return text[:budget] + f"\n...[truncated {removed} chars]"
 
 
-def _compress_text(text: str, budget: int, rtk_filter: str | None) -> str:
+def _compress_text(*, text: str, budget: int, rtk_filter: str | None) -> str:
     """Compress one over-budget text payload, optionally via rtk first.
 
     Args:
@@ -132,7 +132,7 @@ def _compress_text(text: str, budget: int, rtk_filter: str | None) -> str:
     return _truncate(text, budget)
 
 
-def _compress_tool_result_content(content: Any, budget: int, rtk_filter: str | None) -> Any:
+def _compress_tool_result_content(*, content: Any, budget: int, rtk_filter: str | None) -> Any:
     """Compress a tool_result content payload to the character budget.
 
     String content is compressed directly; list content shares one budget
@@ -150,7 +150,7 @@ def _compress_tool_result_content(content: Any, budget: int, rtk_filter: str | N
     if isinstance(content, str):
         if len(content) <= budget:
             return content
-        return _compress_text(content, budget, rtk_filter)
+        return _compress_text(text=content, budget=budget, rtk_filter=rtk_filter)
     if isinstance(content, list):
         remaining = budget
         new_blocks: list[Any] = []
@@ -163,14 +163,19 @@ def _compress_tool_result_content(content: Any, budget: int, rtk_filter: str | N
                 new_blocks.append(block)
                 remaining -= len(text)
                 continue
-            new_blocks.append({**block, "text": _compress_text(text, remaining, rtk_filter)})
+            new_blocks.append(
+                {
+                    **block,
+                    "text": _compress_text(text=text, budget=remaining, rtk_filter=rtk_filter),
+                }
+            )
             remaining = 0
         return new_blocks
     return content
 
 
 def _compress_message(
-    message: Any, budget: int, tool_names: dict[str, str], rtk_enabled: bool
+    *, message: Any, budget: int, tool_names: dict[str, str], rtk_enabled: bool
 ) -> None:
     """Compress every tool_result block in one (already copied) message.
 
@@ -193,7 +198,9 @@ def _compress_message(
             tool_use_id = block.get("tool_use_id")
             tool_name = tool_names.get(tool_use_id) if isinstance(tool_use_id, str) else None
             rtk_filter = RTK_FILTERS.get(tool_name) if tool_name is not None else None
-        block["content"] = _compress_tool_result_content(block.get("content"), budget, rtk_filter)
+        block["content"] = _compress_tool_result_content(
+            content=block.get("content"), budget=budget, rtk_filter=rtk_filter
+        )
 
 
 def compress_body(body: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
@@ -232,7 +239,9 @@ def compress_body(body: dict[str, Any], settings: dict[str, Any]) -> dict[str, A
         tool_names = _tool_names_by_id(messages)
         out = copy.deepcopy(body)
         for message in out["messages"][:cutoff]:
-            _compress_message(message, budget, tool_names, rtk_enabled)
+            _compress_message(
+                message=message, budget=budget, tool_names=tool_names, rtk_enabled=rtk_enabled
+            )
         return out
     except Exception as exc:
         logger.warning("compression failed, using original body: %s", exc)

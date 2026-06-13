@@ -108,6 +108,7 @@ def escalates(response_body: dict[str, Any], settings: dict[str, Any]) -> bool:
 
 
 async def _serve_via_litellm(
+    *,
     body: dict[str, Any],
     tier_cfg: dict[str, Any],
     api_key: str,
@@ -139,6 +140,7 @@ async def _serve_via_litellm(
 
 
 async def _serve_via_direct(
+    *,
     body: dict[str, Any],
     tier_cfg: dict[str, Any],
     api_key: str,
@@ -159,10 +161,11 @@ async def _serve_via_direct(
         fails (non-200, transport error) and the turn must pass through.
     """
     routed_body = _prepare_routed_body(body, tier_cfg)
-    return await anthropic_direct.direct_call(routed_body, tier_cfg, api_key)
+    return await anthropic_direct.direct_call(body=routed_body, tier_cfg=tier_cfg, api_key=api_key)
 
 
 async def routed_call(
+    *,
     body: dict[str, Any],
     tier_name: str,
     tier_cfg: dict[str, Any],
@@ -195,9 +198,11 @@ async def routed_call(
     try:
         started = time.monotonic()
         if direct:
-            anthropic_body = await _serve_via_direct(body, tier_cfg, api_key)
+            anthropic_body = await _serve_via_direct(body=body, tier_cfg=tier_cfg, api_key=api_key)
         else:
-            anthropic_body = await _serve_via_litellm(body, tier_cfg, api_key, settings)
+            anthropic_body = await _serve_via_litellm(
+                body=body, tier_cfg=tier_cfg, api_key=api_key, settings=settings
+            )
         elapsed = time.monotonic() - started
         if anthropic_body is None:
             logger.warning(
@@ -231,7 +236,12 @@ async def routed_call(
         " [direct]" if direct else "",
         elapsed,
     )
-    savings.record_savings_from_response(premium_model, model, anthropic_body, tier_cfg=tier_cfg)
+    savings.record_savings_from_response(
+        premium_model=premium_model,
+        routed_model=model,
+        response_body=anthropic_body,
+        tier_cfg=tier_cfg,
+    )
     if isinstance(premium_model, str) and premium_model:
         anthropic_body = {**anthropic_body, "model": premium_model}
     return BackendResponse(body=anthropic_body)

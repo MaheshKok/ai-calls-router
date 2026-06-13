@@ -21,7 +21,7 @@ import pytest
 from ai_calls_router.routing import compression
 
 
-def _tool_round(tool_use_id: str, tool_name: str, result_content: Any) -> list[dict[str, Any]]:
+def _tool_round(*, tool_use_id: str, tool_name: str, result_content: Any) -> list[dict[str, Any]]:
     """Build an assistant tool_use + user tool_result message pair."""
     return [
         {
@@ -76,7 +76,9 @@ class TestSkipPaths:
         assert compression.compress_body(body, _settings()) is body
 
     def test_all_messages_recent_returns_same_object(self) -> None:
-        body = {"messages": _tool_round("t1", "Bash", "z" * 10_000)}
+        body = {
+            "messages": _tool_round(tool_use_id="t1", tool_name="Bash", result_content="z" * 10_000)
+        }
         settings = _settings(keep_recent_messages=6, max_tool_result_chars=100)
         assert compression.compress_body(body, settings) is body
 
@@ -84,7 +86,9 @@ class TestSkipPaths:
 class TestTruncation:
     def test_old_long_tool_result_string_truncated(self) -> None:
         long_text = "a" * 10_000
-        messages = _tool_round("t1", "Bash", long_text) + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content=long_text
+        ) + _padding(6)
         body = {"messages": messages}
         settings = _settings(keep_recent_messages=6, max_tool_result_chars=100)
         result = compression.compress_body(body, settings)
@@ -94,14 +98,18 @@ class TestTruncation:
         assert len(truncated) < 200
 
     def test_truncation_marker_reports_removed_chars(self) -> None:
-        messages = _tool_round("t1", "Bash", "b" * 150) + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content="b" * 150
+        ) + _padding(6)
         body = {"messages": messages}
         settings = _settings(keep_recent_messages=6, max_tool_result_chars=100)
         result = compression.compress_body(body, settings)
         assert "50 chars" in result["messages"][1]["content"][0]["content"]
 
     def test_old_short_tool_result_untouched(self) -> None:
-        messages = _tool_round("t1", "Bash", "short result") + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content="short result"
+        ) + _padding(6)
         body = {"messages": messages}
         settings = _settings(keep_recent_messages=6, max_tool_result_chars=100)
         result = compression.compress_body(body, settings)
@@ -109,7 +117,9 @@ class TestTruncation:
 
     def test_recent_long_tool_result_untouched(self) -> None:
         long_text = "c" * 10_000
-        messages = _padding(6) + _tool_round("t1", "Bash", long_text)
+        messages = _padding(6) + _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content=long_text
+        )
         body = {"messages": messages}
         settings = _settings(keep_recent_messages=6, max_tool_result_chars=100)
         result = compression.compress_body(body, settings)
@@ -120,7 +130,9 @@ class TestTruncation:
             {"type": "text", "text": "d" * 80},
             {"type": "text", "text": "e" * 80},
         ]
-        messages = _tool_round("t1", "Bash", blocks) + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content=blocks
+        ) + _padding(6)
         body = {"messages": messages}
         settings = _settings(keep_recent_messages=6, max_tool_result_chars=100)
         result = compression.compress_body(body, settings)
@@ -134,7 +146,9 @@ class TestTruncation:
             {"type": "image", "source": {"type": "base64", "data": "xyz"}},
             {"type": "text", "text": "f" * 200},
         ]
-        messages = _tool_round("t1", "Bash", blocks) + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content=blocks
+        ) + _padding(6)
         body = {"messages": messages}
         settings = _settings(keep_recent_messages=6, max_tool_result_chars=100)
         result = compression.compress_body(body, settings)
@@ -149,7 +163,9 @@ class TestTruncation:
         assert result["messages"][0]["content"] == "g" * 10_000
 
     def test_input_body_never_mutated(self) -> None:
-        messages = _tool_round("t1", "Bash", "h" * 10_000) + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content="h" * 10_000
+        ) + _padding(6)
         body = {"messages": messages, "model": "m"}
         snapshot = copy.deepcopy(body)
         compression.compress_body(
@@ -160,7 +176,9 @@ class TestTruncation:
     def test_default_settings_compress_old_results(self) -> None:
         # Defaults: keep 6 recent, 4000-char budget, compression enabled.
         long_text = "i" * 10_000
-        messages = _tool_round("t1", "Bash", long_text) + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content=long_text
+        ) + _padding(6)
         body = {"messages": messages}
         result = compression.compress_body(body, {})
         truncated = result["messages"][1]["content"][0]["content"]
@@ -173,7 +191,9 @@ class TestTruncation:
         ids=["none", "int", "non-dict-blocks", "text-block-no-text"],
     )
     def test_malformed_tool_result_content_never_raises(self, content: Any) -> None:
-        messages = _tool_round("t1", "Bash", content) + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content=content
+        ) + _padding(6)
         body = {"messages": messages}
         compression.compress_body(
             body, _settings(keep_recent_messages=6, max_tool_result_chars=100)
@@ -196,7 +216,9 @@ class TestTruncation:
     )
     def test_malformed_settings_fall_back_to_defaults(self, bad_settings: dict[str, Any]) -> None:
         bad_settings["compress_routed"] = True
-        messages = _tool_round("t1", "Bash", "j" * 10_000) + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content="j" * 10_000
+        ) + _padding(6)
         body = {"messages": messages}
         result = compression.compress_body(body, bad_settings)
         truncated = result["messages"][1]["content"][0]["content"]
@@ -243,7 +265,9 @@ class TestRunRtk:
 class TestRtkIntegration:
     def _grep_body(self, text_len: int = 10_000) -> dict[str, Any]:
         """Build a body whose old tool_result came from the Grep tool."""
-        messages = _tool_round("t1", "Grep", "k" * text_len) + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Grep", result_content="k" * text_len
+        ) + _padding(6)
         return {"messages": messages}
 
     def test_never_mode_does_not_invoke_rtk(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -294,7 +318,9 @@ class TestRtkIntegration:
             raise AssertionError("unmapped tools must not reach rtk")
 
         monkeypatch.setattr(compression, "run_rtk", boom)
-        messages = _tool_round("t1", "Bash", "m" * 10_000) + _padding(6)
+        messages = _tool_round(
+            tool_use_id="t1", tool_name="Bash", result_content="m" * 10_000
+        ) + _padding(6)
         settings = {
             "compress_routed": True,
             "compression": {

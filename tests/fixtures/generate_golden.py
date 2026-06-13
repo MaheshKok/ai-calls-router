@@ -305,7 +305,7 @@ def main() -> None:
 
     responses_golden = {}
     for name, spec in RESPONSE_CASES.items():
-        result = backend._to_anthropic_response(make_response(spec), "claude-sonnet-4-6")
+        result = backend._to_anthropic_response(make_response(text=spec), "claude-sonnet-4-6")
         # The message id is a fresh uuid per call; fidelity is asserted on
         # everything else, the id format is asserted separately in the tests.
         result.pop("id")
