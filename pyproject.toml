@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-calls-router"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Per-tool-result model routing proxy for Claude Code: serve cheap tool-result turns on any LiteLLM-supported model, keep decision turns on Anthropic."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Mahesh Kokare" }]
 keywords = ["claude-code", "proxy", "llm-routing", "litellm", "cost-optimization"]
@@ -15,6 +15,8 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
 ]
@@ -40,6 +42,12 @@ acr = "ai_calls_router.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/maheshkokare/ai-calls-router"
+Repository = "https://github.com/maheshkokare/ai-calls-router"
+Issues = "https://github.com/maheshkokare/ai-calls-router/issues"
+Changelog = "https://github.com/maheshkokare/ai-calls-router/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/ai_calls_router/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ai_calls_router"]
@@ -57,7 +65,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
