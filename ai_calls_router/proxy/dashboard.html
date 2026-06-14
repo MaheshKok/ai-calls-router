@@ -82,9 +82,9 @@ td.empty { color:#484f58; text-align:center; padding: 24px;}
     <div class="table-header"><h2>recent requests</h2><span class="status" id="status">loading</span></div>
     <table>
       <thead id="table-head">
-        <tr><th>time</th><th>model</th><th>tools</th><th>input</th><th>cache hit</th><th>cache miss</th><th>ms</th><th>agent</th><th>session</th></tr>
+        <tr><th>time</th><th>model</th><th>tools</th><th>input</th><th>cache hit</th><th>cache miss</th><th>output</th><th>ms</th><th>agent</th><th>session</th></tr>
       </thead>
-      <tbody id="rows"><tr><td colspan="9" class="empty">no requests yet</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="10" class="empty">no requests yet</td></tr></tbody>
     </table>
   </section>
 </div>
@@ -172,7 +172,7 @@ function apply(data) {
   buildSessionRows(data);
   const rows = data.last_requests || [];
   $('rows').innerHTML = rows.length ? rows.map(x => {
-    const cacheMiss = (x.input_tokens || 0) + (x.cache_creation_tokens || 0);
+    const cacheMiss = Math.max(0, (x.input_tokens || 0) - (x.cache_read_tokens || 0));
     return '<tr>' +
       '<td>' + new Date(Number(x.ts || 0) * 1000).toLocaleTimeString() + '</td>' +
       '<td class="truncate">' + esc(shortModel(x.model) || '--') + '</td>' +
@@ -180,11 +180,12 @@ function apply(data) {
       '<td>' + num(x.input_tokens || 0) + '</td>' +
       '<td>' + num(x.cache_read_tokens || 0) + '</td>' +
       '<td>' + num(cacheMiss) + '</td>' +
+      '<td>' + num(x.output_tokens || 0) + '</td>' +
       '<td>' + num(x.duration_ms) + '</td>' +
       '<td class="truncate">' + esc(agentKey(x.agent) || '--') + '</td>' +
       '<td class="truncate">' + esc((x.session_id || '--').substring(0, 12)) + '</td>' +
     '</tr>';
-  }).join('') : '<tr><td colspan="9" class="empty">no requests yet</td></tr>';
+  }).join('') : '<tr><td colspan="10" class="empty">no requests yet</td></tr>';
   $('status').textContent = 'live \u00B7 refreshed ' + new Date().toLocaleTimeString();
 }
 async function refresh() {

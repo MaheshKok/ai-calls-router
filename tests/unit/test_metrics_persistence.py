@@ -82,7 +82,7 @@ class TestMetricsBootstrapCounters:
             snap = m.snapshot()
 
             assert snap["requests"]["routed"] == 2
-            assert snap["requests"]["total"] == 0  # not incremented by bootstrap
+            assert snap["requests"]["total"] == 2  # total = routed + passthrough (2 + 0)
             assert snap["routed_tokens"]["input"] == 300
             assert snap["routed_tokens"]["output"] == 130
             assert snap["routed_tokens"]["cache_read"] == 30
@@ -153,12 +153,11 @@ class TestMetricsBootstrapCounters:
 
 
 class TestMetricsBootstrapIntegration:
-    """Check that bootstrap preserves existing non-bootstrappable counters."""
+    """Check that total = routed + passthrough after bootstrap."""
 
-    def test_bootstrap_does_not_reset_total_requests(self) -> None:
+    def test_total_is_routed_plus_passthrough(self) -> None:
         m = _Metrics()
-        m.incr_total()
-        m.incr_total()
-        m.bootstrap(ledger_path=None, max_recent=10)
+        m._routed_requests = 5
+        m._passthrough_requests = 3
         snap = m.snapshot()
-        assert snap["requests"]["total"] == 2
+        assert snap["requests"]["total"] == 8

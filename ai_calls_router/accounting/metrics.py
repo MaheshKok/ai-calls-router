@@ -286,7 +286,7 @@ class _Metrics:
             return {
                 "uptime_seconds": round(time.time() - self._started_at, 1),
                 "requests": {
-                    "total": self._total_requests,
+                    "total": self._routed_requests + self._passthrough_requests,
                     "routed": self._routed_requests,
                     "passthrough": self._passthrough_requests,
                     "errors": self._error_requests,
