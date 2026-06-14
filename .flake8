@@ -1,0 +1,37 @@
+[flake8]
+max-line-length = 100
+exclude = .venv, build, dist, __pycache__, .git
+
+max_cognitive_score = 30
+max_cognitive_average = 17
+max_local_variables = 12
+max_arguments = 8
+max_returns = 9
+max_expressions = 12
+max_try_body_length = 15
+max_raises = 6
+max_module_members = 18
+max_imports = 18
+max_line_complexity = 18
+max_complexity = 18
+
+extend-ignore =
+    WPS226,WPS529,WPS421,WPS110,WPS111,WPS114,
+    WPS432,WPS336,WPS237,WPS234,WPS347,WPS412,
+    WPS410,WPS527,WPS358
+
+per-file-ignores =
+    src/ai_calls_router/_lib/litellm_guard.py: WPS420, WPS121, WPS122
+    src/ai_calls_router/ops/daemon.py: WPS420
+    src/ai_calls_router/proxy/passthrough.py: WPS501
+    src/ai_calls_router/ops/desktop.py: WPS458, WPS504
+    src/ai_calls_router/_lib/conversion.py: WPS231, WPS220
+    src/ai_calls_router/accounting/savings.py: WPS231, WPS210, WPS504
+    src/ai_calls_router/proxy/server.py: WPS231, WPS407, WPS229
+    src/ai_calls_router/routing/decide.py: WPS231
+    src/ai_calls_router/cli.py: WPS407
+    src/ai_calls_router/ops/wizard.py: WPS407
+    src/ai_calls_router/routing/compression.py: WPS407, WPS504
+    src/ai_calls_router/routing/direct.py: WPS407, WPS504
+    src/ai_calls_router/routing/engine.py: WPS231
+    src/ai_calls_router/accounting/ledger.py: WPS504, WPS221

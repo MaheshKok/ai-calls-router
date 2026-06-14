@@ -27,3 +27,11 @@ repos:
       - id: bandit
         args: ["-c", "pyproject.toml"]
         additional_dependencies: [".[toml]"]
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.2.0
+    hooks:
+      - id: flake8
+        args: [src]
+        additional_dependencies:
+          - wemake-python-styleguide>=0.19
+        files: ^src/
