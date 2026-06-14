@@ -13,8 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── Lint & format (fast, runs first) ──────────────────────────────
   lint:
-    name: Ruff
+    name: Lint (Ruff)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +26,19 @@ jobs:
       - run: ruff check src tests
       - run: ruff format --check src tests
 
+  # ── Type checking ─────────────────────────────────────────────────
+  type:
+    name: Type check (Pyright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv pip install --system -e ".[dev]"
+      - run: pyright src/ai_calls_router
+
+  # ── Tests (matrix across Python versions) ─────────────────────────
   test:
     name: Test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -40,17 +54,75 @@ jobs:
       - run: uv pip install --system -e ".[dev]"
       - run: pytest -q --cov --cov-report=term-missing --cov-fail-under=98
 
-  build:
-    name: Build distributions
+  # ── Security (SAST + dependency audit) ────────────────────────────
+  security:
+    name: Security (Bandit + pip-audit)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install --system build
+      - run: uv pip install --system -e ".[dev]"
+      - run: bandit -r src -c pyproject.toml
+      - run: pip-audit
+
+  # ── Dependency hygiene ────────────────────────────────────────────
+  deps:
+    name: Dependencies (deptry)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv pip install --system -e ".[dev]"
+      - run: deptry src
+
+  # ── Complexity gate ───────────────────────────────────────────────
+  complexity:
+    name: Complexity (Radon + Xenon)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv pip install --system radon xenon
+      - run: radon cc src tests -s -a --total-average
+      - run: radon mi src -s
+      - run: xenon --max-absolute D --max-modules C --max-average A src
+
+  # ── Build + package validation ────────────────────────────────────
+  build:
+    name: Build + Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv pip install --system build twine check-wheel-contents
       - run: python -m build
+      - run: twine check dist/*
+      - run: check-wheel-contents dist/*.whl
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
+
+  # ── Advisory tools (non-blocking, report only) ────────────────────
+  advisory:
+    name: Advisory (vulture, refurb, interrogate, semgrep)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv pip install --system vulture refurb interrogate semgrep
+      - run: vulture src --min-confidence 80 || true
+      - run: refurb src || true
+      - run: interrogate src || true
+      - run: semgrep --config auto src || true
