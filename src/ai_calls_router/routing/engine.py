@@ -32,6 +32,39 @@ from ai_calls_router.routing import direct as anthropic_direct
 logger = logging.getLogger("acr.routed_call")
 
 
+def _strip_thinking_from_messages(body: dict[str, Any], routed: dict[str, Any]) -> None:
+    """Strip thinking blocks from messages, dropping emptied assistant messages."""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    cleaned: list[Any] = []
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            cleaned.append(msg)
+            continue
+        blocks = [
+            b
+            for b in content
+            if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
+        ]
+        if not blocks and msg.get("role") == "assistant":
+            continue
+        cleaned.append({**msg, "content": blocks})
+    routed["messages"] = cleaned
+
+
+def _clamp_max_tokens(
+    body: dict[str, Any], tier_cfg: dict[str, Any], routed: dict[str, Any]
+) -> None:
+    """Clamp max_tokens to the tier limit when needed."""
+    tier_max = tier_cfg.get("max_tokens")
+    if isinstance(tier_max, int) and not isinstance(tier_max, bool) and tier_max > 0:
+        requested = body.get("max_tokens")
+        if not isinstance(requested, int) or requested > tier_max:
+            routed["max_tokens"] = tier_max
+
+
 def _prepare_routed_body(body: dict[str, Any], tier_cfg: dict[str, Any]) -> dict[str, Any]:
     """Rewrite a client request body for the tier model.
 
@@ -51,31 +84,8 @@ def _prepare_routed_body(body: dict[str, Any], tier_cfg: dict[str, Any]) -> dict
     routed = dict(body)
     routed["model"] = tier_cfg["model"]
     routed.pop("stream", None)
-
-    tier_max = tier_cfg.get("max_tokens")
-    if isinstance(tier_max, int) and not isinstance(tier_max, bool) and tier_max > 0:
-        requested = body.get("max_tokens")
-        if not isinstance(requested, int) or requested > tier_max:
-            routed["max_tokens"] = tier_max
-
-    messages = body.get("messages")
-    if isinstance(messages, list):
-        cleaned: list[Any] = []
-        for msg in messages:
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if not isinstance(content, list):
-                cleaned.append(msg)
-                continue
-            blocks = [
-                b
-                for b in content
-                if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
-            ]
-            if not blocks and msg.get("role") == "assistant":
-                continue
-            cleaned.append({**msg, "content": blocks})
-        routed["messages"] = cleaned
-
+    _clamp_max_tokens(body, tier_cfg, routed)
+    _strip_thinking_from_messages(body, routed)
     return routed
 
 

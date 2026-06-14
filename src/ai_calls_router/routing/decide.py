@@ -175,6 +175,18 @@ def tier_for_tools(names: list[str], routes: dict[str, Any]) -> str:
     return "premium"
 
 
+def _search_env_file(env_path: Path, key_env: str) -> str | None:
+    """Search a .env file for a variable, returning its value or None."""
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, _, raw = stripped.partition("=")
+        if name.strip() in (key_env, f"export {key_env}"):
+            return raw.strip().strip("'\"") or None
+    return None
+
+
 def resolve_api_key(tier_cfg: dict[str, Any], settings: dict[str, Any]) -> str | None:
     """Resolve the provider API key for a tier.
 
@@ -201,13 +213,7 @@ def resolve_api_key(tier_cfg: dict[str, Any], settings: dict[str, Any]) -> str |
         return None
     try:
         env_path = Path(env_file).expanduser()
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            name, _, raw = stripped.partition("=")
-            if name.strip() in (key_env, f"export {key_env}"):
-                return raw.strip().strip("'\"") or None
+        return _search_env_file(env_path, key_env)
     except Exception as exc:
         logger.warning("acr: env_file read failed (%s)", exc)
     return None

@@ -129,6 +129,27 @@ def _routed_prices_from_tier(
     )
 
 
+def _compute_routed_usd(
+    litellm: Any,
+    routed_model: str,
+    total_input: int,
+    hit_tokens: int,
+    miss_tokens: int,
+    output_tokens: int,
+    routed_prices: tuple[float, float, float] | None,
+) -> float | None:
+    """Compute the routed-side cost in USD; None when unpriced."""
+    if routed_prices is not None:
+        miss_rate, cached_rate, out_rate = routed_prices
+        return miss_tokens * miss_rate + hit_tokens * cached_rate + output_tokens * out_rate
+    routed_in, routed_out = litellm.cost_per_token(
+        model=routed_model, prompt_tokens=total_input, completion_tokens=output_tokens
+    )
+    if not isinstance(routed_in, int | float) or routed_in < 0:
+        return None
+    return routed_in + routed_out
+
+
 def record_routing_savings(
     *,
     premium_model: str | None,
@@ -180,18 +201,17 @@ def record_routing_savings(
         premium_usd = premium_in + premium_out
         if premium_usd <= 0:
             return
-        if routed_prices is not None:
-            miss_rate, cached_rate, out_rate = routed_prices
-            routed_usd = (
-                miss_tokens * miss_rate + hit_tokens * cached_rate + output_tokens * out_rate
-            )
-        else:
-            routed_in, routed_out = litellm.cost_per_token(
-                model=routed_model,
-                prompt_tokens=total_input,
-                completion_tokens=output_tokens,
-            )
-            routed_usd = routed_in + routed_out
+        routed_usd = _compute_routed_usd(
+            litellm,
+            routed_model,
+            total_input,
+            hit_tokens,
+            miss_tokens,
+            output_tokens,
+            routed_prices,
+        )
+        if routed_usd is None:
+            return
         entry = {
             "ts": int(time.time()),
             "premium_model": premium_model,

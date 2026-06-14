@@ -72,6 +72,22 @@ def _positive_int(value: Any, default: int) -> int:
     return default
 
 
+def _names_from_message(message: dict[str, Any]) -> dict[str, str]:
+    """Collect tool_use id→name mappings from one assistant message."""
+    names: dict[str, str] = {}
+    content = message.get("content")
+    if not isinstance(content, list):
+        return names
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        block_id = block.get("id")
+        name = block.get("name")
+        if isinstance(block_id, str) and isinstance(name, str):
+            names[block_id] = name
+    return names
+
+
 def _tool_names_by_id(messages: list[Any]) -> dict[str, str]:
     """Map tool_use ids to tool names across all assistant messages.
 
@@ -85,16 +101,7 @@ def _tool_names_by_id(messages: list[Any]) -> dict[str, str]:
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_use":
-                continue
-            block_id = block.get("id")
-            name = block.get("name")
-            if isinstance(block_id, str) and isinstance(name, str):
-                names[block_id] = name
+        names.update(_names_from_message(message))
     return names
 
 
@@ -174,6 +181,17 @@ def _compress_tool_result_content(*, content: Any, budget: int, rtk_filter: str 
     return content
 
 
+def _resolve_rtk_filter(
+    block: dict[str, Any], tool_names: dict[str, str], rtk_enabled: bool
+) -> str | None:
+    """Resolve an rtk filter name for a tool_result block, or None."""
+    if not rtk_enabled:
+        return None
+    tool_use_id = block.get("tool_use_id")
+    tool_name = tool_names.get(tool_use_id) if isinstance(tool_use_id, str) else None
+    return RTK_FILTERS.get(tool_name) if tool_name is not None else None
+
+
 def _compress_message(
     *, message: Any, budget: int, tool_names: dict[str, str], rtk_enabled: bool
 ) -> None:
@@ -193,11 +211,7 @@ def _compress_message(
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_result":
             continue
-        rtk_filter = None
-        if rtk_enabled:
-            tool_use_id = block.get("tool_use_id")
-            tool_name = tool_names.get(tool_use_id) if isinstance(tool_use_id, str) else None
-            rtk_filter = RTK_FILTERS.get(tool_name) if tool_name is not None else None
+        rtk_filter = _resolve_rtk_filter(block, tool_names, rtk_enabled)
         block["content"] = _compress_tool_result_content(
             content=block.get("content"), budget=budget, rtk_filter=rtk_filter
         )

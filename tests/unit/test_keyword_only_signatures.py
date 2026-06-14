@@ -27,15 +27,15 @@ def test_functions_with_more_than_two_user_parameters_are_keyword_only() -> None
             self.path = path
             self.stack: list[str] = []
 
-        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
             self.stack.append(node.name)
             self.generic_visit(node)
             self.stack.pop()
 
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
             self._check(node)
 
-        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
             self._check(node)
 
         def _check(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:

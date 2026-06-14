@@ -96,6 +96,76 @@ def parse_tool_arguments(arguments: Any) -> Any:
     return arguments
 
 
+def _partition_content_blocks(
+    content: list[dict[str, Any]],
+) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Partition Anthropic content blocks into text / tool_use / tool_result."""
+    text_parts: list[str] = []
+    tool_use_blocks: list[dict[str, Any]] = []
+    tool_result_blocks: list[dict[str, Any]] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type", "")
+        if block_type == "text":
+            text_parts.append(block.get("text", ""))
+        elif block_type == "tool_use":
+            tool_use_blocks.append(block)
+        elif block_type == "tool_result":
+            tool_result_blocks.append(block)
+    return text_parts, tool_use_blocks, tool_result_blocks
+
+
+def _flatten_tool_result_content(tr_content: Any) -> str:
+    """Flatten a tool_result content (list of text blocks) to a single string."""
+    if isinstance(tr_content, list):
+        return "\n".join(b.get("text", "") for b in tr_content if b.get("type") == "text")
+    return str(tr_content)
+
+
+def _emit_tool_result_messages(
+    tool_result_blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Emit OpenAI role=tool messages for Anthropic tool_result blocks."""
+    messages: list[dict[str, Any]] = []
+    for tr in tool_result_blocks:
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tr["tool_use_id"],
+                "content": _flatten_tool_result_content(tr.get("content", "")),
+            }
+        )
+    return messages
+
+
+def _emit_tool_use_message(
+    tool_use_blocks: list[dict[str, Any]], text_parts: list[str]
+) -> dict[str, Any]:
+    """Emit an OpenAI assistant message with tool_calls."""
+    msg: dict[str, Any] = {"role": "assistant"}
+    msg["content"] = "\n".join(text_parts) if text_parts else None
+    msg["tool_calls"] = [
+        {
+            "id": tu["id"],
+            "type": "function",
+            "function": {
+                "name": tu["name"],
+                "arguments": json.dumps(tu.get("input", {})),
+            },
+        }
+        for tu in tool_use_blocks
+    ]
+    return msg
+
+
+def _backfill_reasoning(converted: list[dict[str, Any]]) -> None:
+    """Ensure every assistant message has reasoning_content (DeepSeek requirement)."""
+    for msg in converted:
+        if msg.get("role") == "assistant":
+            msg.setdefault("reasoning_content", "")
+
+
 def convert_messages_for_litellm(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert Anthropic messages to LiteLLM/OpenAI format.
 
@@ -115,74 +185,34 @@ def convert_messages_for_litellm(messages: list[dict[str, Any]]) -> list[dict[st
     """
     converted: list[dict[str, Any]] = []
     for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-
-        if isinstance(content, str):
-            converted.append({"role": role, "content": content})
-            continue
-
-        if isinstance(content, list):
-            text_parts: list[str] = []
-            tool_use_blocks: list[dict[str, Any]] = []
-            tool_result_blocks: list[dict[str, Any]] = []
-
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type", "")
-                if block_type == "text":
-                    text_parts.append(block.get("text", ""))
-                elif block_type == "tool_use":
-                    tool_use_blocks.append(block)
-                elif block_type == "tool_result":
-                    tool_result_blocks.append(block)
-
-            if tool_result_blocks:
-                for tr in tool_result_blocks:
-                    tr_content = tr.get("content", "")
-                    if isinstance(tr_content, list):
-                        tr_content = "\n".join(
-                            b.get("text", "") for b in tr_content if b.get("type") == "text"
-                        )
-                    converted.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tr["tool_use_id"],
-                            "content": str(tr_content),
-                        }
-                    )
-                continue
-
-            if tool_use_blocks:
-                assistant_msg: dict[str, Any] = {"role": "assistant"}
-                if text_parts:
-                    assistant_msg["content"] = "\n".join(text_parts)
-                else:
-                    assistant_msg["content"] = None
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tu["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tu["name"],
-                            "arguments": json.dumps(tu.get("input", {})),
-                        },
-                    }
-                    for tu in tool_use_blocks
-                ]
-                converted.append(assistant_msg)
-                continue
-
-            if text_parts:
-                converted.append({"role": role, "content": "\n".join(text_parts)})
-            else:
-                converted.append({"role": role, "content": ""})
-
-    for msg in converted:
-        if msg.get("role") == "assistant":
-            msg.setdefault("reasoning_content", "")
+        converted.extend(_convert_single_message(msg))
+    _backfill_reasoning(converted)
     return converted
+
+
+def _convert_single_message(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert one Anthropic message to zero or more LiteLLM/OpenAI messages."""
+    role = msg.get("role", "user")
+    content = msg.get("content", "")
+
+    if isinstance(content, str):
+        return [{"role": role, "content": content}]
+
+    if not isinstance(content, list):
+        return []
+
+    text_parts, tool_use_blocks, tool_result_blocks = _partition_content_blocks(content)
+
+    if tool_result_blocks:
+        return _emit_tool_result_messages(tool_result_blocks)
+
+    if tool_use_blocks:
+        return [_emit_tool_use_message(tool_use_blocks, text_parts)]
+
+    if text_parts:
+        return [{"role": role, "content": "\n".join(text_parts)}]
+
+    return [{"role": role, "content": ""}]
 
 
 def to_anthropic_response(litellm_response: Any, original_model: str) -> dict[str, Any]:
@@ -240,6 +270,15 @@ def to_anthropic_response(litellm_response: Any, original_model: str) -> dict[st
     }
 
 
+def _insert_system_message(messages: list[dict[str, Any]], system: Any) -> None:
+    """Insert a system message at the front of the message list."""
+    if isinstance(system, str):
+        messages.insert(0, {"role": "system", "content": system})
+    elif isinstance(system, list):
+        parts = (s.get("text", "") if isinstance(s, dict) else str(s) for s in system)
+        messages.insert(0, {"role": "system", "content": " ".join(parts)})
+
+
 def completion_kwargs(body: dict[str, Any], api_key: str | None = None) -> dict[str, Any]:
     """Assemble litellm.acompletion kwargs from an Anthropic request body.
 
@@ -260,12 +299,14 @@ def completion_kwargs(body: dict[str, Any], api_key: str | None = None) -> dict[
         "messages": convert_messages_for_litellm(body.get("messages", [])),
     }
 
-    if "max_tokens" in body:
-        kwargs["max_tokens"] = body["max_tokens"]
-    if "temperature" in body:
-        kwargs["temperature"] = body["temperature"]
-    if "top_p" in body:
-        kwargs["top_p"] = body["top_p"]
+    field_pairs: tuple[tuple[str, str], ...] = (
+        ("max_tokens", "max_tokens"),
+        ("temperature", "temperature"),
+        ("top_p", "top_p"),
+    )
+    for src, dst in field_pairs:
+        if src in body:
+            kwargs[dst] = body[src]
     if "stop_sequences" in body:
         kwargs["stop"] = body["stop_sequences"]
 
@@ -275,14 +316,7 @@ def completion_kwargs(body: dict[str, Any], api_key: str | None = None) -> dict[
         kwargs["tool_choice"] = convert_tool_choice(body["tool_choice"])
 
     if "system" in body:
-        system = body["system"]
-        if isinstance(system, str):
-            kwargs["messages"].insert(0, {"role": "system", "content": system})
-        elif isinstance(system, list):
-            system_text = " ".join(
-                s.get("text", "") if isinstance(s, dict) else str(s) for s in system
-            )
-            kwargs["messages"].insert(0, {"role": "system", "content": system_text})
+        _insert_system_message(kwargs["messages"], body["system"])
 
     if api_key:
         kwargs["api_key"] = api_key
