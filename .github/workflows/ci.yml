@@ -36,7 +36,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv pip install --system -e ".[dev]"
-      - run: pyright src/ai_calls_router
+      - run: pyright ai_calls_router
 
   # ── Tests (matrix across Python versions) ─────────────────────────
   test:

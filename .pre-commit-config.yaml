@@ -31,7 +31,7 @@ repos:
     rev: 7.2.0
     hooks:
       - id: flake8
-        args: [src]
+        args: [ai_calls_router]
         additional_dependencies:
           - wemake-python-styleguide>=0.19
-        files: ^src/
+        files: ^ai_calls_router/

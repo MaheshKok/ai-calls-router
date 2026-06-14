@@ -24,13 +24,13 @@ test: ## Run the test suite
 	$(PY) -m pytest -q
 
 lint: ## Run ruff checks
-	$(PY) -m ruff check src tests
+	$(PY) -m ruff check ai_calls_router tests
 
 format: ## Format source and tests with ruff
-	$(PY) -m ruff format src tests
+	$(PY) -m ruff format ai_calls_router tests
 
 type: ## Run pyright static type checking
-	$(PY) -m pyright src/ai_calls_router
+	$(PY) -m pyright ai_calls_router
 
 coverage: ## Run tests with coverage report (fails under 98%)
 	$(PY) -m pytest -q --cov --cov-report=term-missing --cov-fail-under=98
@@ -46,30 +46,30 @@ check-security: ## Run security audit on dependencies
 	$(PY) -m pip_audit
 
 check-deps: ## Check for unused, missing, and transitive dependencies
-	$(PY) -m deptry src
+	$(PY) -m deptry ai_calls_router
 
 check-complexity: ## CI-gated complexity check (xenon on top of radon)
-	$(PY) -m radon cc src tests -s -a --total-average
-	$(PY) -m radon mi src -s
-	$(PY) -m xenon --max-absolute D --max-modules C --max-average A src
+	$(PY) -m radon cc ai_calls_router tests -s -a --total-average
+	$(PY) -m radon mi ai_calls_router -s
+	$(PY) -m xenon --max-absolute D --max-modules C --max-average A ai_calls_router
 
 vulture: ## Report potentially dead code (advisory only)
-	$(PY) -m vulture src --min-confidence 80 || true
+	$(PY) -m vulture ai_calls_router --min-confidence 80 || true
 
 refurb: ## Suggest modern Python idioms (advisory only)
-	$(PY) -m refurb src || true
+	$(PY) -m refurb ai_calls_router || true
 
 bandit: ## Run security lint on source
-	$(PY) -m bandit -r src -c pyproject.toml
+	$(PY) -m bandit -r ai_calls_router -c pyproject.toml
 
 interrogate: ## Report docstring coverage (advisory)
-	$(PY) -m interrogate src || true
+	$(PY) -m interrogate ai_calls_router || true
 
 semgrep: ## Run semgrep pattern-based security/code analysis (advisory)
-	$(PY) -m semgrep --config auto src || true
+	$(PY) -m semgrep --config auto ai_calls_router || true
 
 mutmut: ## Run mutation testing on critical modules (advisory, slow)
-	$(PY) -m mutmut run --paths-to-mutate src/ai_calls_router/routing || true
+	$(PY) -m mutmut run --paths-to-mutate ai_calls_router/routing || true
 
 qa: lint type test coverage check-deps check-security check-package check-complexity ## Run all blocking quality gates
 

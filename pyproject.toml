@@ -65,10 +65,10 @@ Issues = "https://github.com/maheshkokare/ai-calls-router/issues"
 Changelog = "https://github.com/maheshkokare/ai-calls-router/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
-path = "src/ai_calls_router/__init__.py"
+path = "ai_calls_router/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ai_calls_router"]
+packages = ["ai_calls_router"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -134,44 +134,44 @@ max-complexity = 15
 "tests/fixtures/generate_golden.py" = [
     "TC001", "TC002", "TC003",
 ]
-"src/ai_calls_router/cli.py" = [
+"ai_calls_router/cli.py" = [
     "ARG001",  # args.Namespace passed to handlers that don't use it
     "TC003",   # Callable import used at module level
     "S603", "S607", "PLW1510",  # subprocess usage in CLI launcher
 ]
-"src/ai_calls_router/ops/daemon.py" = [
+"ai_calls_router/ops/daemon.py" = [
     "SIM105",  # try/except/pass in signal handling is intentional
     "S603", "S607", "PLW1510",  # subprocess usage in daemon starter
 ]
-"src/ai_calls_router/proxy/server.py" = [
+"ai_calls_router/proxy/server.py" = [
     "ARG001",  # health(request) doesn't use request
     "TC002", "TC003",  # Request + AsyncIterator in handler signatures
     "PLR0911",  # _try_route dispatch has many returns by design
 ]
-"src/ai_calls_router/_lib/conversion.py" = [
+"ai_calls_router/_lib/conversion.py" = [
     "C901",  # convert_messages_for_litellm is a well-tested dispatch function
     "PLR0912",  # many branches in message dispatch function
 ]
-"src/ai_calls_router/accounting/ledger.py" = [
+"ai_calls_router/accounting/ledger.py" = [
     "TC003",  # Path used in runtime string conversion
 ]
-"src/ai_calls_router/accounting/savings.py" = [
+"ai_calls_router/accounting/savings.py" = [
     "TC003",  # Path used in runtime operations
 ]
-"src/ai_calls_router/ops/wizard.py" = [
+"ai_calls_router/ops/wizard.py" = [
     "TC003",  # Path used in runtime operations
 ]
-"src/ai_calls_router/proxy/passthrough.py" = [
+"ai_calls_router/proxy/passthrough.py" = [
     "TC003",  # AsyncIterator used in generator annotations
 ]
-"src/ai_calls_router/_lib/litellm_guard.py" = [
+"ai_calls_router/_lib/litellm_guard.py" = [
     "PLW0603", "PLC0415",  # lazy loading with global + deferred import by design
 ]
-"src/ai_calls_router/routing/compression.py" = [
+"ai_calls_router/routing/compression.py" = [
     "S603", "S607", "PLW1510",  # subprocess for rtk compression tool
     "TRY300",  # try/except flow is intentional for resilience
 ]
-"src/ai_calls_router/routing/decide.py" = [
+"ai_calls_router/routing/decide.py" = [
     "TRY300",  # try/except flow returns at end by design
 ]
 
@@ -179,7 +179,7 @@ max-complexity = 15
 pythonVersion = "3.11"
 venvPath = "."
 venv = ".venv"
-include = ["src/ai_calls_router"]
+include = ["ai_calls_router"]
 exclude = ["tests", "build", "dist", ".venv"]
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false
@@ -191,7 +191,7 @@ reportMissingParameterType = true
 reportPrivateUsage = false
 
 [tool.coverage.run]
-source = ["src/ai_calls_router"]
+source = ["ai_calls_router"]
 omit = ["tests/*"]
 
 [tool.bandit]
