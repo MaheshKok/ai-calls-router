@@ -59,6 +59,26 @@ def load_routes(path: Path | None = None) -> dict[str, Any]:
         return {}
 
 
+def _tool_id_to_name_map(messages: list[Any]) -> dict[str, str]:
+    """Build a mapping from tool_use ids to tool names from assistant messages."""
+    id_to_name: dict[str, str] = {}
+    for msg in messages[:-1]:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        msg_content = msg.get("content")
+        if not isinstance(msg_content, list):
+            continue
+        for block in msg_content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("id")
+                and block.get("name")
+            ):
+                id_to_name[str(block["id"])] = str(block["name"])
+    return id_to_name
+
+
 def pending_tool_names(body: dict[str, Any]) -> list[str]:
     """Extract the tool names whose results this request is processing.
 
@@ -95,22 +115,7 @@ def pending_tool_names(body: dict[str, Any]) -> list[str]:
     if not result_ids:
         return []
 
-    id_to_name: dict[str, str] = {}
-    for msg in messages[:-1]:
-        if not isinstance(msg, dict) or msg.get("role") != "assistant":
-            continue
-        msg_content = msg.get("content")
-        if not isinstance(msg_content, list):
-            continue
-        for block in msg_content:
-            if (
-                isinstance(block, dict)
-                and block.get("type") == "tool_use"
-                and block.get("id")
-                and block.get("name")
-            ):
-                id_to_name[str(block["id"])] = str(block["name"])
-
+    id_to_name = _tool_id_to_name_map(messages)
     names: list[str] = []
     for rid in result_ids:
         name = id_to_name.get(str(rid))

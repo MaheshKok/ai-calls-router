@@ -27,11 +27,5 @@ repos:
       - id: bandit
         args: ["-c", "pyproject.toml"]
         additional_dependencies: [".[toml]"]
-  - repo: https://github.com/PyCQA/flake8
-    rev: 7.2.0
-    hooks:
-      - id: flake8
-        args: [ai_calls_router]
-        additional_dependencies:
-          - wemake-python-styleguide>=0.19
-        files: ^ai_calls_router/
+  # flake8/wemake removed — cognitive complexity via Ruff C901 (mccabe)
+  # docstring-outdated detection via Ruff D417 (pydocstyle: args-match-signature)

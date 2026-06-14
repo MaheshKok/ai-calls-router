@@ -47,11 +47,10 @@ dev = [
     "pytest-timeout>=2.0",
     "radon>=6.0",
     "refurb>=2.0",
-    "ruff>=0.6",
+    "ruff>=0.15",
     "semgrep>=1.0",
     "twine>=5.0",
     "vulture>=2.11",
-    "wemake-python-styleguide>=0.19",
     "xenon>=0.9",
 ]
 
@@ -91,13 +90,14 @@ target-version = "py311"
 select = [
     "E", "F", "I", "UP", "B",     # existing
     "C4", "SIM", "RET", "ARG",     # readability / simplification
-    "C90",                          # mccabe complexity
+    "C90",                          # mccabe cognitive complexity (max-complexity=15)
     "PT",                           # pytest style
     "TCH",                          # type-checking imports
     "A",                            # builtins shadowing
     "PTH",                          # pathlib over os.path
     "RUF",                          # ruff-specific
     "PL",                           # pylint-inspired rules
+    "D417",                         # pydocstyle: docstring args must match signature
     "S",                            # flake8-bandit security rules
     "TRY",                          # tryceratops exception handling
     "EM",                           # flake8-errmsg

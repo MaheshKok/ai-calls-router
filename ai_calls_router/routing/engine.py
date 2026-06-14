@@ -201,6 +201,20 @@ async def _serve_via_direct(
     return await anthropic_direct.direct_call(body=routed_body, tier_cfg=tier_cfg, api_key=api_key)
 
 
+def _token_fields(body: dict[str, Any]) -> dict[str, int]:
+    """Extract token counts from an Anthropic usage block.
+
+    Returns a dict with keys: input, output, cache_read, cache_creation.
+    """
+    usage = body.get("usage") or {}
+    return {
+        "input": int(usage.get("input_tokens", 0) or 0),
+        "output": int(usage.get("output_tokens", 0) or 0),
+        "cache_read": int(usage.get("cache_read_input_tokens", 0) or 0),
+        "cache_creation": int(usage.get("cache_creation_input_tokens", 0) or 0),
+    }
+
+
 def _record_metrics(
     *,
     tier_name: str,
@@ -216,12 +230,12 @@ def _record_metrics(
 ) -> None:
     """Record per-request metrics after a successful routed call."""
     mtr = metrics_mod.get_metrics()
-    usage = anthropic_body.get("usage") or {}
+    tok = _token_fields(anthropic_body)
     mtr.add_routed_tokens(
-        input_tokens=int(usage.get("input_tokens", 0) or 0),
-        output_tokens=int(usage.get("output_tokens", 0) or 0),
-        cache_read=int(usage.get("cache_read_input_tokens", 0) or 0),
-        cache_creation=int(usage.get("cache_creation_input_tokens", 0) or 0),
+        input_tokens=tok["input"],
+        output_tokens=tok["output"],
+        cache_read=tok["cache_read"],
+        cache_creation=tok["cache_creation"],
     )
     mtr.record_request(
         method="POST",
@@ -233,10 +247,10 @@ def _record_metrics(
         user_agent=user_agent,
         client_ip="",
         tool_names=tool_names,
-        input_tokens=int(usage.get("input_tokens", 0) or 0),
-        output_tokens=int(usage.get("output_tokens", 0) or 0),
-        cache_read=int(usage.get("cache_read_input_tokens", 0) or 0),
-        cache_creation=int(usage.get("cache_creation_input_tokens", 0) or 0),
+        input_tokens=tok["input"],
+        output_tokens=tok["output"],
+        cache_read=tok["cache_read"],
+        cache_creation=tok["cache_creation"],
         duration=elapsed,
         premium_model=premium_model,
         agent=agent,
@@ -271,6 +285,10 @@ async def routed_call(
         tier_cfg: Tier config with "model" and optional "max_tokens".
         api_key: The tier API key; the client's credentials never reach here.
         settings: The config "settings" section.
+        tool_names: Tool names extracted from the request body.
+        user_agent: Raw User-Agent header from the client.
+        agent: Identified agent label.
+        session_id: Session fingerprint hex string.
 
     Returns:
         A BackendResponse with the masked Anthropic body, or None when the

@@ -29,6 +29,21 @@ def _parse_tool_names(value: Any) -> list[str]:
     return []
 
 
+def _parse_savings_line(line: str) -> dict[str, Any] | None:
+    """Parse one JSONL line into a valid savings record, or None on error."""
+    try:
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(rec, dict):
+        return None
+    premium_model = str(rec.get("premium_model") or "")
+    routed_model = str(rec.get("routed_model") or "")
+    if not premium_model or not routed_model:
+        return None
+    return rec
+
+
 class _Metrics:
     """Thread-safe counters for the proxy."""
 
@@ -176,6 +191,61 @@ class _Metrics:
             if len(self._last_requests) > 100:
                 self._last_requests = self._last_requests[:100]
 
+    class _BootstrapAccumulator:
+        """Mutable state bag for one bootstrap replay pass."""
+
+        def __init__(self) -> None:
+            self.routed_count = 0
+            self.routed_input = 0
+            self.routed_output = 0
+            self.routed_cache_read = 0
+            self.routed_cache_creation = 0
+            self.routed_usd = 0.0
+            self.premium_usd = 0.0
+            self.saved_usd = 0.0
+            self.recent: list[dict[str, Any]] = []
+
+        def process_one(self, rec: dict[str, Any]) -> None:
+            self.routed_count += 1
+            routed_model = str(rec.get("routed_model") or "")
+            premium_model = str(rec.get("premium_model") or "")
+            input_tokens = int(rec.get("input_tokens") or 0)
+            output_tokens = int(rec.get("output_tokens") or 0)
+            cache_read = int(rec.get("cache_read_input_tokens") or 0)
+            cache_creation = int(rec.get("cache_creation_input_tokens") or 0)
+
+            self.routed_input += input_tokens
+            self.routed_output += output_tokens
+            self.routed_cache_read += cache_read
+            self.routed_cache_creation += cache_creation
+            self.routed_usd += float(rec.get("routed_usd") or 0.0)
+            self.premium_usd += float(rec.get("premium_usd") or 0.0)
+            self.saved_usd += float(rec.get("saved_usd") or 0.0)
+
+            self.recent.append(
+                {
+                    "ts": int(rec.get("ts") or 0),
+                    "method": "POST",
+                    "path": "/v1/messages",
+                    "status": 200,
+                    "tier": str(rec.get("tier_name") or ""),
+                    "route": "routed",
+                    "model": routed_model,
+                    "premium_model": premium_model,
+                    "provider": str(rec.get("provider") or identify_provider(routed_model)),
+                    "user_agent": str(rec.get("user_agent") or "")[:200],
+                    "agent": str(rec.get("agent") or ""),
+                    "session_id": str(rec.get("session_id") or ""),
+                    "client_ip": "",
+                    "tool_names": _parse_tool_names(rec.get("tool_names")),
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_read_tokens": cache_read,
+                    "cache_creation_tokens": cache_creation,
+                    "duration_ms": 0,
+                }
+            )
+
     def bootstrap(self, *, ledger_path: Path | None, max_recent: int = 100) -> None:
         """Restore historical routed metrics from a savings JSONL ledger.
 
@@ -186,82 +256,27 @@ class _Metrics:
         """
         if ledger_path is None or not ledger_path.exists():
             return
-
-        routed_count = 0
-        routed_input = 0
-        routed_output = 0
-        routed_cache_read = 0
-        routed_cache_creation = 0
-        routed_usd = 0.0
-        premium_usd = 0.0
-        saved_usd = 0.0
-        recent: list[dict[str, Any]] = []
-
+        acc = self._BootstrapAccumulator()
         try:
             with ledger_path.open("r", encoding="utf-8") as fh:
                 for line in fh:
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
+                    rec = _parse_savings_line(line)
+                    if rec is None:
                         continue
-                    if not isinstance(rec, dict):
-                        continue
-                    premium_model = str(rec.get("premium_model") or "")
-                    routed_model = str(rec.get("routed_model") or "")
-                    if not premium_model or not routed_model:
-                        continue
-
-                    input_tokens = int(rec.get("input_tokens") or 0)
-                    output_tokens = int(rec.get("output_tokens") or 0)
-                    cache_read = int(rec.get("cache_read_input_tokens") or 0)
-                    cache_creation = int(rec.get("cache_creation_input_tokens") or 0)
-
-                    routed_count += 1
-                    routed_input += input_tokens
-                    routed_output += output_tokens
-                    routed_cache_read += cache_read
-                    routed_cache_creation += cache_creation
-                    routed_usd += float(rec.get("routed_usd") or 0.0)
-                    premium_usd += float(rec.get("premium_usd") or 0.0)
-                    saved_usd += float(rec.get("saved_usd") or 0.0)
-
-                    recent.append(
-                        {
-                            "ts": int(rec.get("ts") or 0),
-                            "method": "POST",
-                            "path": "/v1/messages",
-                            "status": 200,
-                            "tier": str(rec.get("tier_name") or ""),
-                            "route": "routed",
-                            "model": routed_model,
-                            "premium_model": premium_model,
-                            "provider": str(rec.get("provider") or identify_provider(routed_model)),
-                            "user_agent": str(rec.get("user_agent") or "")[:200],
-                            "agent": str(rec.get("agent") or ""),
-                            "session_id": str(rec.get("session_id") or ""),
-                            "client_ip": "",
-                            "tool_names": _parse_tool_names(rec.get("tool_names")),
-                            "input_tokens": input_tokens,
-                            "output_tokens": output_tokens,
-                            "cache_read_tokens": cache_read,
-                            "cache_creation_tokens": cache_creation,
-                            "duration_ms": 0,
-                        }
-                    )
+                    acc.process_one(rec)
         except OSError:
             return
-
-        recent.sort(key=lambda item: int(item.get("ts") or 0), reverse=True)
+        acc.recent.sort(key=lambda item: int(item.get("ts") or 0), reverse=True)
         with self._lock:
-            self._routed_requests += routed_count
-            self._routed_input_tokens += routed_input
-            self._routed_output_tokens += routed_output
-            self._routed_cache_read_tokens += routed_cache_read
-            self._routed_cache_creation_tokens += routed_cache_creation
-            self._routed_usd += routed_usd
-            self._premium_usd += premium_usd
-            self._saved_usd += saved_usd
-            self._last_requests = recent[:max_recent] + self._last_requests
+            self._routed_requests += acc.routed_count
+            self._routed_input_tokens += acc.routed_input
+            self._routed_output_tokens += acc.routed_output
+            self._routed_cache_read_tokens += acc.routed_cache_read
+            self._routed_cache_creation_tokens += acc.routed_cache_creation
+            self._routed_usd += acc.routed_usd
+            self._premium_usd += acc.premium_usd
+            self._saved_usd += acc.saved_usd
+            self._last_requests = acc.recent[:max_recent] + self._last_requests
             self._last_requests = self._last_requests[:100]
 
     # ── snapshot ───────────────────────────────────────────────────────
@@ -310,15 +325,28 @@ def identify_agent(user_agent: str | None) -> str:
     raw = (user_agent or "").strip()
     if not raw:
         return "unknown"
+    return _find_agent_match(raw.lower()) or raw[:80]
 
-    ua = raw.lower()
-    if "claude-code" in ua or "claude code" in ua or "claude-cli" in ua:
-        return "claude-code-cli"
-    if "claude-desktop" in ua or ("claude/" in ua and "electron" in ua):
-        return "claude-desktop"
-    if "anthropic-" in ua or "anthropic/" in ua:
-        return "api"
-    return raw[:80]
+
+# Each entry: (keywords, label, require_all). require_all=True -> ALL keywords
+# must be in UA; False -> ANY keyword is enough.
+_AGENT_RULES: list[tuple[list[str], str, bool]] = [
+    (["claude-code", "claude code", "claude-cli"], "claude-code-cli", False),
+    (["claude-desktop"], "claude-desktop", False),
+    (["claude/", "electron"], "claude-desktop", True),
+    (["anthropic-", "anthropic/"], "api", False),
+]
+
+
+def _find_agent_match(ua: str) -> str | None:
+    """Return the first matching agent label, or None."""
+    for keywords, label, all_required in _AGENT_RULES:
+        if all_required:
+            if all(k in ua for k in keywords):
+                return label
+        elif any(k in ua for k in keywords):
+            return label
+    return None
 
 
 def identify_provider(model: str | None) -> str:

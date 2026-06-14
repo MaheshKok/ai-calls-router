@@ -190,6 +190,11 @@ def record_routing_savings(
         cache_creation_tokens: Tokens written into the prefix cache this turn.
         routed_prices: Optional (miss, cached, output) per-token rates for the
             routed side; when None, LiteLLM prices the full prompt instead.
+        tier_name: Tier label for dashboards and reports.
+        tool_names: Comma-separated tool names from the request.
+        user_agent: Raw User-Agent header from the client.
+        agent: Identified agent label (e.g. ``claude-code-cli``).
+        session_id: Session fingerprint hex string.
     """
     if not premium_model or premium_model == routed_model:
         return
@@ -270,6 +275,11 @@ def record_savings_from_response(
         response_body: Anthropic-format response body carrying a usage block.
         ledger: Ledger path override; defaults to config.ledger_path().
         tier_cfg: Tier config; supplies cache-aware per-token rates when present.
+        tier_name: Tier label for dashboards and reports.
+        tool_names: Tool names extracted from the request body.
+        user_agent: Raw User-Agent header from the client.
+        agent: Identified agent label (e.g. ``claude-code-cli``).
+        session_id: Session fingerprint hex string.
     """
     try:
         usage = response_body.get("usage") if isinstance(response_body, dict) else None

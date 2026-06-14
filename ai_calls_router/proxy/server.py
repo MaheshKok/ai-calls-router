@@ -108,6 +108,29 @@ def _user_agent(request: Request) -> str:
     return request.headers.get("user-agent", "")
 
 
+def _resolve_tier_config(
+    names: list[str],
+) -> tuple[str, dict[str, Any] | None, str | None, dict[str, Any]]:
+    """Resolve the tier, its config, and API key from loaded routes.
+
+    Returns (tier_name, tier_cfg, api_key, raw_routes). When tier_cfg or
+    api_key is None the caller must pass through to premium.
+    """
+    routes = routing.load_routes()
+    tier = routing.tier_for_tools(names, routes)
+    if tier == "premium":
+        return ("premium", None, None, routes)
+    tier_cfg = (routes.get("tiers") or {}).get(tier)
+    if not isinstance(tier_cfg, dict):
+        return (tier, None, None, routes)
+    settings_cfg = routes.get("settings") or {}
+    api_key = routing.resolve_api_key(tier_cfg, settings_cfg)
+    if not api_key:
+        logger.info("acr: tier=%s has no API key; passing through", tier)
+        return (tier, None, None, routes)
+    return (tier, tier_cfg, api_key, routes)
+
+
 async def _try_route(
     body_bytes: bytes,
     *,
@@ -123,6 +146,9 @@ async def _try_route(
 
     Args:
         body_bytes: Raw request body bytes.
+        user_agent: Raw User-Agent header from the client.
+        agent: Identified agent label.
+        session: Session fingerprint hex string.
 
     Returns:
         The routed response, or None when the turn must pass through.
@@ -134,20 +160,11 @@ async def _try_route(
         names = routing.pending_tool_names(body)
         if not names:
             return None
-        routes = routing.load_routes()
-        tier = routing.tier_for_tools(names, routes)
-        if tier == "premium":
-            return None
-        tiers = routes.get("tiers") or {}
-        tier_cfg = tiers.get(tier)
-        if not isinstance(tier_cfg, dict):
-            return None
-        settings_cfg = routes.get("settings") or {}
-        api_key = routing.resolve_api_key(tier_cfg, settings_cfg)
-        if not api_key:
-            logger.info("acr: tier=%s has no API key; passing through", tier)
+        tier, tier_cfg, api_key, routes = _resolve_tier_config(names)
+        if tier_cfg is None:
             return None
         savings.register_tier_prices(routes)
+        settings_cfg = routes.get("settings") or {}
         result = await routed_call.routed_call(
             body=body,
             tier_name=tier,
