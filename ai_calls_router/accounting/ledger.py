@@ -15,7 +15,12 @@ from typing import Any
 
 from ai_calls_router._lib import config
 
-_INT_FIELDS = ("input_tokens", "output_tokens")
+_INT_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
 _FLOAT_FIELDS = ("routed_usd", "premium_usd", "saved_usd")
 
 
@@ -116,6 +121,8 @@ def format_report(summary: dict[str, Any]) -> str:
         f"  Routed requests:        {totals['requests']}",
         f"  Input tokens:           {totals['input_tokens']:,}",
         f"  Output tokens:          {totals['output_tokens']:,}",
+        f"  Cache hit tokens:       {totals['cache_read_input_tokens']:,}",
+        f"  Cache miss tokens:      {totals['cache_creation_input_tokens']:,}",
         f"  Cost on routed models:  ${totals['routed_usd']:.4f}",
         f"  Cost if premium:        ${totals['premium_usd']:.4f}",
         f"  Saved:                  ${totals['saved_usd']:.2f} ({totals['savings_pct']}%)",

@@ -160,6 +160,9 @@ def record_routing_savings(
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
     routed_prices: tuple[float, float, float] | None = None,
+    tier_name: str = "",
+    tool_names: str = "",
+    user_agent: str = "",
 ) -> None:
     """Append one savings entry comparing routed cost against premium cost.
 
@@ -223,6 +226,9 @@ def record_routing_savings(
             "routed_usd": round(routed_usd, 8),
             "premium_usd": round(premium_usd, 8),
             "saved_usd": round(premium_usd - routed_usd, 8),
+            "tier_name": tier_name,
+            "tool_names": tool_names,
+            "user_agent": user_agent[:200],
         }
         ledger = ledger if ledger is not None else config.ledger_path()
         with _ledger_lock:
@@ -240,6 +246,9 @@ def record_savings_from_response(
     response_body: Any,
     ledger: Path | None = None,
     tier_cfg: Any = None,
+    tier_name: str = "",
+    tool_names: list[str] | None = None,
+    user_agent: str = "",
 ) -> None:
     """Record savings using token counts taken from a routed response body.
 
@@ -273,4 +282,7 @@ def record_savings_from_response(
         cache_read_tokens=cache_read,
         cache_creation_tokens=cache_creation,
         routed_prices=_routed_prices_from_tier(tier_cfg),
+        tier_name=tier_name,
+        tool_names=",".join(tool_names) if tool_names else "",
+        user_agent=user_agent,
     )

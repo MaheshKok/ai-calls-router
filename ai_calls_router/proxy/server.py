@@ -5,7 +5,8 @@ process tool results mapped to a configured cheap tier with a resolvable key
 are served by routed_call; everything else (turn openers, premium or unmapped
 tools, missing keys, malformed JSON, decision errors, routed_call declining)
 streams through to the premium upstream with the client's headers intact.
-GET /health answers locally and every other path proxies unchanged.
+GET /health answers locally, GET /metrics exposes live counters, and every
+other path proxies unchanged.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from ai_calls_router._lib import config
-from ai_calls_router.accounting import savings
+from ai_calls_router.accounting import metrics, savings
 from ai_calls_router.proxy import passthrough
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
@@ -45,6 +46,12 @@ async def health(request: Request) -> JSONResponse:
         A local 200 status response.
     """
     return JSONResponse({"status": "ok"})
+
+
+async def metrics_endpoint(request: Request) -> JSONResponse:
+    """Return live in-memory counters for dashboard/API consumers."""
+    del request
+    return JSONResponse(metrics.get_metrics().snapshot())
 
 
 async def _serve_passthrough(request: Request, body_bytes: bytes) -> Response:
@@ -70,7 +77,22 @@ async def _serve_passthrough(request: Request, body_bytes: bytes) -> Response:
     )
 
 
-async def _try_route(body_bytes: bytes) -> Response | None:
+def _client_ip(request: Request) -> str:
+    """Extract the client IP from the request."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _user_agent(request: Request) -> str:
+    """Extract the User-Agent header."""
+    return request.headers.get("user-agent", "")
+
+
+async def _try_route(body_bytes: bytes, *, user_agent: str = "") -> Response | None:
     """Attempt to serve a /v1/messages request on a cheap tier.
 
     Any error anywhere in the decision or the routed call resolves to None
@@ -105,7 +127,13 @@ async def _try_route(body_bytes: bytes) -> Response | None:
             return None
         savings.register_tier_prices(routes)
         result = await routed_call.routed_call(
-            body=body, tier_name=tier, tier_cfg=tier_cfg, api_key=api_key, settings=settings_cfg
+            body=body,
+            tier_name=tier,
+            tier_cfg=tier_cfg,
+            api_key=api_key,
+            settings=settings_cfg,
+            tool_names=names,
+            user_agent=user_agent,
         )
         if result is None:
             return None
@@ -123,16 +151,24 @@ async def _try_route(body_bytes: bytes) -> Response | None:
 async def messages(request: Request) -> Response:
     """Decide and serve one /v1/messages request.
 
+    Records routing metrics as a side-effect.
+
     Args:
         request: Incoming Anthropic Messages API request.
 
     Returns:
         The routed response or the streamed premium passthrough.
     """
+    m = metrics.get_metrics()
+    m.incr_total()
+
     body_bytes = await request.body()
-    routed = await _try_route(body_bytes)
+    routed = await _try_route(body_bytes, user_agent=_user_agent(request))
     if routed is not None:
+        m.incr_routed()
         return routed
+
+    m.incr_passthrough()
     return await _serve_passthrough(request, body_bytes)
 
 
@@ -176,13 +212,14 @@ def create_app(transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
         transport: Optional httpx transport override (tests inject mocks).
 
     Returns:
-        A Starlette app serving /health, /v1/messages, and a catch-all proxy.
+        A Starlette app serving /health, /metrics, /v1/messages, and a catch-all proxy.
     """
     logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
     lifespan: Any = functools.partial(_lifespan, transport=transport)
     return Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
+            Route("/metrics", metrics_endpoint, methods=["GET"]),
             Route("/v1/messages", messages, methods=["POST"]),
             Route("/{path:path}", proxy, methods=PROXY_METHODS),
         ],

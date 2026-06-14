@@ -25,6 +25,7 @@ from ai_calls_router._lib.conversion import (
     to_anthropic_response,
 )
 from ai_calls_router._lib.litellm_guard import load_litellm
+from ai_calls_router.accounting import metrics as metrics_mod
 from ai_calls_router.accounting import savings
 from ai_calls_router.routing import compression, reduce
 from ai_calls_router.routing import direct as anthropic_direct
@@ -200,6 +201,45 @@ async def _serve_via_direct(
     return await anthropic_direct.direct_call(body=routed_body, tier_cfg=tier_cfg, api_key=api_key)
 
 
+def _record_metrics(
+    *,
+    tier_name: str,
+    model: str,
+    premium_model: str,
+    direct: bool,
+    tool_names: list[str],
+    user_agent: str,
+    anthropic_body: dict[str, Any],
+    elapsed: float,
+) -> None:
+    """Record per-request metrics after a successful routed call."""
+    mtr = metrics_mod.get_metrics()
+    usage = anthropic_body.get("usage") or {}
+    mtr.add_routed_tokens(
+        input_tokens=int(usage.get("input_tokens", 0) or 0),
+        output_tokens=int(usage.get("output_tokens", 0) or 0),
+        cache_read=int(usage.get("cache_read_input_tokens", 0) or 0),
+        cache_creation=int(usage.get("cache_creation_input_tokens", 0) or 0),
+    )
+    mtr.record_request(
+        method="POST",
+        path="/v1/messages",
+        status=200,
+        tier=tier_name,
+        route="direct" if direct else "litellm",
+        model=model,
+        user_agent=user_agent,
+        client_ip="",
+        tool_names=tool_names,
+        input_tokens=int(usage.get("input_tokens", 0) or 0),
+        output_tokens=int(usage.get("output_tokens", 0) or 0),
+        cache_read=int(usage.get("cache_read_input_tokens", 0) or 0),
+        cache_creation=int(usage.get("cache_creation_input_tokens", 0) or 0),
+        duration=elapsed,
+        premium_model=premium_model,
+    )
+
+
 async def routed_call(
     *,
     body: dict[str, Any],
@@ -207,6 +247,8 @@ async def routed_call(
     tier_cfg: dict[str, Any],
     api_key: str,
     settings: dict[str, Any],
+    tool_names: list[str] | None = None,
+    user_agent: str = "",
 ) -> BackendResponse | None:
     """Serve a request on the tier model, falling back to None on any failure.
 
@@ -231,6 +273,7 @@ async def routed_call(
     premium_model = body.get("model")
     model = tier_cfg.get("model")
     direct = anthropic_direct.direct_endpoint(model) is not None
+    _tool_names = tool_names or []
     try:
         started = time.monotonic()
         if direct:
@@ -278,7 +321,20 @@ async def routed_call(
         routed_model=cast("str", model),
         response_body=anthropic_body,
         tier_cfg=tier_cfg,
+        tier_name=tier_name,
+        tool_names=tool_names,
+        user_agent=user_agent,
     )
     if isinstance(premium_model, str) and premium_model:
         anthropic_body = {**anthropic_body, "model": premium_model}
+    _record_metrics(
+        tier_name=tier_name,
+        model=cast("str", model),
+        premium_model=str(premium_model) if premium_model else "",
+        direct=direct,
+        tool_names=_tool_names,
+        user_agent=user_agent,
+        anthropic_body=anthropic_body,
+        elapsed=elapsed,
+    )
     return BackendResponse(body=anthropic_body)
