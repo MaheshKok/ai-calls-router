@@ -26,7 +26,7 @@ from ai_calls_router._lib.conversion import (
 )
 from ai_calls_router._lib.litellm_guard import load_litellm
 from ai_calls_router.accounting import savings
-from ai_calls_router.routing import compression
+from ai_calls_router.routing import compression, reduce
 from ai_calls_router.routing import direct as anthropic_direct
 
 logger = logging.getLogger("acr.routed_call")
@@ -157,9 +157,13 @@ async def _serve_via_direct(
 ) -> dict[str, Any] | None:
     """Serve a turn directly on the provider's native Anthropic endpoint.
 
-    Skips compression and LiteLLM conversion entirely so consecutive
-    tool-result turns keep byte-identical prefixes, letting the provider's
-    prefix cache do the work its own caching outperforms our compression.
+    Skips LiteLLM conversion and the position-dependent compression pass so
+    consecutive tool-result turns keep byte-identical prefixes, letting the
+    provider's prefix cache do the work its own caching outperforms our
+    compression. A deterministic, position-independent reduction of tool_result
+    content runs first: because it is a pure function of the text, the same
+    tool_result reduces to identical bytes on every turn, so the prefix stays
+    cache-stable while shedding non-informative bytes.
 
     Args:
         body: Anthropic-format request body from the client.
@@ -170,7 +174,7 @@ async def _serve_via_direct(
         The routed response in Anthropic format, or None when the direct call
         fails (non-200, transport error) and the turn must pass through.
     """
-    routed_body = _prepare_routed_body(body, tier_cfg)
+    routed_body = _prepare_routed_body(reduce.reduce_tool_results(body), tier_cfg)
     return await anthropic_direct.direct_call(body=routed_body, tier_cfg=tier_cfg, api_key=api_key)
 
 

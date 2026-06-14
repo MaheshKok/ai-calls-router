@@ -486,6 +486,37 @@ class TestRoutedCallDeepSeekDirect:
         assert "stream" not in sent
         assert sent["max_tokens"] == 8192
 
+    def test_direct_path_reduces_tool_result_noise_before_send(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Deterministic reduction must run before the body reaches the provider:
+        # ANSI escapes and blank-line runs in tool_result content are stripped so
+        # fewer tokens go on the wire, and because the reduction is a pure
+        # function the prefix stays byte-stable across turns (cache-safe).
+        noisy_request = {
+            "model": PREMIUM_MODEL,
+            "max_tokens": 32000,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": "\x1b[32mok\x1b[0m\n\n\n\ntail",
+                        }
+                    ],
+                },
+            ],
+        }
+        _, captured, _ = _call_direct(monkeypatch, _direct_body(), body=noisy_request)
+        sent_result = captured["body"]["messages"][-1]["content"][0]["content"]
+        assert sent_result == "ok\n\ntail"
+
     def test_direct_path_forwards_only_tier_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Invariant 2: the client's credential never reaches the routed
         # provider; only the tier key is handed to direct_call.
