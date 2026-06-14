@@ -69,6 +69,7 @@ path = "ai_calls_router/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ai_calls_router"]
+include = ["ai_calls_router/proxy/dashboard.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

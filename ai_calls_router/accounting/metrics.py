@@ -8,11 +8,25 @@ state the proxy carries (aside from the mtime config cache).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ── singleton ──────────────────────────────────────────────────────────────
+
+
+def _parse_tool_names(value: Any) -> list[str]:
+    """Normalize persisted tool-name metadata from the savings ledger."""
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return []
 
 
 class _Metrics:
@@ -132,6 +146,9 @@ class _Metrics:
         cache_creation: int,
         duration: float,
         premium_model: str = "",
+        agent: str = "",
+        session_id: str = "",
+        provider: str = "",
     ) -> None:
         entry: dict[str, Any] = {
             "ts": int(time.time()),
@@ -142,7 +159,10 @@ class _Metrics:
             "route": route,
             "model": model,
             "premium_model": premium_model,
+            "provider": provider or identify_provider(model),
             "user_agent": user_agent[:200] if user_agent else "",
+            "agent": agent,
+            "session_id": session_id,
             "client_ip": client_ip,
             "tool_names": tool_names,
             "input_tokens": input_tokens,
@@ -155,6 +175,94 @@ class _Metrics:
             self._last_requests.insert(0, entry)
             if len(self._last_requests) > 100:
                 self._last_requests = self._last_requests[:100]
+
+    def bootstrap(self, *, ledger_path: Path | None, max_recent: int = 100) -> None:
+        """Restore historical routed metrics from a savings JSONL ledger.
+
+        The savings ledger records completed routed requests. Replaying it gives
+        the dashboard historical routed-token/cost/session context after proxy
+        restarts. Request totals remain live-process counters and are not
+        synthesized from the ledger.
+        """
+        if ledger_path is None or not ledger_path.exists():
+            return
+
+        routed_count = 0
+        routed_input = 0
+        routed_output = 0
+        routed_cache_read = 0
+        routed_cache_creation = 0
+        routed_usd = 0.0
+        premium_usd = 0.0
+        saved_usd = 0.0
+        recent: list[dict[str, Any]] = []
+
+        try:
+            with ledger_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    premium_model = str(rec.get("premium_model") or "")
+                    routed_model = str(rec.get("routed_model") or "")
+                    if not premium_model or not routed_model:
+                        continue
+
+                    input_tokens = int(rec.get("input_tokens") or 0)
+                    output_tokens = int(rec.get("output_tokens") or 0)
+                    cache_read = int(rec.get("cache_read_input_tokens") or 0)
+                    cache_creation = int(rec.get("cache_creation_input_tokens") or 0)
+
+                    routed_count += 1
+                    routed_input += input_tokens
+                    routed_output += output_tokens
+                    routed_cache_read += cache_read
+                    routed_cache_creation += cache_creation
+                    routed_usd += float(rec.get("routed_usd") or 0.0)
+                    premium_usd += float(rec.get("premium_usd") or 0.0)
+                    saved_usd += float(rec.get("saved_usd") or 0.0)
+
+                    recent.append(
+                        {
+                            "ts": int(rec.get("ts") or 0),
+                            "method": "POST",
+                            "path": "/v1/messages",
+                            "status": 200,
+                            "tier": str(rec.get("tier_name") or ""),
+                            "route": "routed",
+                            "model": routed_model,
+                            "premium_model": premium_model,
+                            "provider": str(rec.get("provider") or identify_provider(routed_model)),
+                            "user_agent": str(rec.get("user_agent") or "")[:200],
+                            "agent": str(rec.get("agent") or ""),
+                            "session_id": str(rec.get("session_id") or ""),
+                            "client_ip": "",
+                            "tool_names": _parse_tool_names(rec.get("tool_names")),
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "cache_read_tokens": cache_read,
+                            "cache_creation_tokens": cache_creation,
+                            "duration_ms": 0,
+                        }
+                    )
+        except OSError:
+            return
+
+        recent.sort(key=lambda item: int(item.get("ts") or 0), reverse=True)
+        with self._lock:
+            self._routed_requests += routed_count
+            self._routed_input_tokens += routed_input
+            self._routed_output_tokens += routed_output
+            self._routed_cache_read_tokens += routed_cache_read
+            self._routed_cache_creation_tokens += routed_cache_creation
+            self._routed_usd += routed_usd
+            self._premium_usd += premium_usd
+            self._saved_usd += saved_usd
+            self._last_requests = recent[:max_recent] + self._last_requests
+            self._last_requests = self._last_requests[:100]
 
     # ── snapshot ───────────────────────────────────────────────────────
 
@@ -193,6 +301,118 @@ class _Metrics:
 
 _METRICS: _Metrics | None = None
 _METRICS_INIT_LOCK = threading.Lock()
+
+# ── agent/session helpers (module-level) ──────────────────────────────────
+
+
+def identify_agent(user_agent: str | None) -> str:
+    """Map a raw User-Agent header into a dashboard-friendly agent label."""
+    raw = (user_agent or "").strip()
+    if not raw:
+        return "unknown"
+
+    ua = raw.lower()
+    if "claude-code" in ua or "claude code" in ua or "claude-cli" in ua:
+        return "claude-code-cli"
+    if "claude-desktop" in ua or ("claude/" in ua and "electron" in ua):
+        return "claude-desktop"
+    if "anthropic-" in ua or "anthropic/" in ua:
+        return "api"
+    return raw[:80]
+
+
+def identify_provider(model: str | None) -> str:
+    """Map a model identifier to a dashboard-friendly provider label.
+
+    Returns one of: anthropic, openai, deepseek, google, aws, azure, meta,
+    mistral, cohere, groq, fireworks, perplexity, together, or unknown.
+    """
+    if not model:
+        return "unknown"
+    m = model.strip().lower()
+    prefix_matches = (
+        ("bedrock/", "aws"),
+        ("azure/", "azure"),
+        ("groq/", "groq"),
+        ("fireworks/", "fireworks"),
+        ("together/", "together"),
+        ("anthropic/", "anthropic"),
+    )
+    for prefix, provider in prefix_matches:
+        if m.startswith(prefix):
+            return provider
+
+    family_matches = (
+        (("claude",), "anthropic"),
+        (("gpt", "chatgpt"), "openai"),
+        (("deepseek",), "deepseek"),
+        (("gemini",), "google"),
+        (("llama", "meta-llama"), "meta"),
+        (("mistral",), "mistral"),
+        (("sonar",), "perplexity"),
+    )
+    if m.startswith(("o1", "o3")):
+        return "openai"
+    if "command" in m and ("r-plus" in m or "r." in m):
+        return "cohere"
+    return next(
+        (
+            provider
+            for needles, provider in family_matches
+            if any(needle in m for needle in needles)
+        ),
+        "unknown",
+    )
+
+
+def _looks_like_session_opener(messages: list[Any]) -> bool:
+    first = messages[0]
+    if not isinstance(first, dict):
+        return False
+    if first.get("role") != "user":
+        return False
+    return not _message_has_tool_result(first)
+
+
+def _message_has_tool_result(message: dict[str, Any]) -> bool:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(part, dict) and part.get("type") == "tool_result" for part in content)
+
+
+def _stable_message_projection(message: dict[str, Any]) -> dict[str, Any]:
+    content = message.get("content")
+    if isinstance(content, list):
+        projected = [_stable_content_part(part) for part in content]
+    else:
+        projected = content
+    return {"role": message.get("role"), "content": projected}
+
+
+def _stable_content_part(part: Any) -> Any:
+    if not isinstance(part, dict):
+        return part
+    if part.get("type") == "text":
+        return {"type": "text", "text": part.get("text", "")}
+    return {"type": part.get("type")}
+
+
+def session_fingerprint(messages: Any) -> str | None:
+    """Return a stable session fingerprint for opener-style message payloads.
+
+    Claude clients do not currently send a documented session-id header to the
+    Anthropic Messages API. For dashboard grouping, use the first user turn as a
+    best-effort session opener and hash its shape/content. Tool-result turns are
+    deliberately ignored so second+ turns do not create synthetic sessions.
+    """
+    if not isinstance(messages, list) or not messages:
+        return None
+    if not _looks_like_session_opener(messages):
+        return None
+    first = messages[0]
+    material = repr(_stable_message_projection(first))
+    return hashlib.blake2s(material.encode("utf-8"), digest_size=8).hexdigest()
 
 
 def get_metrics() -> _Metrics:

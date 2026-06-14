@@ -211,6 +211,8 @@ def _record_metrics(
     user_agent: str,
     anthropic_body: dict[str, Any],
     elapsed: float,
+    agent: str = "",
+    session_id: str = "",
 ) -> None:
     """Record per-request metrics after a successful routed call."""
     mtr = metrics_mod.get_metrics()
@@ -237,6 +239,8 @@ def _record_metrics(
         cache_creation=int(usage.get("cache_creation_input_tokens", 0) or 0),
         duration=elapsed,
         premium_model=premium_model,
+        agent=agent,
+        session_id=session_id,
     )
 
 
@@ -249,6 +253,8 @@ async def routed_call(
     settings: dict[str, Any],
     tool_names: list[str] | None = None,
     user_agent: str = "",
+    agent: str = "",
+    session_id: str = "",
 ) -> BackendResponse | None:
     """Serve a request on the tier model, falling back to None on any failure.
 
@@ -324,6 +330,8 @@ async def routed_call(
         tier_name=tier_name,
         tool_names=tool_names,
         user_agent=user_agent,
+        agent=agent,
+        session_id=session_id,
     )
     if isinstance(premium_model, str) and premium_model:
         anthropic_body = {**anthropic_body, "model": premium_model}
@@ -336,5 +344,7 @@ async def routed_call(
         user_agent=user_agent,
         anthropic_body=anthropic_body,
         elapsed=elapsed,
+        agent=agent,
+        session_id=session_id,
     )
     return BackendResponse(body=anthropic_body)

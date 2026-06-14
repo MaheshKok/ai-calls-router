@@ -8,6 +8,34 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 from [Conventional Commit](https://www.conventionalcommits.org/) messages, so new
 entries are added here when a release pull request is merged.
 
+## [0.2.0] - 2026-06-14
+
+### Added
+
+- Live dashboard at `/dashboard` with per-request table, per-agent grouping,
+  per-session breakdown, and auto-refresh. Removed `tier` and `route` columns;
+  split cache into `cache hit` (read) and `cache miss` (write) columns.
+- Model-column prefix stripping (shows `deepseek-v4-flash` instead of
+  `deepseek/deepseek-v4-flash`).
+- Agent identification from `User-Agent` header with friendly display labels
+  (🖥️ Claude-Code CLI, 💻 Claude Desktop, 🔧 API).
+- Session fingerprinting: SHA-256 hash of the first system message content,
+  first 12 hex chars, shown in the dashboard.
+- Provider identification from model string: maps arbitrary model IDs to a
+  dashboard-friendly provider label (anthropic, openai, deepseek, google, aws,
+  azure, meta, mistral, cohere, groq, fireworks, perplexity, together, unknown).
+- Metrics persistence: `bootstrap()` replays `savings.jsonl` on proxy startup to
+  restore routed-token counters and recent-request history, so the dashboard
+  survives restarts.
+- Cache-Control `no-cache, no-store, must-revalidate` headers on `/dashboard` to
+  prevent stale cache after HTML updates.
+
+### Fixed
+
+- Dashboard JavaScript syntax error caused by escaped quotes in the `esc()`
+  sanitizer function — rewritten with clean quoting and validated via
+  `node --check`.
+
 ## [0.1.0] - 2026-06-14
 
 First tagged release. Anthropic passthrough routing is verified working

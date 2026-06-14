@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>acr &middot; dashboard</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; background: #0d1117; color: #c9d1d9; padding: 24px; }
+.app { max-width: 1200px; margin: 0 auto; }
+.header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; }
+.header h1 { font-size: 18px; font-weight: 600; color: #58a6ff; }
+.header h1 span { color: #f78166; }
+.meta { font-size: 13px; color: #8b949e; }
+.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; }
+.card .label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+.card .value { font-size: 26px; font-weight: 700; margin: 4px 0; }
+.card .sub { font-size: 12px; color: #484f58; }
+.card.accent .value { color: #58a6ff; }
+.card.green .value { color: #3fb950; }
+.card.amber .value { color: #d29922; }
+.card.red .value { color: #f85149; }
+.panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; }
+.panel h2 { font-size: 13px; color: #58a6ff; margin-bottom: 8px; font-weight: 600; }
+.panel .row { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; color: #c9d1d9; }
+.table-panel { grid-column: 1 / -1; }
+.table-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.status { font-size: 12px; color: #484f58; }
+table {width: 100%; border-collapse: collapse; font-size: 13px;}
+th { text-align: left; padding: 6px 8px; border-bottom: 1px solid #30363d; color: #8b949e; font-weight: 500; white-space: nowrap;}
+td { padding: 6px 8px; border-bottom: 1px solid #21262d; }
+td.empty { color:#484f58; text-align:center; padding: 24px;}
+.truncate {max-width: 180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.badge {display:inline-block; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:600;}
+.badge-fast {background:#1a3320; color:#3fb950}
+.badge-code {background:#1a3320; color:#3fb950}
+.badge-premium {background:#331a1a; color:#f85149}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <h1><span>acr</span> dashboard</h1>
+    <div class="meta">uptime <span id="uptime">--</span></div>
+  </header>
+  <section class="grid">
+    <div class="card accent"><div class="label">total</div><div class="value" id="total">--</div><div class="sub">requests seen</div></div>
+    <div class="card green"><div class="label">routed</div><div class="value" id="routed">--</div><div class="sub" id="routedPct">--</div></div>
+    <div class="card amber"><div class="label">passthrough</div><div class="value" id="passthrough">--</div><div class="sub">premium path</div></div>
+    <div class="card red"><div class="label">errors</div><div class="value" id="errors">--</div><div class="sub" id="escFallback">--</div></div>
+  </section>
+  <section class="grid">
+    <div class="card green"><div class="label">routed cost</div><div class="value" id="costRouted">--</div><div class="sub">cheap models</div></div>
+    <div class="card amber"><div class="label">premium cost</div><div class="value" id="costPremium">--</div><div class="sub">estimated</div></div>
+    <div class="card accent"><div class="label">saved</div><div class="value" id="saved">--</div><div class="sub">total delta</div></div>
+    <div class="card accent"><div class="label">save rate</div><div class="value" id="saveRate">--</div><div class="sub">vs premium</div></div>
+  </section>
+  <section class="panels">
+    <div class="panel" id="agent-panel"><h2>agents</h2><div class="row"><span class="mono">--</span><span>no data yet</span></div></div>
+    <div class="panel" id="session-panel"><h2>sessions</h2><div class="row"><span class="mono">--</span><span>no sessions yet</span></div></div>
+  </section>
+  <section class="panels">
+    <div class="panel">
+      <h2>routed tokens</h2>
+      <div class="row"><span>input</span><span class="mono" id="ri">--</span></div>
+      <div class="row"><span>output</span><span class="mono" id="ro">--</span></div>
+      <div class="row"><span>cache read</span><span class="mono" id="rcr">--</span></div>
+      <div class="row"><span>cache creation</span><span class="mono" id="rcc">--</span></div>
+    </div>
+    <div class="panel">
+      <h2>premium tokens</h2>
+      <div class="row"><span>input</span><span class="mono" id="pi">--</span></div>
+      <div class="row"><span>output</span><span class="mono" id="po">--</span></div>
+      <div class="row"><span>cache read</span><span class="mono" id="pcr">--</span></div>
+      <div class="row"><span>cache creation</span><span class="mono" id="pcc">--</span></div>
+    </div>
+  </section>
+  <section class="panel table-panel">
+    <div class="table-header"><h2>recent requests</h2><span class="status" id="status">loading</span></div>
+    <table>
+      <thead id="table-head">
+        <tr><th>time</th><th>model</th><th>tools</th><th>input</th><th>cache hit</th><th>cache miss</th><th>ms</th><th>agent</th><th>session</th></tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="9" class="empty">no requests yet</td></tr></tbody>
+    </table>
+  </section>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const nf = new Intl.NumberFormat();
+const esc = (s) => String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const num = (n) => nf.format(Number(n || 0));
+const usd = (n) => '$' + Number(n || 0).toFixed(Number(n || 0) >= 1 ? 2 : 4);
+const pct = (n) => Number.isFinite(n) ? n.toFixed(1) + '%' : '--';
+function uptime(s) { s = Number(s || 0); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60); return (h ? h + 'h ' : '') + (m ? m + 'm ' : '') + sec + 's'; }
+function shortModel(m) { m = (m || '').trim(); const idx = m.lastIndexOf('/'); return idx >= 0 ? m.substring(idx + 1) : m; }
+function agentKey(agent) {
+  const a = (agent || '').trim();
+  if (!a) return 'unknown';
+  if (a === 'claude-code-cli') return '\u{1F5A5}\uFE0F Claude-Code CLI';
+  if (a === 'claude-desktop') return '\u{1F4BB} Claude Desktop';
+  if (a === 'api') return '\u{1F527} API';
+  return a;
+}
+function buildAgentRows(data) {
+  const rows = data.last_requests || [];
+  const buckets = {};
+  for (const r of rows) {
+    const key = (r.agent || '').trim() || 'unknown';
+    buckets[key] = (buckets[key] || 0) + 1;
+  }
+  const html = ['<h2>agents</h2>'];
+  const keys = Object.keys(buckets).sort((a,b) => buckets[b] - buckets[a]);
+  if (keys.length === 0) {
+    html.push('<div class="row"><span class="mono">--</span><span>no data yet</span></div>');
+  } else {
+    for (const k of keys) {
+      html.push('<div class="row"><span class="mono">' + esc(agentKey(k)) + '</span><span class="mono">' + num(buckets[k]) + ' reqs</span></div>');
+    }
+  }
+  $('agent-panel').innerHTML = html.join('');
+}
+function buildSessionRows(data) {
+  const rows = data.last_requests || [];
+  const buckets = {};
+  for (const r of rows) {
+    const sid = (r.session_id || '').trim() || '__no__session__';
+    const agent = (r.agent || '').trim() || 'unknown';
+    if (!buckets[sid]) buckets[sid] = { count: 0, agent };
+    buckets[sid].count++;
+  }
+  const html = ['<h2>sessions</h2>'];
+  const entries = Object.entries(buckets).sort((a,b) => b[1].count - a[1].count).slice(0, 20);
+  if (entries.length === 0) {
+    html.push('<div class="row"><span class="mono">--</span><span>no sessions yet</span></div>');
+  } else {
+    let shown = 0;
+    for (const [sid, info] of entries) {
+      if (sid === '__no__session__') continue;
+      const label = sid.substring(0, 8) + '\u2026';
+      html.push('<div class="row"><span class="mono">' + esc(label) + '</span><span class="mono">' + esc(agentKey(info.agent)) + ' \u00B7 ' + num(info.count) + ' reqs</span></div>');
+      shown++;
+    }
+    if (shown === 0 && entries.length > 0) {
+      for (const [sid, info] of entries) {
+        html.push('<div class="row"><span class="mono">--</span><span class="mono">' + esc(agentKey(info.agent)) + ' \u00B7 ' + num(info.count) + ' reqs</span></div>');
+      }
+    }
+  }
+  $('session-panel').innerHTML = html.join('');
+}
+function apply(data) {
+  const r = data.requests || {}, rt = data.routed_tokens || {}, pt = data.premium_tokens || {}, c = data.costs || {};
+  const total = Number(r.total || 0), routed = Number(r.routed || 0);
+  $('uptime').textContent = uptime(data.uptime_seconds);
+  $('total').textContent = num(total);
+  $('routed').textContent = num(routed);
+  $('routedPct').textContent = pct(total ? routed / total * 100 : NaN) + ' of total';
+  $('passthrough').textContent = num(r.passthrough);
+  $('errors').textContent = num(r.errors);
+  $('escFallback').textContent = num(r.escalated) + ' escalated / ' + num(r.fallback) + ' fallback';
+  $('costRouted').textContent = usd(c.routed_usd);
+  $('costPremium').textContent = usd(c.premium_usd);
+  $('saved').textContent = usd(c.saved_usd);
+  $('saveRate').textContent = pct(Number(c.premium_usd) ? Number(c.saved_usd) / Number(c.premium_usd) * 100 : NaN);
+  $('ri').textContent = num(rt.input); $('ro').textContent = num(rt.output); $('rcr').textContent = num(rt.cache_read); $('rcc').textContent = num(rt.cache_creation);
+  $('pi').textContent = num(pt.input); $('po').textContent = num(pt.output); $('pcr').textContent = num(pt.cache_read); $('pcc').textContent = num(pt.cache_creation);
+  buildAgentRows(data);
+  buildSessionRows(data);
+  const rows = data.last_requests || [];
+  $('rows').innerHTML = rows.length ? rows.map(x => {
+    const cacheMiss = (x.input_tokens || 0) + (x.cache_creation_tokens || 0);
+    return '<tr>' +
+      '<td>' + new Date(Number(x.ts || 0) * 1000).toLocaleTimeString() + '</td>' +
+      '<td class="truncate">' + esc(shortModel(x.model) || '--') + '</td>' +
+      '<td class="truncate">' + esc((x.tool_names || []).join(', ') || '--') + '</td>' +
+      '<td>' + num(x.input_tokens || 0) + '</td>' +
+      '<td>' + num(x.cache_read_tokens || 0) + '</td>' +
+      '<td>' + num(cacheMiss) + '</td>' +
+      '<td>' + num(x.duration_ms) + '</td>' +
+      '<td class="truncate">' + esc(agentKey(x.agent) || '--') + '</td>' +
+      '<td class="truncate">' + esc((x.session_id || '--').substring(0, 12)) + '</td>' +
+    '</tr>';
+  }).join('') : '<tr><td colspan="9" class="empty">no requests yet</td></tr>';
+  $('status').textContent = 'live \u00B7 refreshed ' + new Date().toLocaleTimeString();
+}
+async function refresh() {
+  try {
+    const res = await fetch('/metrics', { cache: 'no-store' });
+    if (!res.ok) throw new Error(res.statusText);
+    apply(await res.json());
+  } catch (err) {
+    $('status').textContent = 'offline \u00B7 ' + err.message;
+  }
+}
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

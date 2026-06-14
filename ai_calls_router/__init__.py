@@ -5,4 +5,4 @@ tool-result-processing turns on cheap LiteLLM-supported models, and passes
 every decision-making turn through untouched to Anthropic.
 """
 
-__version__ = "0.1.0"  # x-release-please-version
+__version__ = "0.2.0"  # x-release-please-version

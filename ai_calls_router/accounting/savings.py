@@ -20,6 +20,7 @@ from typing import Any, cast
 
 from ai_calls_router._lib import config
 from ai_calls_router._lib.litellm_guard import load_litellm
+from ai_calls_router.accounting.metrics import identify_provider
 
 logger = logging.getLogger("acr.savings")
 
@@ -163,6 +164,8 @@ def record_routing_savings(
     tier_name: str = "",
     tool_names: str = "",
     user_agent: str = "",
+    agent: str = "",
+    session_id: str = "",
 ) -> None:
     """Append one savings entry comparing routed cost against premium cost.
 
@@ -229,6 +232,9 @@ def record_routing_savings(
             "tier_name": tier_name,
             "tool_names": tool_names,
             "user_agent": user_agent[:200],
+            "agent": agent,
+            "session_id": session_id,
+            "provider": identify_provider(routed_model),
         }
         ledger = ledger if ledger is not None else config.ledger_path()
         with _ledger_lock:
@@ -249,6 +255,8 @@ def record_savings_from_response(
     tier_name: str = "",
     tool_names: list[str] | None = None,
     user_agent: str = "",
+    agent: str = "",
+    session_id: str = "",
 ) -> None:
     """Record savings using token counts taken from a routed response body.
 
@@ -285,4 +293,6 @@ def record_savings_from_response(
         tier_name=tier_name,
         tool_names=",".join(tool_names) if tool_names else "",
         user_agent=user_agent,
+        agent=agent,
+        session_id=session_id,
     )

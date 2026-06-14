@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import importlib.resources
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -54,6 +55,21 @@ async def metrics_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(metrics.get_metrics().snapshot())
 
 
+async def dashboard(request: Request) -> Response:
+    """Serve the live dashboard single-page app."""
+    del request
+    return _serve_dashboard()
+
+
+def _serve_dashboard() -> Response:
+    body = importlib.resources.read_text("ai_calls_router.proxy", "dashboard.html")
+    return Response(
+        body,
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
 async def _serve_passthrough(request: Request, body_bytes: bytes) -> Response:
     """Relay a request to the premium upstream unchanged.
 
@@ -92,7 +108,13 @@ def _user_agent(request: Request) -> str:
     return request.headers.get("user-agent", "")
 
 
-async def _try_route(body_bytes: bytes, *, user_agent: str = "") -> Response | None:
+async def _try_route(
+    body_bytes: bytes,
+    *,
+    user_agent: str = "",
+    agent: str = "",
+    session: str | None = None,
+) -> Response | None:
     """Attempt to serve a /v1/messages request on a cheap tier.
 
     Any error anywhere in the decision or the routed call resolves to None
@@ -134,6 +156,8 @@ async def _try_route(body_bytes: bytes, *, user_agent: str = "") -> Response | N
             settings=settings_cfg,
             tool_names=names,
             user_agent=user_agent,
+            agent=agent,
+            session_id=session or "",
         )
         if result is None:
             return None
@@ -159,16 +183,49 @@ async def messages(request: Request) -> Response:
     Returns:
         The routed response or the streamed premium passthrough.
     """
+    body_bytes = await request.body()
+    agent = metrics.identify_agent(_user_agent(request))
+    try:
+        payload: Any = json.loads(body_bytes)
+        body_dict: Any = payload if isinstance(payload, dict) else None
+    except Exception:
+        body_dict = None
+    session = metrics.session_fingerprint(
+        body_dict.get("messages") if isinstance(body_dict, dict) else None
+    )
+
     m = metrics.get_metrics()
     m.incr_total()
 
-    body_bytes = await request.body()
-    routed = await _try_route(body_bytes, user_agent=_user_agent(request))
+    routed = await _try_route(
+        body_bytes,
+        user_agent=_user_agent(request),
+        agent=agent,
+        session=session,
+    )
     if routed is not None:
         m.incr_routed()
         return routed
 
     m.incr_passthrough()
+    m.record_request(
+        method="POST",
+        path="/v1/messages",
+        status=0,
+        tier="premium",
+        route="passthrough",
+        model="",
+        user_agent=_user_agent(request),
+        client_ip=_client_ip(request),
+        tool_names=[],
+        input_tokens=0,
+        output_tokens=0,
+        cache_read=0,
+        cache_creation=0,
+        duration=0,
+        agent=agent,
+        session_id=session or "",
+    )
     return await _serve_passthrough(request, body_bytes)
 
 
@@ -198,6 +255,8 @@ async def _lifespan(
     Yields:
         None while the application serves requests.
     """
+    mtr = metrics.get_metrics()
+    mtr.bootstrap(ledger_path=config.ledger_path(), max_recent=100)
     app.state.client = httpx.AsyncClient(transport=transport, timeout=passthrough.UPSTREAM_TIMEOUT)
     try:
         yield
@@ -220,6 +279,7 @@ def create_app(transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
         routes=[
             Route("/health", health, methods=["GET"]),
             Route("/metrics", metrics_endpoint, methods=["GET"]),
+            Route("/dashboard", dashboard, methods=["GET"]),
             Route("/v1/messages", messages, methods=["POST"]),
             Route("/{path:path}", proxy, methods=PROXY_METHODS),
         ],
