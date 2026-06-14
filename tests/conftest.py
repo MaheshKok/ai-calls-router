@@ -17,7 +17,7 @@ import pytest
 # --import-mode=importlib, independent of plugin load ordering.
 sys.path.insert(0, str(Path(__file__).parent))
 
-from acr_testkit import Upstream
+from tests.acr_testkit import Upstream
 
 _LAYER_MARKERS = ("unit", "integration", "e2e")
 

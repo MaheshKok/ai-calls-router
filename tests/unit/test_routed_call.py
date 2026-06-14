@@ -20,12 +20,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from acr_testkit import FakeLitellm
-from acr_testkit import make_response as _fake_response
 
 from ai_calls_router.accounting import savings
 from ai_calls_router.routing import engine as rc
 from ai_calls_router.routing import synthesis
+from tests.acr_testkit import FakeLitellm
+from tests.acr_testkit import make_response as _fake_response
 
 # Non-DeepSeek ids keep these tests on the LiteLLM path: DeepSeek tier models
 # are diverted to the native direct path (see TestRoutedCallDeepSeekDirect).

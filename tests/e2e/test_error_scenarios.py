@@ -8,7 +8,7 @@ guards in routing, compression, and the server itself.
 
 from __future__ import annotations
 
-from acr_testkit import FakeLitellm, Upstream, make_client, make_response
+from tests.acr_testkit import FakeLitellm, Upstream, make_client, make_response
 
 # ---------------------------------------------------------------------------
 # Configs used by the tests below
