@@ -37,7 +37,7 @@ dev = [
     "ruff>=0.6",
     "build>=1.2",
     "pre-commit>=3.5",
-    "mypy>=1.11",
+    "pyright>=1.1",
     "pip-audit>=2.7",
     "twine>=5.0",
     "check-wheel-contents>=0.6",
@@ -50,6 +50,9 @@ dev = [
     "refurb>=2.0",
     "bandit>=1.7",
     "interrogate>=1.7",
+    "wemake-python-styleguide>=0.19",
+    "mutmut>=3.0",
+    "semgrep>=1.0",
 ]
 
 [project.scripts]
@@ -93,9 +96,22 @@ select = [
     "A",                            # builtins shadowing
     "PTH",                          # pathlib over os.path
     "RUF",                          # ruff-specific
+    "PL",                           # pylint-inspired rules
+    "S",                            # flake8-bandit security rules
+    "TRY",                          # tryceratops exception handling
+    "EM",                           # flake8-errmsg
+    "ERA",                          # eradicate (dead commented-out code)
 ]
 ignore = [
     "RUF012",   # mutable classvar annotations need ClassVar[] on some patterns
+    "S101",     # assert usage in tests is intentional
+    "S104",     # possible binding to all interfaces is intentional for proxy
+    "S301",     # pickle usage pattern not present but flagged
+    "TRY003",   # long exception messages are acceptable
+    "EM101",    # exception messages with string literals are intentional
+    "EM102",    # f-string in exception is fine
+    "PLR0913",  # too many arguments — already enforced by keyword-only rule
+    "PLR2004",  # magic value comparisons in tests
 ]
 
 [tool.ruff.lint.mccabe]
@@ -106,6 +122,11 @@ max-complexity = 15
     "TC001", "TC002", "TC003",   # type-checking imports in tests are fine
     "ARG001", "ARG002", "ARG005", # unused args in test fixtures/mocks
     "RUF005",                      # list concat in test data is readable
+    "S",                           # security rules don't apply to test code
+    "PLR",                         # pylint refactor rules too noisy for tests
+    "PLC",                         # inline imports in test helpers
+    "TRY",                         # exception handling patterns fine in tests
+    "ERA",                         # commented-out calculation notes in tests
 ]
 "tests/conftest.py" = [
     "ARG001",
@@ -116,16 +137,20 @@ max-complexity = 15
 "src/ai_calls_router/cli.py" = [
     "ARG001",  # args.Namespace passed to handlers that don't use it
     "TC003",   # Callable import used at module level
+    "S603", "S607", "PLW1510",  # subprocess usage in CLI launcher
 ]
 "src/ai_calls_router/ops/daemon.py" = [
     "SIM105",  # try/except/pass in signal handling is intentional
+    "S603", "S607", "PLW1510",  # subprocess usage in daemon starter
 ]
 "src/ai_calls_router/proxy/server.py" = [
     "ARG001",  # health(request) doesn't use request
     "TC002", "TC003",  # Request + AsyncIterator in handler signatures
+    "PLR0911",  # _try_route dispatch has many returns by design
 ]
 "src/ai_calls_router/_lib/conversion.py" = [
     "C901",  # convert_messages_for_litellm is a well-tested dispatch function
+    "PLR0912",  # many branches in message dispatch function
 ]
 "src/ai_calls_router/accounting/ledger.py" = [
     "TC003",  # Path used in runtime string conversion
@@ -139,16 +164,31 @@ max-complexity = 15
 "src/ai_calls_router/proxy/passthrough.py" = [
     "TC003",  # AsyncIterator used in generator annotations
 ]
+"src/ai_calls_router/_lib/litellm_guard.py" = [
+    "PLW0603", "PLC0415",  # lazy loading with global + deferred import by design
+]
+"src/ai_calls_router/routing/compression.py" = [
+    "S603", "S607", "PLW1510",  # subprocess for rtk compression tool
+    "TRY300",  # try/except flow is intentional for resilience
+]
+"src/ai_calls_router/routing/decide.py" = [
+    "TRY300",  # try/except flow returns at end by design
+]
 
-[tool.mypy]
-python_version = "3.11"
-packages = ["ai_calls_router"]
-warn_unused_configs = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-no_implicit_optional = true
-check_untyped_defs = true
-exclude = ["tests/", "build/", "dist/"]
+[tool.pyright]
+pythonVersion = "3.11"
+venvPath = "."
+venv = ".venv"
+include = ["src/ai_calls_router"]
+exclude = ["tests", "build", "dist", ".venv"]
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportUnknownParameterType = false
+reportMissingParameterType = true
+reportPrivateUsage = false
 
 [tool.coverage.run]
 source = ["src/ai_calls_router"]
@@ -156,7 +196,7 @@ omit = ["tests/*"]
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv", "build", "dist"]
-skips = ["B404", "B603", "B607"]  # subprocess usage in daemon/CLI is by design
+skips = ["B404", "B603", "B607", "B101"]  # subprocess + assert for type narrowing
 
 [tool.deptry]
 extend_exclude = ["tests", ".venv", "build", "dist"]
@@ -166,3 +206,6 @@ pep621_dev_dependency_groups = ["dev"]
 [tool.interrogate]
 exclude = ["tests", "build", "dist", ".venv"]
 fail-under = 0
+
+[tool.semgrep]
+config = "auto"

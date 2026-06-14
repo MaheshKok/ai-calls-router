@@ -202,10 +202,10 @@ def resolve_api_key(tier_cfg: dict[str, Any], settings: dict[str, Any]) -> str |
     try:
         env_path = Path(env_file).expanduser()
         for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
                 continue
-            name, _, raw = line.partition("=")
+            name, _, raw = stripped.partition("=")
             if name.strip() in (key_env, f"export {key_env}"):
                 return raw.strip().strip("'\"") or None
     except Exception as exc:

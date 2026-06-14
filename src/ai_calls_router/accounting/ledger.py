@@ -35,11 +35,11 @@ def load_entries(ledger: Path | None = None) -> list[dict[str, Any]]:
         return []
     entries: list[dict[str, Any]] = []
     for line in ledger.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
+        stripped = line.strip()
+        if not stripped:
             continue
         try:
-            entry = json.loads(line)
+            entry = json.loads(stripped)
         except json.JSONDecodeError:
             continue
         if isinstance(entry, dict):

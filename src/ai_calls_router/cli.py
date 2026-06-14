@@ -43,9 +43,12 @@ class _AcrParser(argparse.ArgumentParser):
         argv = list(sys.argv[1:] if args is None else args)
         if argv and argv[0] == "code":
             parsed = super().parse_args(["code"], namespace)
+            assert parsed is not None
             parsed.claude_args = argv[1:]
             return parsed
-        return super().parse_args(argv, namespace)
+        result = super().parse_args(argv, namespace)
+        assert result is not None
+        return result
 
 
 def build_parser() -> argparse.ArgumentParser:

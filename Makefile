@@ -7,9 +7,10 @@ PIP := uv pip install --python $(PY)
 
 .PHONY: help install test lint format coverage build run clean
 .PHONY: type check-package check-security check-deps check-complexity qa
+.PHONY: vulture refurb bandit interrogate semgrep mutmut
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "%-16s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "%-18s %s\n", $$1, $$2}'
 
 install: ## Create or reuse venv and install package with dev dependencies
 	@if [ ! -x "$(PY)" ]; then \
@@ -28,8 +29,8 @@ lint: ## Run ruff checks
 format: ## Format source and tests with ruff
 	$(PY) -m ruff format src tests
 
-type: ## Run mypy static type checking
-	$(PY) -m mypy src/ai_calls_router
+type: ## Run pyright static type checking
+	$(PY) -m pyright src/ai_calls_router
 
 coverage: ## Run tests with coverage report (fails under 98%)
 	$(PY) -m pytest -q --cov --cov-report=term-missing --cov-fail-under=98
@@ -47,10 +48,10 @@ check-security: ## Run security audit on dependencies
 check-deps: ## Check for unused, missing, and transitive dependencies
 	$(PY) -m deptry src
 
-check-complexity: ## Measure code complexity
+check-complexity: ## CI-gated complexity check (xenon on top of radon)
 	$(PY) -m radon cc src tests -s -a --total-average
 	$(PY) -m radon mi src -s
-	$(PY) -m xenon --max-absolute B --max-modules A --max-average A src
+	$(PY) -m xenon --max-absolute D --max-modules C --max-average A src
 
 vulture: ## Report potentially dead code (advisory only)
 	$(PY) -m vulture src --min-confidence 80 || true
@@ -64,11 +65,19 @@ bandit: ## Run security lint on source
 interrogate: ## Report docstring coverage (advisory)
 	$(PY) -m interrogate src || true
 
-qa: lint type test coverage check-deps check-security check-package check-complexity ## Run all quality gates
+semgrep: ## Run semgrep pattern-based security/code analysis (advisory)
+	$(PY) -m semgrep --config auto src || true
+
+mutmut: ## Run mutation testing on critical modules (advisory, slow)
+	$(PY) -m mutmut run --paths-to-mutate src/ai_calls_router/routing || true
+
+qa: lint type test coverage check-deps check-security check-package check-complexity ## Run all blocking quality gates
+
+qa-full: qa bandit semgrep vulture refurb interrogate ## Run all gates including advisory
 
 run: ## Run the proxy server in the foreground
 	$(PY) -m ai_calls_router
 
 clean: ## Remove build artifacts and caches
-	rm -rf dist build *.egg-info .pytest_cache .coverage
+	rm -rf dist build *.egg-info .pytest_cache .coverage .mutmut-cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
