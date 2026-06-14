@@ -76,7 +76,7 @@ qa: lint type test coverage check-deps check-security check-package check-comple
 qa-full: qa bandit semgrep vulture refurb interrogate ## Run all gates including advisory
 
 run: ## Run the proxy server in the foreground
-	$(PY) -m ai_calls_router
+	$(PY) -m ai_calls_router serve
 
 clean: ## Remove build artifacts and caches
 	rm -rf dist build *.egg-info .pytest_cache .coverage .mutmut-cache

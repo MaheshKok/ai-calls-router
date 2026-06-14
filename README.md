@@ -93,55 +93,111 @@ site-packages.
    `acr init` writes `~/.ai-calls-router/config.yaml`. See
    [`config.example.yaml`](config.example.yaml) for the full annotated schema.
 
-2. Export the API key required by your configured cheap tier:
+2. Provide the API key for your cheap tier. The proxy reads it from the
+   environment variable named in your tier's `key_env` field (e.g.
+   `DEEPSEEK_API_KEY`). Put it in your shell rc or the proxy's `.env` file:
 
    ```bash
-   export DEEPSEEK_API_KEY=sk-... # or the key_env your config names
+   # inside ~/.ai-calls-router/.env — process env wins
+   echo 'DEEPSEEK_API_KEY=*** >> ~/.ai-calls-router/.env
    ```
 
-3. Run Claude Code through acr for one session:
+3. Start the proxy in the foreground so you can watch routing decisions live:
 
    ```bash
-   acr code -- -p "explain this repo"
+   acr serve
    ```
 
-   `acr code` starts the proxy if needed, injects `ANTHROPIC_BASE_URL` for the
-   child process only, and runs `claude` with any arguments passed after `--`.
+4. In another terminal, run **any** normal `claude` command with
+   `ANTHROPIC_BASE_URL` pointing at the proxy:
 
-## Persistent setup vs per-session
+   ```bash
+   ANTHROPIC_BASE_URL=http://127.0.0.1:8747 claude
+   ```
 
-Use one routing surface at a time:
+   That's the entire integration — no special launcher required. The proxy
+   intercepts every API call and routes tool-result-processing turns to your
+   cheap model transparently; decision-making turns pass straight through to
+   Anthropic.
 
-- `acr code` is per-session. It injects `ANTHROPIC_BASE_URL` only for the child
-  `claude` process. Nothing persists and there is nothing to revert.
-- `acr desktop on` is persistent. It updates Claude's settings file so future
-  Claude Code sessions that read `~/.claude/settings.json` route through acr
-  until you run `acr desktop off`.
-- `acr desktop off` restores the previous `ANTHROPIC_BASE_URL` value, or removes
-  acr's value if none existed before `on`.
+   If you prefer a launcher that also starts the daemon:
+   `acr code -- -p "task"`. For persistent routing across all sessions:
+   `acr desktop on`.
 
-If `~/.claude/settings.json` already sets `ANTHROPIC_BASE_URL` for another proxy
-(for example Headroom), `acr desktop on` backs up that value before overwriting
-it. Mixing persistent settings with `acr code` is redundant and can make it
-unclear which proxy is receiving traffic; pick `acr code` for temporary terminal
-sessions or `acr desktop on` for persistent desktop/IDE routing.
 
-To inspect or change persistent routing:
+## How to point Claude Code at the proxy
+
+Claude Code discovers the proxy through the `ANTHROPIC_BASE_URL` environment
+variable. Set it any of these ways:
+
+### A. Per-invocation (testing, one-off sessions)
 
 ```bash
-acr desktop status
-acr desktop on
-acr desktop off
+ANTHROPIC_BASE_URL=http://127.0.0.1:8747 claude
 ```
 
-All desktop commands accept `--config PATH` for tests or alternate Claude
-settings stores.
+No launcher, no config files, no persistence. Combine with `acr serve` in its
+own terminal for live log output during testing:
 
-Troubleshooting: if Claude seems to ignore the proxy, check for a conflicting
-`ANTHROPIC_BASE_URL` in `~/.claude/settings.json` with `acr desktop status`,
-confirm the proxy is running with `acr status`, and inspect
-`~/.ai-calls-router/acr.log` to verify which proxy receives traffic.
+```bash
+# Terminal 1 — watch routing decisions log live
+acr serve
 
+# Terminal 2 — use Claude Code normally through the proxy
+ANTHROPIC_BASE_URL=http://127.0.0.1:8747 claude -p "explain this repo"
+```
+
+### B. Shell-level (all terminal sessions)
+
+Add to `~/.zshrc` (or `~/.bashrc`):
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8747
+```
+
+Then every `claude` command routes through the proxy automatically. Keep
+the daemon running with `acr start` or `acr serve` in its own terminal.
+
+### C. Persistent Claude settings (terminal + IDE + desktop)
+
+```bash
+acr desktop on      # write ANTHROPIC_BASE_URL into ~/.claude/settings.json
+acr desktop off     # restore the previous value
+acr desktop status  # show current state
+```
+
+`acr desktop on` writes the proxy URL into `~/.claude/settings.json` under
+`env.ANTHROPIC_BASE_URL`. Claude Code reads that file on every launch. The
+`off` command restores whatever was there before — including a competing
+proxy like Headroom — so you can switch back without losing state.
+
+If `~/.claude/settings.json` already sets `ANTHROPIC_BASE_URL` for another
+proxy, `acr desktop on` backs up that value before overwriting it. Mixing
+persistent settings with per-invocation or shell-level env vars is redundant;
+pick one approach.
+
+All desktop commands accept `--config PATH` for tests or alternate settings
+stores.
+
+### D. The `acr code` launcher (also starts the daemon)
+
+```bash
+acr code -- -p "explain this repo"
+```
+
+`acr code` starts the daemon if needed, injects `ANTHROPIC_BASE_URL` for the
+child process only, and runs `claude` with any arguments passed after `--`.
+Useful for one-liners where you don't want to manage the daemon separately.
+
+### Troubleshooting
+
+If Claude seems to ignore the proxy:
+
+- Check for a conflicting `ANTHROPIC_BASE_URL` in
+  `~/.claude/settings.json` with `acr desktop status`.
+- Confirm the proxy is running: `acr status` (daemon) or watch the
+  `acr serve` terminal for request logs.
+- Inspect `~/.ai-calls-router/acr.log` to see which proxy received traffic.
 ## Commands
 
 | Command | Purpose |
