@@ -31,7 +31,7 @@ server:
 """
 
 
-@pytest.fixture()
+@pytest.fixture
 def acr_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the acr home directory and config at a temp dir."""
     monkeypatch.setenv("ACR_HOME", str(tmp_path))

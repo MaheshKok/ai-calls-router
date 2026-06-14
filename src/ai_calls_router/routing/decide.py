@@ -47,14 +47,14 @@ def load_routes(path: Path | None = None) -> dict[str, Any]:
             cached = _cache.get(path)
             if cached is not None and cached[0] == mtime:
                 return cached[1]
-        with open(path, encoding="utf-8") as fh:
+        with path.open(encoding="utf-8") as fh:
             parsed = yaml.safe_load(fh) or {}
         if not isinstance(parsed, dict):
             return {}
         with _cache_lock:
             _cache[path] = (mtime, parsed)
         return parsed
-    except Exception as exc:  # noqa: BLE001 -- fail open by contract
+    except Exception as exc:
         logger.warning("acr: config load failed (%s); routing disabled", exc)
         return {}
 
@@ -208,6 +208,6 @@ def resolve_api_key(tier_cfg: dict[str, Any], settings: dict[str, Any]) -> str |
             name, _, raw = line.partition("=")
             if name.strip() in (key_env, f"export {key_env}"):
                 return raw.strip().strip("'\"") or None
-    except Exception as exc:  # noqa: BLE001 -- fail open by contract
+    except Exception as exc:
         logger.warning("acr: env_file read failed (%s)", exc)
     return None

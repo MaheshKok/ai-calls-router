@@ -35,7 +35,7 @@ class _ScriptedAsk:
         return ""
 
 
-@pytest.fixture()
+@pytest.fixture
 def acr_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the acr home directory at a temp dir; config under it."""
     monkeypatch.setenv("ACR_HOME", str(tmp_path))
@@ -168,7 +168,9 @@ class TestPresetPricing:
             hit = cfg["input_cached_cost_per_1m"]
             out = cfg["output_cost_per_1m"]
             assert all(isinstance(v, int | float) for v in (miss, hit, out))
-            assert miss > 0 and hit > 0 and out > 0
+            assert miss > 0
+            assert hit > 0
+            assert out > 0
             # The whole point of the direct path: a cache hit is far cheaper
             # than a miss. A swapped hit/miss rate fails here.
             assert hit < miss

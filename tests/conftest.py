@@ -17,7 +17,7 @@ import pytest
 # --import-mode=importlib, independent of plugin load ordering.
 sys.path.insert(0, str(Path(__file__).parent))
 
-from acr_testkit import Upstream  # noqa: E402
+from acr_testkit import Upstream
 
 _LAYER_MARKERS = ("unit", "integration", "e2e")
 
@@ -50,7 +50,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(getattr(pytest.mark, layer))
 
 
-@pytest.fixture()
+@pytest.fixture
 def fixtures_dir() -> Path:
     """Return the absolute path to the shared tests/fixtures directory.
 
@@ -60,7 +60,7 @@ def fixtures_dir() -> Path:
     return Path(__file__).resolve().parent / "fixtures"
 
 
-@pytest.fixture()
+@pytest.fixture
 def upstream() -> Upstream:
     """Provide a fresh mock premium upstream for app-level tests.
 

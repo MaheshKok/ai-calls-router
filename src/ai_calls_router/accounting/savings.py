@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ai_calls_router._lib import config
 from ai_calls_router._lib.litellm_guard import load_litellm
@@ -66,8 +66,8 @@ def register_tier_prices(routes: dict[str, Any]) -> None:
                 continue
             if not _is_number(input_per_1m) or not _is_number(output_per_1m):
                 continue
-            input_per_token = float(input_per_1m) / 1_000_000
-            output_per_token = float(output_per_1m) / 1_000_000
+            input_per_token = float(cast("float", input_per_1m)) / 1_000_000
+            output_per_token = float(cast("float", output_per_1m)) / 1_000_000
             signature = (model, input_per_token, output_per_token)
             with _register_lock:
                 if signature in _registered:
@@ -123,9 +123,9 @@ def _routed_prices_from_tier(
     if not _is_number(cached_per_1m):
         cached_per_1m = input_per_1m
     return (
-        float(input_per_1m) / 1_000_000,
-        float(cached_per_1m) / 1_000_000,
-        float(output_per_1m) / 1_000_000,
+        float(cast("float", input_per_1m)) / 1_000_000,
+        float(cast("float", cached_per_1m)) / 1_000_000,
+        float(cast("float", output_per_1m)) / 1_000_000,
     )
 
 
@@ -207,7 +207,7 @@ def record_routing_savings(
         ledger = ledger if ledger is not None else config.ledger_path()
         with _ledger_lock:
             ledger.parent.mkdir(parents=True, exist_ok=True)
-            with open(ledger, "a", encoding="utf-8") as fh:
+            with ledger.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as exc:
         logger.warning("savings recording failed: %s", exc)

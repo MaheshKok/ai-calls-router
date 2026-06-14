@@ -71,7 +71,7 @@ def _run_direct(
 
 class TestProviderPrefix:
     @pytest.mark.parametrize(
-        "model,expected",
+        ("model", "expected"),
         [
             ("deepseek/deepseek-v4-pro", "deepseek"),
             ("openrouter/deepseek/chat", "openrouter"),

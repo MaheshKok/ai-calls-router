@@ -306,7 +306,7 @@ def _current_base_url(settings: dict[str, Any]) -> str | None:
 
 def _ensure_env_mapping(settings: dict[str, Any]) -> dict[str, Any]:
     if "env" not in settings:
-        env = {}
+        env: dict[str, Any] = {}
         settings["env"] = env
     else:
         env = settings["env"]

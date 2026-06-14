@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, cast
 
 from ai_calls_router._lib.conversion import (
     BackendResponse,
@@ -238,7 +238,7 @@ async def routed_call(
     )
     savings.record_savings_from_response(
         premium_model=premium_model,
-        routed_model=model,
+        routed_model=cast("str", model),
         response_body=anthropic_body,
         tier_cfg=tier_cfg,
     )

@@ -13,7 +13,7 @@ passthrough and never breaks a turn.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -123,7 +123,7 @@ async def direct_call(
     url = base_url.rstrip("/") + "/v1/messages"
     payload: dict[str, Any] = {
         **body,
-        "model": native_model_id(model),
+        "model": native_model_id(cast("str", model)),
         "thinking": {"type": "disabled"},
     }
     headers = {

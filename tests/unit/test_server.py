@@ -80,12 +80,12 @@ class _FakeRoutedCall:
         return self._result
 
 
-@pytest.fixture()
+@pytest.fixture
 def upstream() -> _Upstream:
     return _Upstream()
 
 
-@pytest.fixture()
+@pytest.fixture
 def client(*, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: _Upstream) -> Any:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(CONFIG_YAML, encoding="utf-8")

@@ -37,6 +37,19 @@ dev = [
     "ruff>=0.6",
     "build>=1.2",
     "pre-commit>=3.5",
+    "mypy>=1.11",
+    "pip-audit>=2.7",
+    "twine>=5.0",
+    "check-wheel-contents>=0.6",
+    "pytest-timeout>=2.0",
+    "pytest-randomly>=3.15",
+    "deptry>=0.16",
+    "radon>=6.0",
+    "xenon>=0.9",
+    "vulture>=2.11",
+    "refurb>=2.0",
+    "bandit>=1.7",
+    "interrogate>=1.7",
 ]
 
 [project.scripts]
@@ -59,6 +72,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "--import-mode=importlib"
 pythonpath = ["tests"]
+timeout = 30
 markers = [
     "unit: unit-level test (single module, fully isolated).",
     "integration: integration-level test (full app, mocked network boundaries).",
@@ -70,7 +84,85 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = [
+    "E", "F", "I", "UP", "B",     # existing
+    "C4", "SIM", "RET", "ARG",     # readability / simplification
+    "C90",                          # mccabe complexity
+    "PT",                           # pytest style
+    "TCH",                          # type-checking imports
+    "A",                            # builtins shadowing
+    "PTH",                          # pathlib over os.path
+    "RUF",                          # ruff-specific
+]
+ignore = [
+    "RUF012",   # mutable classvar annotations need ClassVar[] on some patterns
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "TC001", "TC002", "TC003",   # type-checking imports in tests are fine
+    "ARG001", "ARG002", "ARG005", # unused args in test fixtures/mocks
+    "RUF005",                      # list concat in test data is readable
+]
+"tests/conftest.py" = [
+    "ARG001",
+]
+"tests/fixtures/generate_golden.py" = [
+    "TC001", "TC002", "TC003",
+]
+"src/ai_calls_router/cli.py" = [
+    "ARG001",  # args.Namespace passed to handlers that don't use it
+    "TC003",   # Callable import used at module level
+]
+"src/ai_calls_router/ops/daemon.py" = [
+    "SIM105",  # try/except/pass in signal handling is intentional
+]
+"src/ai_calls_router/proxy/server.py" = [
+    "ARG001",  # health(request) doesn't use request
+    "TC002", "TC003",  # Request + AsyncIterator in handler signatures
+]
+"src/ai_calls_router/_lib/conversion.py" = [
+    "C901",  # convert_messages_for_litellm is a well-tested dispatch function
+]
+"src/ai_calls_router/accounting/ledger.py" = [
+    "TC003",  # Path used in runtime string conversion
+]
+"src/ai_calls_router/accounting/savings.py" = [
+    "TC003",  # Path used in runtime operations
+]
+"src/ai_calls_router/ops/wizard.py" = [
+    "TC003",  # Path used in runtime operations
+]
+"src/ai_calls_router/proxy/passthrough.py" = [
+    "TC003",  # AsyncIterator used in generator annotations
+]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["ai_calls_router"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+exclude = ["tests/", "build/", "dist/"]
 
 [tool.coverage.run]
 source = ["src/ai_calls_router"]
+omit = ["tests/*"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "build", "dist"]
+skips = ["B404", "B603", "B607"]  # subprocess usage in daemon/CLI is by design
+
+[tool.deptry]
+extend_exclude = ["tests", ".venv", "build", "dist"]
+known_first_party = ["ai_calls_router"]
+pep621_dev_dependency_groups = ["dev"]
+
+[tool.interrogate]
+exclude = ["tests", "build", "dist", ".venv"]
+fail-under = 0

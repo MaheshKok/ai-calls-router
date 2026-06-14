@@ -135,7 +135,7 @@ def start() -> int:
 
     config.home_dir().mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-m", "ai_calls_router", "serve"]
-    with open(config.log_path(), "ab") as log_handle:
+    with config.log_path().open("ab") as log_handle:
         child = subprocess.Popen(
             cmd,
             stdout=log_handle,

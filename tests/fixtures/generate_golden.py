@@ -19,7 +19,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path.home() / ".headroom" / "extensions" / "tool-router"))
 
-from headroom.backends.litellm import (  # noqa: E402
+from headroom.backends.litellm import (
     LiteLLMBackend,
     _convert_anthropic_tool,
     _convert_tool_choice,
