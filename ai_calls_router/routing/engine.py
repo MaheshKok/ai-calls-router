@@ -89,6 +89,28 @@ def _prepare_routed_body(body: dict[str, Any], tier_cfg: dict[str, Any]) -> dict
     return routed
 
 
+def _usage_int(usage: dict[str, Any], key: str) -> int:
+    """Return a non-negative integer usage counter from a response body."""
+    value = usage.get(key, 0)
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(count, 0)
+
+
+def _usage_summary(response_body: dict[str, Any]) -> str:
+    """Return a compact token/cache summary for routing logs."""
+    raw_usage = response_body.get("usage")
+    usage = raw_usage if isinstance(raw_usage, dict) else {}
+    return (
+        f"in={_usage_int(usage, 'input_tokens')} "
+        f"out={_usage_int(usage, 'output_tokens')} "
+        f"cache_hit={_usage_int(usage, 'cache_read_input_tokens')} "
+        f"cache_miss={_usage_int(usage, 'cache_creation_input_tokens')}"
+    )
+
+
 def escalates(response_body: dict[str, Any], settings: dict[str, Any]) -> bool:
     """Check whether a routed response invokes a premium tool.
 
@@ -244,10 +266,11 @@ async def routed_call(
         return None
 
     logger.info(
-        "acr: /v1/messages -> tier=%s model=%s%s (%.2fs)",
+        "acr: routed tier=%s model=%s route=%s %s duration=%.2fs",
         tier_name,
         model,
-        " [direct]" if direct else "",
+        "direct" if direct else "litellm",
+        _usage_summary(anthropic_body),
         elapsed,
     )
     savings.record_savings_from_response(

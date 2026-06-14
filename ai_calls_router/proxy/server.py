@@ -178,6 +178,7 @@ def create_app(transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
     Returns:
         A Starlette app serving /health, /v1/messages, and a catch-all proxy.
     """
+    logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
     lifespan: Any = functools.partial(_lifespan, transport=transport)
     return Starlette(
         routes=[
