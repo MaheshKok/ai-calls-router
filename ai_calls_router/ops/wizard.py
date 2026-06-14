@@ -83,12 +83,17 @@ TIER_MAX_TOKENS: dict[str, int] = {"fast": 8192, "code": 8192, "crud": 4096}
 
 DEFAULT_TOOLS: dict[str, str] = {
     "Bash": "fast",
+    "BashOutput": "fast",
+    "KillShell": "fast",
     "WebFetch": "fast",
     "WebSearch": "fast",
     "Read": "code",
     "Grep": "code",
     "Glob": "code",
+    "LSP": "code",
     "TodoWrite": "crud",
+    "TaskList": "crud",
+    "TaskGet": "crud",
     "Edit": "premium",
     "Write": "premium",
     "MultiEdit": "premium",

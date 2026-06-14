@@ -77,8 +77,13 @@ class TestDefaults:
         path = wizard.run_wizard(ask=_ScriptedAsk([]))
         tools = _written_config(path)["tools"]
         assert tools["Bash"] == "fast"
+        assert tools["BashOutput"] == "fast"
+        assert tools["KillShell"] == "fast"
         assert tools["Read"] == "code"
+        assert tools["LSP"] == "code"
         assert tools["TodoWrite"] == "crud"
+        assert tools["TaskList"] == "crud"
+        assert tools["TaskGet"] == "crud"
         for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Task"):
             assert tools[tool] == "premium"
 
@@ -190,6 +195,7 @@ class TestPresetPricing:
             )
         )
         written = _written_config(wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""])))
+        assert written["tools"] == example["tools"]
         price_keys = (
             "input_cost_per_1m",
             "input_cached_cost_per_1m",

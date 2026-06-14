@@ -45,12 +45,12 @@ def reduce_text(text: str, *, drop_duplicate_lines: bool = False) -> str:
     blank_run = 0
     previous: str | None = None
     for line in stripped.split("\n"):
-        if not line.strip():
+        if line.strip():
+            blank_run = 0
+        else:
             blank_run += 1
             if blank_run > 1:
                 continue
-        else:
-            blank_run = 0
         if drop_duplicate_lines and line == previous:
             continue
         out.append(line)

@@ -84,12 +84,17 @@ tiers:
 # Any tool not listed here (and any unresolvable tool) routes to premium.
 tools:
   Bash: fast
+  BashOutput: fast
+  KillShell: fast
   WebFetch: fast
   WebSearch: fast
   Read: code
   Grep: code
   Glob: code
+  LSP: code
   TodoWrite: crud
+  TaskList: crud
+  TaskGet: crud
   Edit: premium
   Write: premium
   MultiEdit: premium
