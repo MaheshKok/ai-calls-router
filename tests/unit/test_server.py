@@ -20,6 +20,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from ai_calls_router._lib.conversion import BackendResponse
+from ai_calls_router.accounting import metrics as metrics_mod
 from ai_calls_router.proxy.server import create_app
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as rc
@@ -71,12 +72,17 @@ class _Upstream:
 class _FakeRoutedCall:
     """routed_call stand-in recording invocations."""
 
-    def __init__(self, result: BackendResponse | None) -> None:
+    def __init__(
+        self, result: BackendResponse | None, *, guard_tools: list[str] | None = None
+    ) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self._result = result
+        self._guard_tools = guard_tools or []
 
     async def __call__(self, **kwargs: Any) -> BackendResponse | None:
         self.calls.append(kwargs)
+        if self._guard_tools:
+            kwargs["on_premium_guard"](self._guard_tools)
         return self._result
 
 
@@ -87,6 +93,7 @@ def upstream() -> _Upstream:
 
 @pytest.fixture
 def client(*, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: _Upstream) -> Any:
+    metrics_mod._METRICS = None
     config_file = tmp_path / "config.yaml"
     config_file.write_text(CONFIG_YAML, encoding="utf-8")
     monkeypatch.setenv("ACR_CONFIG", str(config_file))
@@ -95,6 +102,7 @@ def client(*, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: _Upstre
     app = create_app(transport=httpx.MockTransport(upstream.handler))
     with TestClient(app) as test_client:
         yield test_client
+    metrics_mod._METRICS = None
 
 
 def _tool_result_body(tool_name: str = "Bash", stream: bool = False) -> dict[str, Any]:
@@ -156,6 +164,13 @@ class TestMessagesPassthrough:
         response = client.post("/v1/messages", json=_tool_result_body("Edit"))
         assert response.json() == {"marker": "upstream"}
         assert len(upstream.requests) == 1
+        latest = client.get("/metrics").json()["last_requests"][0]
+        assert latest["route"] == "premium_guard"
+        assert latest["tier"] == "premium"
+        assert latest["model"] == "claude-fable-5"
+        assert latest["premium_model"] == "claude-fable-5"
+        assert latest["tool_names"] == ["Edit"]
+        assert latest["decision_reason"] == "request_premium_guard"
 
     def test_unmapped_tool_result_passes_through(self, client: Any, upstream: _Upstream) -> None:
         response = client.post("/v1/messages", json=_tool_result_body("Mystery"))
@@ -263,6 +278,28 @@ class TestMessagesRouted:
         assert response.json() == {"marker": "upstream"}
         assert len(fake.calls) == 1
         assert len(upstream.requests) == 1
+
+    def test_routed_premium_guard_records_escalation_reason(
+        self,
+        *,
+        client: Any,
+        upstream: _Upstream,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake = _FakeRoutedCall(None, guard_tools=["Edit"])
+        monkeypatch.setattr(rc, "routed_call", fake)
+        response = client.post("/v1/messages", json=_tool_result_body())
+        assert response.json() == {"marker": "upstream"}
+        assert len(upstream.requests) == 1
+
+        snapshot = client.get("/metrics").json()
+        assert snapshot["requests"]["escalated"] == 1
+        latest = snapshot["last_requests"][0]
+        assert latest["route"] == "premium_guard"
+        assert latest["tier"] == "fast"
+        assert latest["model"] == "claude-fable-5"
+        assert latest["tool_names"] == ["Bash"]
+        assert latest["decision_reason"] == "response_premium_guard"
 
 
 class TestCatchAll:

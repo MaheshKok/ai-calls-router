@@ -164,6 +164,7 @@ class _Metrics:
         agent: str = "",
         session_id: str = "",
         provider: str = "",
+        decision_reason: str = "",
     ) -> None:
         entry: dict[str, Any] = {
             "ts": int(time.time()),
@@ -178,6 +179,7 @@ class _Metrics:
             "user_agent": user_agent[:200] if user_agent else "",
             "agent": agent,
             "session_id": session_id,
+            "decision_reason": decision_reason,
             "client_ip": client_ip,
             "tool_names": tool_names,
             "input_tokens": input_tokens,
@@ -236,6 +238,7 @@ class _Metrics:
                     "user_agent": str(rec.get("user_agent") or "")[:200],
                     "agent": str(rec.get("agent") or ""),
                     "session_id": str(rec.get("session_id") or ""),
+                    "decision_reason": str(rec.get("decision_reason") or "routed"),
                     "client_ip": "",
                     "tool_names": _parse_tool_names(rec.get("tool_names")),
                     "input_tokens": input_tokens,

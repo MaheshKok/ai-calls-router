@@ -20,7 +20,7 @@ from typing import Any, cast
 
 from ai_calls_router._lib import config
 from ai_calls_router._lib.litellm_guard import load_litellm
-from ai_calls_router.accounting.metrics import identify_provider
+from ai_calls_router.accounting.metrics import get_metrics, identify_provider
 
 logger = logging.getLogger("acr.savings")
 
@@ -246,6 +246,11 @@ def record_routing_savings(
             ledger.parent.mkdir(parents=True, exist_ok=True)
             with ledger.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        get_metrics().add_savings(
+            routed_usd=entry["routed_usd"],
+            premium_usd=entry["premium_usd"],
+            saved_usd=entry["saved_usd"],
+        )
     except Exception as exc:
         logger.warning("savings recording failed: %s", exc, exc_info=True)
 

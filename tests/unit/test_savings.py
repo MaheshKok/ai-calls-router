@@ -53,6 +53,20 @@ def _read_entries(ledger: Path) -> list[dict[str, Any]]:
     ]
 
 
+class _FakeMetrics:
+    def __init__(self) -> None:
+        self.savings_calls: list[dict[str, float]] = []
+
+    def add_savings(self, *, routed_usd: float, premium_usd: float, saved_usd: float) -> None:
+        self.savings_calls.append(
+            {
+                "routed_usd": routed_usd,
+                "premium_usd": premium_usd,
+                "saved_usd": saved_usd,
+            }
+        )
+
+
 class TestRegisterTierPrices:
     def test_registered_price_is_usable_by_cost_per_token(self) -> None:
         litellm = load_litellm()
@@ -201,6 +215,26 @@ class TestRecordRoutingSavings:
         )
         entries = _read_entries(ledger)
         assert [e["input_tokens"] for e in entries] == [1_000_000, 2_000_000]
+
+    def test_updates_live_cost_counters_after_append(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ledger = tmp_path / "savings.jsonl"
+        fake_metrics = _FakeMetrics()
+        monkeypatch.setattr(savings, "get_metrics", lambda: fake_metrics)
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            ledger=ledger,
+        )
+        assert len(_read_entries(ledger)) == 1
+        assert len(fake_metrics.savings_calls) == 1
+        call = fake_metrics.savings_calls[0]
+        assert call["routed_usd"] == pytest.approx(2.0)
+        assert call["premium_usd"] == pytest.approx(20.0)
+        assert call["saved_usd"] == pytest.approx(18.0)
 
     def test_skips_when_premium_model_missing(self, tmp_path: Path) -> None:
         ledger = tmp_path / "savings.jsonl"

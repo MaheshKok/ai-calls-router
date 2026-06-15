@@ -99,6 +99,7 @@ def _call(
     body: dict[str, Any] | None = None,
     settings: dict[str, Any] | None = None,
     api_key: str = "test-tier-key",
+    on_premium_guard: Any = None,
 ) -> Any:
     """Run routed_call against the fake litellm module."""
     monkeypatch.setattr(rc, "load_litellm", lambda: fake)
@@ -109,6 +110,7 @@ def _call(
             tier_cfg=TIER_CFG,
             api_key=api_key,
             settings=settings if settings is not None else SETTINGS,
+            on_premium_guard=on_premium_guard,
         )
     )
 
@@ -262,6 +264,17 @@ class TestRoutedCall:
             _fake_response(text=None, tool_calls=tool_calls, finish_reason="tool_calls")
         )
         assert _call(monkeypatch=monkeypatch, fake=fake) is None
+
+    def test_escalating_response_reports_guard_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        tool_calls = [_fake_tool_call(call_id="c1", name="Edit", arguments='{"file_path": "x"}')]
+        fake = FakeLitellm(
+            _fake_response(text=None, tool_calls=tool_calls, finish_reason="tool_calls")
+        )
+        guard_tools: list[str] = []
+        assert (
+            _call(monkeypatch=monkeypatch, fake=fake, on_premium_guard=guard_tools.extend) is None
+        )
+        assert guard_tools == ["Edit"]
 
     def test_no_ledger_entry_when_escalated(
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path

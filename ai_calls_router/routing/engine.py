@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from ai_calls_router._lib.conversion import (
     BackendResponse,
@@ -124,20 +127,27 @@ def escalates(response_body: dict[str, Any], settings: dict[str, Any]) -> bool:
         True when the guard is enabled and any tool_use block names a
         premium tool, otherwise False.
     """
+    return bool(_premium_tool_names(response_body, settings))
+
+
+def _premium_tool_names(response_body: dict[str, Any], settings: dict[str, Any]) -> list[str]:
+    """Return premium tool names invoked by a routed response."""
     if not settings.get("escalate_on_premium_tools", True):
-        return False
+        return []
     premium_tools = set(settings.get("premium_tools") or [])
     if not premium_tools:
-        return False
+        return []
     content = response_body.get("content")
     if not isinstance(content, list):
-        return False
-    return any(
-        isinstance(block, dict)
+        return []
+    return [
+        block["name"]
+        for block in content
+        if isinstance(block, dict)
         and block.get("type") == "tool_use"
         and block.get("name") in premium_tools
-        for block in content
-    )
+        and isinstance(block.get("name"), str)
+    ]
 
 
 async def _serve_via_litellm(
@@ -269,6 +279,7 @@ async def routed_call(
     user_agent: str = "",
     agent: str = "",
     session_id: str = "",
+    on_premium_guard: Callable[[list[str]], None] | None = None,
 ) -> BackendResponse | None:
     """Serve a request on the tier model, falling back to None on any failure.
 
@@ -289,6 +300,8 @@ async def routed_call(
         user_agent: Raw User-Agent header from the client.
         agent: Identified agent label.
         session_id: Session fingerprint hex string.
+        on_premium_guard: Optional callback invoked with response tool names
+            when the escalation guard rejects a routed response.
 
     Returns:
         A BackendResponse with the masked Anthropic body, or None when the
@@ -315,11 +328,15 @@ async def routed_call(
                 elapsed,
             )
             return None
-        if escalates(anthropic_body, settings):
+        premium_guard_tools = _premium_tool_names(anthropic_body, settings)
+        if premium_guard_tools:
+            if on_premium_guard is not None:
+                on_premium_guard(premium_guard_tools)
             logger.info(
-                "acr: tier=%s model=%s escalated to premium (%.2fs)",
+                "acr: tier=%s model=%s escalated to premium tools=%s (%.2fs)",
                 tier_name,
                 model,
+                premium_guard_tools,
                 elapsed,
             )
             return None

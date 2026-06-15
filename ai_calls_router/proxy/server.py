@@ -18,6 +18,7 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,16 @@ from ai_calls_router.routing import synthesis
 
 logger = logging.getLogger("acr.server")
 
-LOG_REVISION = "2026-06-15-breadcrumbs-v1"
+LOG_REVISION = "2026-06-15-premium-guard-v2"
+
+
+@dataclass(frozen=True)
+class _RouteAttempt:
+    response: Response | None = None
+    tier: str = "premium"
+    reason: str = "passthrough"
+    model: str = ""
+    tool_names: list[str] = field(default_factory=list)
 
 
 def _request_summary(body: dict[str, Any]) -> str:
@@ -150,7 +160,7 @@ async def _try_route(
     user_agent: str = "",
     agent: str = "",
     session: str | None = None,
-) -> Response | None:
+) -> _RouteAttempt:
     """Attempt to serve a /v1/messages request on a cheap tier.
 
     Any error anywhere in the decision or the routed call resolves to None
@@ -164,23 +174,55 @@ async def _try_route(
         session: Session fingerprint hex string.
 
     Returns:
-        The routed response, or None when the turn must pass through.
+        A route attempt carrying either the routed response or the passthrough reason.
     """
     try:
         body = json.loads(body_bytes)
         if not isinstance(body, dict):
-            return None
+            return _RouteAttempt(reason="non_object_body")
+        requested_model = str(body.get("model") or "")
         names = routing.pending_tool_names(body)
         if not names:
             logger.debug("no pending tool results; passing through")
-            return None
+            return _RouteAttempt(reason="no_pending_tools", model=requested_model)
         logger.debug("pending tools=%s", names)
         tier, tier_cfg, api_key, routes = _resolve_tier_config(names)
         logger.debug("resolved tier=%s routable=%s", tier, tier_cfg is not None)
         if tier_cfg is None:
-            return None
+            reason = "request_premium_guard" if tier == "premium" else "tier_unavailable"
+            logger.info(
+                "acr: premium guard decision reason=%s model=%r tools=%s tier=%s",
+                reason,
+                requested_model,
+                names,
+                tier,
+            )
+            return _RouteAttempt(
+                tier=tier,
+                reason=reason,
+                model=requested_model,
+                tool_names=names,
+            )
+        if api_key is None:
+            logger.info(
+                "acr: premium guard decision reason=tier_unavailable model=%r tools=%s tier=%s",
+                requested_model,
+                names,
+                tier,
+            )
+            return _RouteAttempt(
+                tier=tier,
+                reason="tier_unavailable",
+                model=requested_model,
+                tool_names=names,
+            )
         savings.register_tier_prices(routes)
         settings_cfg = routes.get("settings") or {}
+        response_guard_tools: list[str] = []
+
+        def _mark_response_guard(tool_names: list[str]) -> None:
+            response_guard_tools.extend(tool_names)
+
         result = await routed_call.routed_call(
             body=body,
             tier_name=tier,
@@ -191,18 +233,47 @@ async def _try_route(
             user_agent=user_agent,
             agent=agent,
             session_id=session or "",
+            on_premium_guard=_mark_response_guard,
         )
         if result is None:
-            return None
-        if body.get("stream"):
-            return Response(
-                synthesis.synthesize_sse(result.body),
-                media_type="text/event-stream",
+            reason = "response_premium_guard" if response_guard_tools else "routed_fallback"
+            if response_guard_tools:
+                logger.info(
+                    "acr: premium guard decision reason=%s model=%r tools=%s "
+                    "response_tools=%s tier=%s",
+                    reason,
+                    requested_model,
+                    names,
+                    response_guard_tools,
+                    tier,
+                )
+            return _RouteAttempt(
+                tier=tier,
+                reason=reason,
+                model=requested_model,
+                tool_names=names,
             )
-        return JSONResponse(result.body)
+        if body.get("stream"):
+            return _RouteAttempt(
+                response=Response(
+                    synthesis.synthesize_sse(result.body),
+                    media_type="text/event-stream",
+                ),
+                tier=tier,
+                reason="routed",
+                model=requested_model,
+                tool_names=names,
+            )
+        return _RouteAttempt(
+            response=JSONResponse(result.body),
+            tier=tier,
+            reason="routed",
+            model=requested_model,
+            tool_names=names,
+        )
     except Exception as exc:
         logger.warning("acr: routing decision failed (%s); passing through", exc, exc_info=True)
-        return None
+        return _RouteAttempt(reason="routing_error")
 
 
 async def messages(request: Request) -> Response:
@@ -240,36 +311,51 @@ async def _handle_messages(request: Request) -> Response:
     m = metrics.get_metrics()
     m.incr_total()
 
-    routed = await _try_route(
+    attempt = await _try_route(
         body_bytes,
         user_agent=_user_agent(request),
         agent=agent,
         session=session,
     )
-    if routed is not None:
+    if attempt.response is not None:
         m.incr_routed()
-        logger.info("outcome=routed /v1/messages agent=%s", agent)
-        return routed
+        logger.info("outcome=routed /v1/messages agent=%s tier=%s", agent, attempt.tier)
+        return attempt.response
 
     m.incr_passthrough()
-    logger.info("outcome=passthrough /v1/messages agent=%s", agent)
+    if attempt.reason == "response_premium_guard":
+        m.incr_escalated()
+    elif attempt.reason in {"routing_error", "routed_fallback", "tier_unavailable"}:
+        m.incr_fallback()
+    logger.info(
+        "outcome=passthrough /v1/messages agent=%s reason=%s tier=%s model=%r tools=%s",
+        agent,
+        attempt.reason,
+        attempt.tier,
+        attempt.model,
+        attempt.tool_names,
+    )
     m.record_request(
         method="POST",
         path="/v1/messages",
         status=0,
-        tier="premium",
-        route="passthrough",
-        model="",
+        tier=attempt.tier,
+        route="premium_guard"
+        if attempt.reason in {"request_premium_guard", "response_premium_guard"}
+        else "passthrough",
+        model=attempt.model,
         user_agent=_user_agent(request),
         client_ip=_client_ip(request),
-        tool_names=[],
+        tool_names=attempt.tool_names,
         input_tokens=0,
         output_tokens=0,
         cache_read=0,
         cache_creation=0,
         duration=0,
+        premium_model=attempt.model,
         agent=agent,
         session_id=session or "",
+        decision_reason=attempt.reason,
     )
     return await _serve_passthrough(request, body_bytes)
 
