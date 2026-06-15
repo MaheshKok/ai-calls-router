@@ -53,7 +53,7 @@ def run_rtk(text: str, filter_name: str) -> str | None:
             return None
         return proc.stdout
     except Exception as exc:
-        logger.warning("rtk pipe failed (filter=%s): %s", filter_name, exc)
+        logger.warning("rtk pipe failed (filter=%s): %s", filter_name, exc, exc_info=True)
         return None
 
 
@@ -258,5 +258,5 @@ def compress_body(body: dict[str, Any], settings: dict[str, Any]) -> dict[str, A
             )
         return out
     except Exception as exc:
-        logger.warning("compression failed, using original body: %s", exc)
+        logger.warning("compression failed, using original body: %s", exc, exc_info=True)
         return body

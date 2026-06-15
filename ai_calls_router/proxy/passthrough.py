@@ -19,6 +19,11 @@ from starlette.responses import Response, StreamingResponse
 
 logger = logging.getLogger("acr.passthrough")
 
+
+def _response_summary(status_code: int, content_type: str | None, length: int | None) -> str:
+    return f"status={status_code} content_type={content_type!r} length={length!r}"
+
+
 # Client-supplied values that must not be forwarded: httpx computes correct
 # host/content-length itself, and accept-encoding is forced to identity so
 # the relayed bytes match the relayed headers.
@@ -138,7 +143,7 @@ async def forward(
     try:
         upstream_response = await client.send(request, stream=True)
     except httpx.HTTPError as exc:
-        logger.warning("acr: upstream %s %s failed: %s", method, path, exc)
+        logger.warning("acr: upstream %s %s failed: %s", method, path, exc, exc_info=True)
         return _bad_gateway(exc)
 
     return StreamingResponse(

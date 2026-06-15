@@ -135,7 +135,10 @@ def start() -> int:
 
     config.home_dir().mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-m", "ai_calls_router", "serve"]
-    with config.log_path().open("ab") as log_handle:
+    # Raw stdout/stderr (uvicorn banner, pre-logging crashes) goes to the
+    # daemon capture file; structured per-request lines land in acr.log via
+    # the app's RotatingFileHandler.
+    with config.daemon_log_path().open("ab") as log_handle:
         child = subprocess.Popen(
             cmd,
             stdout=log_handle,
@@ -147,7 +150,10 @@ def start() -> int:
     if not _wait_healthy(_health_url()):
         child.terminate()
         config.pid_path().unlink(missing_ok=True)
-        raise DaemonError(f"acr daemon did not become healthy; see {config.log_path()}")
+        raise DaemonError(
+            "acr daemon did not become healthy; "
+            f"see {config.daemon_log_path()} and {config.log_path()}"
+        )
     return child.pid
 
 

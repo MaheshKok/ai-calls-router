@@ -38,7 +38,14 @@ class TestPaths:
         assert config.config_path() == tmp_path / "config.yaml"
         assert config.pid_path() == tmp_path / "acr.pid"
         assert config.log_path() == tmp_path / "acr.log"
+        assert config.daemon_log_path() == tmp_path / "acr.daemon.out"
         assert config.ledger_path() == tmp_path / "savings.jsonl"
+
+    def test_daemon_log_path_is_distinct_from_structured_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("ACR_HOME", str(tmp_path))
+        assert config.daemon_log_path() != config.log_path()
 
     def test_ledger_path_honors_env_override(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

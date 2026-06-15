@@ -145,7 +145,7 @@ async def direct_call(
             return None
         return response.json()
     except Exception as exc:
-        logger.warning("direct call to %s failed (%s); passing through", url, exc)
+        logger.warning("direct call to %s failed (%s); passing through", url, exc, exc_info=True)
         return None
     finally:
         if own_client:

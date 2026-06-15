@@ -58,7 +58,7 @@ def load_routes(path: Path | None = None) -> dict[str, Any]:
             _cache[path] = (mtime, parsed)
         return parsed
     except Exception as exc:
-        logger.warning("acr: config load failed (%s); routing disabled", exc)
+        logger.warning("acr: config load failed (%s); routing disabled", exc, exc_info=True)
         return {}
 
 
@@ -286,5 +286,5 @@ def resolve_api_key(tier_cfg: dict[str, Any], settings: dict[str, Any]) -> str |
         env_path = Path(env_file).expanduser()
         return _search_env_file(env_path, key_env)
     except Exception as exc:
-        logger.warning("acr: env_file read failed (%s)", exc)
+        logger.warning("acr: env_file read failed (%s)", exc, exc_info=True)
     return None

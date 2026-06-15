@@ -63,8 +63,22 @@ def pid_path() -> Path:
 
 
 def log_path() -> Path:
-    """Return the daemon log file location."""
+    """Return the structured application log file location.
+
+    Owned by the logging RotatingFileHandler configured in
+    ``logging_setup.setup_logging``; carries the rich per-request log.
+    """
     return home_dir() / "acr.log"
+
+
+def daemon_log_path() -> Path:
+    """Return the raw daemon stdout/stderr capture location.
+
+    Distinct from ``log_path``: this file receives the daemon subprocess's
+    unstructured stdout/stderr (uvicorn banner, early-startup crashes, stray
+    prints) so those bytes never interleave with the structured ``acr.log``.
+    """
+    return home_dir() / "acr.daemon.out"
 
 
 def ledger_path() -> Path:

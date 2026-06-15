@@ -329,6 +329,7 @@ async def routed_call(
             tier_name,
             model,
             exc,
+            exc_info=True,
         )
         return None
 

@@ -152,7 +152,7 @@ class TestStart:
         assert popen.cmd[0] == sys.executable
         assert popen.cmd[1:4] == ["-m", "ai_calls_router", "serve"]
         assert popen.kwargs["start_new_session"] is True
-        assert popen.kwargs["stdout"].name == str(config.log_path())
+        assert popen.kwargs["stdout"].name == str(config.daemon_log_path())
         assert popen.kwargs["stderr"] == subprocess.STDOUT
         assert daemon.read_pid() == 54321
 

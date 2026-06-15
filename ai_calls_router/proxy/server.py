@@ -16,7 +16,9 @@ import functools
 import importlib.resources
 import json
 import logging
+import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -25,7 +27,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from ai_calls_router._lib import config
+from ai_calls_router._lib import config, logging_setup
 from ai_calls_router.accounting import metrics, savings
 from ai_calls_router.proxy import passthrough
 from ai_calls_router.routing import decide as routing
@@ -33,6 +35,17 @@ from ai_calls_router.routing import engine as routed_call
 from ai_calls_router.routing import synthesis
 
 logger = logging.getLogger("acr.server")
+
+LOG_REVISION = "2026-06-15-breadcrumbs-v1"
+
+
+def _request_summary(body: dict[str, Any]) -> str:
+    messages = body.get("messages")
+    msg_count = len(messages) if isinstance(messages, list) else 0
+    model = body.get("model")
+    stream = body.get("stream")
+    return f"model={model!r} stream={stream!r} messages={msg_count}"
+
 
 PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
 
@@ -119,16 +132,16 @@ def _resolve_tier_config(
     routes = routing.load_routes()
     tier = routing.tier_for_tools(names, routes)
     if tier == "premium":
-        return ("premium", None, None, routes)
+        return "premium", None, None, routes
     tier_cfg = (routes.get("tiers") or {}).get(tier)
     if not isinstance(tier_cfg, dict):
-        return (tier, None, None, routes)
+        return tier, None, None, routes
     settings_cfg = routes.get("settings") or {}
     api_key = routing.resolve_api_key(tier_cfg, settings_cfg)
     if not api_key:
         logger.info("acr: tier=%s has no API key; passing through", tier)
-        return (tier, None, None, routes)
-    return (tier, tier_cfg, api_key, routes)
+        return tier, None, None, routes
+    return tier, tier_cfg, api_key, routes
 
 
 async def _try_route(
@@ -159,8 +172,11 @@ async def _try_route(
             return None
         names = routing.pending_tool_names(body)
         if not names:
+            logger.debug("no pending tool results; passing through")
             return None
+        logger.debug("pending tools=%s", names)
         tier, tier_cfg, api_key, routes = _resolve_tier_config(names)
+        logger.debug("resolved tier=%s routable=%s", tier, tier_cfg is not None)
         if tier_cfg is None:
             return None
         savings.register_tier_prices(routes)
@@ -185,7 +201,7 @@ async def _try_route(
             )
         return JSONResponse(result.body)
     except Exception as exc:
-        logger.warning("acr: routing decision failed (%s); passing through", exc)
+        logger.warning("acr: routing decision failed (%s); passing through", exc, exc_info=True)
         return None
 
 
@@ -200,6 +216,12 @@ async def messages(request: Request) -> Response:
     Returns:
         The routed response or the streamed premium passthrough.
     """
+    with logging_setup.request_context():
+        return await _handle_messages(request)
+
+
+async def _handle_messages(request: Request) -> Response:
+    """Serve one /v1/messages request inside an active request context."""
     body_bytes = await request.body()
     agent = metrics.identify_agent(_user_agent(request))
     try:
@@ -210,6 +232,10 @@ async def messages(request: Request) -> Response:
     session = metrics.session_fingerprint(
         body_dict.get("messages") if isinstance(body_dict, dict) else None
     )
+    if isinstance(body_dict, dict):
+        logger.info("inbound /v1/messages %s agent=%s", _request_summary(body_dict), agent)
+    else:
+        logger.info("inbound /v1/messages unparsed-body bytes=%d agent=%s", len(body_bytes), agent)
 
     m = metrics.get_metrics()
     m.incr_total()
@@ -222,9 +248,11 @@ async def messages(request: Request) -> Response:
     )
     if routed is not None:
         m.incr_routed()
+        logger.info("outcome=routed /v1/messages agent=%s", agent)
         return routed
 
     m.incr_passthrough()
+    logger.info("outcome=passthrough /v1/messages agent=%s", agent)
     m.record_request(
         method="POST",
         path="/v1/messages",
@@ -290,7 +318,14 @@ def create_app(transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
     Returns:
         A Starlette app serving /health, /metrics, /v1/messages, and a catch-all proxy.
     """
-    logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
+    logging_setup.setup_logging()
+    logger.info(
+        "startup revision=%s pid=%s cwd=%s log=%s",
+        LOG_REVISION,
+        os.getpid(),
+        Path.cwd(),
+        config.log_path(),
+    )
     lifespan: Any = functools.partial(_lifespan, transport=transport)
     return Starlette(
         routes=[

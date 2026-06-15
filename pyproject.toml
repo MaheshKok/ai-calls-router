@@ -102,6 +102,7 @@ select = [
     "TRY",                          # tryceratops exception handling
     "EM",                           # flake8-errmsg
     "ERA",                          # eradicate (dead commented-out code)
+    "FURB",                         # refurb: Pythonic idiom enforcement (RUF031 already via "RUF")
 ]
 ignore = [
     "RUF012",   # mutable classvar annotations need ClassVar[] on some patterns

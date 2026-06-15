@@ -92,7 +92,7 @@ def register_tier_prices(routes: dict[str, Any]) -> None:
                     output_per_1m,
                 )
     except Exception as exc:
-        logger.warning("tier price registration failed: %s", exc)
+        logger.warning("tier price registration failed: %s", exc, exc_info=True)
 
 
 def _routed_prices_from_tier(
@@ -247,7 +247,7 @@ def record_routing_savings(
             with ledger.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as exc:
-        logger.warning("savings recording failed: %s", exc)
+        logger.warning("savings recording failed: %s", exc, exc_info=True)
 
 
 def record_savings_from_response(
@@ -289,7 +289,7 @@ def record_savings_from_response(
         cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
         cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
     except Exception as exc:
-        logger.warning("usage extraction failed: %s", exc)
+        logger.warning("usage extraction failed: %s", exc, exc_info=True)
         return
     record_routing_savings(
         premium_model=premium_model,
