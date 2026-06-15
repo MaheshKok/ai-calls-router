@@ -165,9 +165,11 @@ class _Metrics:
         session_id: str = "",
         provider: str = "",
         decision_reason: str = "",
+        request_id: str = "",
     ) -> None:
         entry: dict[str, Any] = {
             "ts": int(time.time()),
+            "request_id": request_id,
             "method": method,
             "path": path,
             "status": status,
@@ -192,6 +194,32 @@ class _Metrics:
             self._last_requests.insert(0, entry)
             if len(self._last_requests) > 100:
                 self._last_requests = self._last_requests[:100]
+
+    def update_request_usage(
+        self,
+        *,
+        request_id: str,
+        status: int,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read: int,
+        cache_creation: int,
+        duration: float,
+    ) -> None:
+        """Update an existing recent request row after a streamed response completes."""
+        if not request_id:
+            return
+        with self._lock:
+            for entry in self._last_requests:
+                if entry.get("request_id") != request_id:
+                    continue
+                entry["status"] = status
+                entry["input_tokens"] = input_tokens
+                entry["output_tokens"] = output_tokens
+                entry["cache_read_tokens"] = cache_read
+                entry["cache_creation_tokens"] = cache_creation
+                entry["duration_ms"] = int(duration * 1000)
+                return
 
     class _BootstrapAccumulator:
         """Mutable state bag for one bootstrap replay pass."""
@@ -225,29 +253,64 @@ class _Metrics:
             self.saved_usd += float(rec.get("saved_usd") or 0.0)
 
             self.recent.append(
-                {
-                    "ts": int(rec.get("ts") or 0),
-                    "method": "POST",
-                    "path": "/v1/messages",
-                    "status": 200,
-                    "tier": str(rec.get("tier_name") or ""),
-                    "route": "routed",
-                    "model": routed_model,
-                    "premium_model": premium_model,
-                    "provider": str(rec.get("provider") or identify_provider(routed_model)),
-                    "user_agent": str(rec.get("user_agent") or "")[:200],
-                    "agent": str(rec.get("agent") or ""),
-                    "session_id": str(rec.get("session_id") or ""),
-                    "decision_reason": str(rec.get("decision_reason") or "routed"),
-                    "client_ip": "",
-                    "tool_names": _parse_tool_names(rec.get("tool_names")),
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cache_read_tokens": cache_read,
-                    "cache_creation_tokens": cache_creation,
-                    "duration_ms": 0,
-                }
+                self._build_recent_entry(
+                    rec,
+                    routed_model=routed_model,
+                    premium_model=premium_model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cache_read=cache_read,
+                    cache_creation=cache_creation,
+                )
             )
+
+        @staticmethod
+        def _build_recent_entry(
+            rec: dict[str, Any],
+            *,
+            routed_model: str,
+            premium_model: str,
+            input_tokens: int,
+            output_tokens: int,
+            cache_read: int,
+            cache_creation: int,
+        ) -> dict[str, Any]:
+            """Build one dashboard recent-request row from a ledger record.
+
+            Args:
+                rec: One parsed savings-ledger record.
+                routed_model: Pre-coerced routed model name.
+                premium_model: Pre-coerced premium model name.
+                input_tokens: Pre-coerced input token count.
+                output_tokens: Pre-coerced output token count.
+                cache_read: Pre-coerced cache-read token count.
+                cache_creation: Pre-coerced cache-creation token count.
+
+            Returns:
+                A recent-request dict matching the live dashboard row shape.
+            """
+            return {
+                "ts": int(rec.get("ts") or 0),
+                "method": "POST",
+                "path": "/v1/messages",
+                "status": 200,
+                "tier": str(rec.get("tier_name") or ""),
+                "route": "routed",
+                "model": routed_model,
+                "premium_model": premium_model,
+                "provider": str(rec.get("provider") or identify_provider(routed_model)),
+                "user_agent": str(rec.get("user_agent") or "")[:200],
+                "agent": str(rec.get("agent") or ""),
+                "session_id": str(rec.get("session_id") or ""),
+                "decision_reason": str(rec.get("decision_reason") or "routed"),
+                "client_ip": "",
+                "tool_names": _parse_tool_names(rec.get("tool_names")),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read,
+                "cache_creation_tokens": cache_creation,
+                "duration_ms": 0,
+            }
 
     def bootstrap(self, *, ledger_path: Path | None, max_recent: int = 100) -> None:
         """Restore historical routed metrics from a savings JSONL ledger.

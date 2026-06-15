@@ -9,9 +9,11 @@ An unreachable upstream yields a 502 with an Anthropic-shaped error body.
 
 from __future__ import annotations
 
+import codecs
 import json
 import logging
-from collections.abc import AsyncIterator, Mapping
+import time
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
 import httpx
@@ -35,6 +37,16 @@ FRAMING_RESPONSE_HEADERS = frozenset(
 )
 
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
+
+_USAGE_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+UsageSnapshot = dict[str, int]
+ResponseComplete = Callable[[int, UsageSnapshot, float], None]
 
 
 def filter_request_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -67,7 +79,116 @@ def filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-async def _relay(upstream_response: Any) -> AsyncIterator[bytes]:
+def _usage_int(usage: Mapping[str, Any], key: str) -> int:
+    try:
+        return max(int(usage.get(key, 0) or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+class _UsageCapture:
+    """Capture Anthropic usage metadata while preserving relayed bytes."""
+
+    def __init__(self, content_type: str) -> None:
+        self._content_type = content_type.lower()
+        self._usage: UsageSnapshot = dict.fromkeys(_USAGE_KEYS, 0)
+        self._is_sse = "text/event-stream" in self._content_type
+        self._is_json = "json" in self._content_type
+        self._json_chunks: list[bytes] = []
+        self._decoder = codecs.getincrementaldecoder("utf-8")()
+        self._sse_buffer = ""
+
+    def feed(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        if self._is_sse:
+            self._feed_sse(chunk)
+        elif self._is_json:
+            self._json_chunks.append(chunk)
+
+    def finish(self) -> UsageSnapshot:
+        if self._is_sse:
+            self._feed_sse(b"", final=True)
+            self._parse_sse_event(self._sse_buffer)
+            self._sse_buffer = ""
+        elif self._json_chunks:
+            self._parse_json_payload(b"".join(self._json_chunks))
+        return dict(self._usage)
+
+    def _feed_sse(self, chunk: bytes, *, final: bool = False) -> None:
+        text = self._decoder.decode(chunk, final=final)
+        if not text:
+            return
+        self._sse_buffer = (self._sse_buffer + text).replace("\r\n", "\n").replace("\r", "\n")
+        while "\n\n" in self._sse_buffer:
+            event, self._sse_buffer = self._sse_buffer.split("\n\n", 1)
+            self._parse_sse_event(event)
+
+    def _parse_sse_event(self, event: str) -> None:
+        data_lines: list[str] = []
+        for line in event.split("\n"):
+            if not line.startswith("data:"):
+                continue
+            data = line[5:]
+            data_lines.append(data.removeprefix(" "))
+        data_text = "\n".join(data_lines).strip()
+        if not data_text or data_text == "[DONE]":
+            return
+        try:
+            payload = json.loads(data_text)
+        except json.JSONDecodeError:
+            return
+        self._apply_usage_payload(payload)
+
+    def _parse_json_payload(self, body: bytes) -> None:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return
+        self._apply_usage_payload(payload)
+
+    def _apply_usage_payload(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            self._apply_usage(usage)
+        message = payload.get("message")
+        if isinstance(message, dict):
+            message_usage = message.get("usage")
+            if isinstance(message_usage, dict):
+                self._apply_usage(message_usage)
+
+    def _apply_usage(self, usage: Mapping[str, Any]) -> None:
+        for key in _USAGE_KEYS:
+            if key in usage:
+                self._usage[key] = _usage_int(usage, key)
+
+
+def _finish_capture(
+    *,
+    upstream_response: Any,
+    capture: _UsageCapture,
+    started: float,
+    on_complete: ResponseComplete | None,
+) -> None:
+    if on_complete is None:
+        return
+    try:
+        on_complete(
+            int(getattr(upstream_response, "status_code", 0) or 0),
+            capture.finish(),
+            time.monotonic() - started,
+        )
+    except Exception as exc:
+        logger.warning("acr: passthrough usage capture failed: %s", exc, exc_info=True)
+
+
+async def _relay(
+    upstream_response: Any,
+    *,
+    on_complete: ResponseComplete | None = None,
+) -> AsyncIterator[bytes]:
     """Yield raw upstream chunks, closing the upstream when done.
 
     The finally clause runs both on normal completion and when the client
@@ -78,16 +199,29 @@ async def _relay(upstream_response: Any) -> AsyncIterator[bytes]:
 
     Args:
         upstream_response: An httpx response opened with stream=True.
+        on_complete: Optional callback invoked after a full response relay with
+            status, usage counters, and elapsed seconds.
 
     Yields:
         Raw response bytes exactly as received.
     """
+    capture = _UsageCapture(str(getattr(upstream_response, "headers", {}).get("content-type", "")))
+    started = time.monotonic()
     try:
         if getattr(upstream_response, "is_stream_consumed", False):
-            yield upstream_response.content
+            chunk = upstream_response.content
+            capture.feed(chunk)
+            yield chunk
         else:
             async for chunk in upstream_response.aiter_raw():
+                capture.feed(chunk)
                 yield chunk
+        _finish_capture(
+            upstream_response=upstream_response,
+            capture=capture,
+            started=started,
+            on_complete=on_complete,
+        )
     finally:
         await upstream_response.aclose()
 
@@ -117,6 +251,7 @@ async def forward(
     headers: Mapping[str, str],
     body: bytes,
     query: str = "",
+    on_complete: ResponseComplete | None = None,
 ) -> Response:
     """Relay one client request to the premium upstream, streaming.
 
@@ -128,6 +263,8 @@ async def forward(
         headers: Raw client request headers.
         body: Raw client request body bytes.
         query: Raw query string without the leading "?".
+        on_complete: Optional callback invoked after a full upstream response
+            relay with status, usage counters, and elapsed seconds.
 
     Returns:
         A StreamingResponse relaying the upstream answer, or a 502 Response
@@ -147,7 +284,7 @@ async def forward(
         return _bad_gateway(exc)
 
     return StreamingResponse(
-        _relay(upstream_response),
+        _relay(upstream_response, on_complete=on_complete),
         status_code=upstream_response.status_code,
         headers=filter_response_headers(upstream_response.headers),
     )

@@ -59,13 +59,16 @@ class _Upstream:
 
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
+        self.status_code = 200
+        self.content = b'{"marker": "upstream"}'
+        self.headers = {"content-type": "application/json"}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         return httpx.Response(
-            200,
-            content=b'{"marker": "upstream"}',
-            headers={"content-type": "application/json"},
+            self.status_code,
+            content=self.content,
+            headers=self.headers,
         )
 
 
@@ -185,6 +188,32 @@ class TestMessagesPassthrough:
         )
         assert response.json() == {"marker": "upstream"}
         assert upstream.requests[0].content == b"not json at all"
+
+    def test_passthrough_usage_updates_recent_request(
+        self, client: Any, upstream: _Upstream
+    ) -> None:
+        upstream.headers = {"content-type": "text/event-stream"}
+        upstream.content = (
+            b"event: message_start\n"
+            b'data: {"message": {"usage": {"input_tokens": 321, '
+            b'"cache_read_input_tokens": 100}}}\n\n'
+            b"event: message_delta\n"
+            b'data: {"usage": {"output_tokens": 9}}\n\n'
+        )
+        response = client.post("/v1/messages", json=_opener_body())
+        assert response.content == upstream.content
+
+        snapshot = client.get("/metrics").json()
+        assert snapshot["premium_tokens"]["input"] == 321
+        assert snapshot["premium_tokens"]["output"] == 9
+        assert snapshot["premium_tokens"]["cache_read"] == 100
+        latest = snapshot["last_requests"][0]
+        assert latest["route"] == "passthrough"
+        assert latest["decision_reason"] == "no_pending_tools"
+        assert latest["status"] == 200
+        assert latest["input_tokens"] == 321
+        assert latest["output_tokens"] == 9
+        assert latest["cache_read_tokens"] == 100
 
     def test_missing_api_key_passes_through_without_routing(
         self,

@@ -48,10 +48,11 @@ check-security: ## Run security audit on dependencies
 check-deps: ## Check for unused, missing, and transitive dependencies
 	$(PY) -m deptry ai_calls_router
 
-check-complexity: ## CI-gated complexity check (xenon on top of radon)
+check-complexity: ## CI-gated complexity check (xenon on radon + lizard CCN)
 	$(PY) -m radon cc ai_calls_router tests -s -a --total-average
 	$(PY) -m radon mi ai_calls_router -s
 	$(PY) -m xenon --max-absolute D --max-modules C --max-average A ai_calls_router
+	$(PY) -m lizard --languages python -C 20 -w ai_calls_router
 
 vulture: ## Report potentially dead code (advisory only)
 	$(PY) -m vulture ai_calls_router --min-confidence 80 || true
@@ -71,7 +72,10 @@ semgrep: ## Run semgrep pattern-based security/code analysis (advisory)
 mutmut: ## Run mutation testing on critical modules (advisory, slow)
 	$(PY) -m mutmut run --paths-to-mutate ai_calls_router/routing || true
 
-qa: lint type test coverage check-deps check-security check-package check-complexity ## Run all blocking quality gates
+check-cognitive: ## Cognitive complexity check (≤15 per function, matches PyCharm)
+	$(PY) scripts/check-cognitive-complexity.py
+
+qa: lint type test coverage check-deps check-security check-package check-complexity check-cognitive ## Run all blocking quality gates
 
 qa-full: qa bandit semgrep vulture refurb interrogate ## Run all gates including advisory
 

@@ -139,6 +139,30 @@ def _compress_text(*, text: str, budget: int, rtk_filter: str | None) -> str:
     return _truncate(text, budget)
 
 
+def _compress_block(*, block: Any, remaining: int, rtk_filter: str | None) -> tuple[Any, int]:
+    """Compress one content block against the remaining shared budget.
+
+    Non-text and malformed blocks pass through untouched and consume nothing.
+    Text blocks within budget pass through and consume their length; over-budget
+    text blocks are compressed and consume the rest of the budget.
+
+    Args:
+        block: One content block from a tool_result list.
+        remaining: Characters left in the shared budget before this block.
+        rtk_filter: rtk pipe filter to try on over-budget text, or None.
+
+    Returns:
+        A (possibly-compressed block, remaining budget after it) pair.
+    """
+    text = block.get("text") if isinstance(block, dict) else None
+    if not isinstance(text, str) or block.get("type") != "text":
+        return block, remaining
+    if len(text) <= remaining:
+        return block, remaining - len(text)
+    compressed_text = _compress_text(text=text, budget=remaining, rtk_filter=rtk_filter)
+    return {**block, "text": compressed_text}, 0
+
+
 def _compress_tool_result_content(*, content: Any, budget: int, rtk_filter: str | None) -> Any:
     """Compress a tool_result content payload to the character budget.
 
@@ -162,21 +186,10 @@ def _compress_tool_result_content(*, content: Any, budget: int, rtk_filter: str 
         remaining = budget
         new_blocks: list[Any] = []
         for block in content:
-            text = block.get("text") if isinstance(block, dict) else None
-            if not isinstance(text, str) or block.get("type") != "text":
-                new_blocks.append(block)
-                continue
-            if len(text) <= remaining:
-                new_blocks.append(block)
-                remaining -= len(text)
-                continue
-            new_blocks.append(
-                {
-                    **block,
-                    "text": _compress_text(text=text, budget=remaining, rtk_filter=rtk_filter),
-                }
+            new_block, remaining = _compress_block(
+                block=block, remaining=remaining, rtk_filter=rtk_filter
             )
-            remaining = 0
+            new_blocks.append(new_block)
         return new_blocks
     return content
 

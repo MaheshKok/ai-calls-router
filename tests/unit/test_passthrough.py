@@ -189,6 +189,66 @@ class TestForward:
             body = await _drain(response)
         assert body == sse
 
+    async def test_sse_usage_reported_after_full_relay(self) -> None:
+        sse = (
+            b"event: message_start\n"
+            b'data: {"message": {"usage": {"input_tokens": 100, '
+            b'"cache_read_input_tokens": 20, "cache_creation_input_tokens": 5}}}\n\n'
+            b"event: message_delta\n"
+            b'data: {"usage": {"output_tokens": 12}}\n\n'
+        )
+        captured: list[tuple[int, dict[str, int], float]] = []
+        upstream = _Upstream(content=sse, headers={"content-type": "text/event-stream"})
+        async with _client(upstream) as client:
+            response = await pt.forward(
+                client=client,
+                upstream=UPSTREAM,
+                method="POST",
+                path="/v1/messages",
+                headers=CLIENT_HEADERS,
+                body=b"{}",
+                on_complete=lambda status, usage, duration: captured.append(
+                    (status, usage, duration)
+                ),
+            )
+            body = await _drain(response)
+        assert body == sse
+        assert len(captured) == 1
+        status, usage, duration = captured[0]
+        assert status == 200
+        assert duration >= 0
+        assert usage == {
+            "input_tokens": 100,
+            "output_tokens": 12,
+            "cache_read_input_tokens": 20,
+            "cache_creation_input_tokens": 5,
+        }
+
+    async def test_json_usage_reported_after_full_relay(self) -> None:
+        body = (
+            b'{"content": [{"type": "text", "text": "ok"}], '
+            b'"usage": {"input_tokens": 10, "output_tokens": 3}}'
+        )
+        captured: list[tuple[int, dict[str, int], float]] = []
+        upstream = _Upstream(content=body, headers={"content-type": "application/json"})
+        async with _client(upstream) as client:
+            response = await pt.forward(
+                client=client,
+                upstream=UPSTREAM,
+                method="POST",
+                path="/v1/messages",
+                headers=CLIENT_HEADERS,
+                body=b"{}",
+                on_complete=lambda status, usage, duration: captured.append(
+                    (status, usage, duration)
+                ),
+            )
+            relayed = await _drain(response)
+        assert relayed == body
+        assert captured[0][0] == 200
+        assert captured[0][1]["input_tokens"] == 10
+        assert captured[0][1]["output_tokens"] == 3
+
     async def test_unreachable_upstream_returns_502_error(self) -> None:
         upstream = _Upstream(error=httpx.ConnectError("connection refused"))
         async with _client(upstream) as client:
@@ -209,6 +269,8 @@ class _FakeUpstreamResponse:
 
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = chunks
+        self.status_code = 200
+        self.headers: dict[str, str] = {}
         self.closed = False
 
     async def aiter_raw(self) -> Any:
@@ -232,3 +294,15 @@ class TestRelayCleanup:
         assert await anext(gen) == b"a"
         await gen.aclose()
         assert fake.closed is True
+
+    async def test_on_complete_not_called_on_client_disconnect(self) -> None:
+        called: list[tuple[int, dict[str, int], float]] = []
+        fake = _FakeUpstreamResponse([b"a", b"b", b"c"])
+        gen = pt._relay(
+            fake,
+            on_complete=lambda status, usage, duration: called.append((status, usage, duration)),
+        )
+        assert await anext(gen) == b"a"
+        await gen.aclose()
+        assert fake.closed is True
+        assert called == []

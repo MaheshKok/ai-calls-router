@@ -17,7 +17,7 @@ import importlib.resources
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -93,12 +93,19 @@ def _serve_dashboard() -> Response:
     )
 
 
-async def _serve_passthrough(request: Request, body_bytes: bytes) -> Response:
+async def _serve_passthrough(
+    request: Request,
+    body_bytes: bytes,
+    *,
+    on_complete: passthrough.ResponseComplete | None = None,
+) -> Response:
     """Relay a request to the premium upstream unchanged.
 
     Args:
         request: Incoming client request.
         body_bytes: Raw request body, already read.
+        on_complete: Optional callback invoked after the premium response is
+            fully relayed.
 
     Returns:
         The streamed upstream response.
@@ -113,6 +120,7 @@ async def _serve_passthrough(request: Request, body_bytes: bytes) -> Response:
         headers=request.headers,
         body=body_bytes,
         query=request.url.query,
+        on_complete=on_complete,
     )
 
 
@@ -129,6 +137,38 @@ def _client_ip(request: Request) -> str:
 def _user_agent(request: Request) -> str:
     """Extract the User-Agent header."""
     return request.headers.get("user-agent", "")
+
+
+def _premium_usage_callback(
+    *,
+    m: metrics._Metrics,
+    request_id: str,
+) -> Callable[[int, dict[str, int], float], None]:
+    """Build a callback that updates metrics after premium passthrough completes."""
+
+    def _record(status: int, usage: dict[str, int], duration: float) -> None:
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_creation = usage.get("cache_creation_input_tokens", 0)
+        if input_tokens or output_tokens or cache_read or cache_creation:
+            m.add_premium_tokens(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read=cache_read,
+                cache_creation=cache_creation,
+            )
+        m.update_request_usage(
+            request_id=request_id,
+            status=status,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read=cache_read,
+            cache_creation=cache_creation,
+            duration=duration,
+        )
+
+    return _record
 
 
 def _resolve_tier_config(
@@ -152,6 +192,59 @@ def _resolve_tier_config(
         logger.info("acr: tier=%s has no API key; passing through", tier)
         return tier, None, None, routes
     return tier, tier_cfg, api_key, routes
+
+
+def _premium_guard_attempt(
+    *, reason: str, requested_model: str, names: list[str], tier: str
+) -> _RouteAttempt:
+    """Log a premium-guard passthrough decision and build its route attempt.
+
+    Args:
+        reason: Passthrough reason recorded on the attempt and in the log line.
+        requested_model: Model the client asked for.
+        names: Pending tool-result names that triggered the decision.
+        tier: Resolved tier name.
+
+    Returns:
+        A passthrough route attempt carrying the reason and request context.
+    """
+    logger.info(
+        "acr: premium guard decision reason=%s model=%r tools=%s tier=%s",
+        reason,
+        requested_model,
+        names,
+        tier,
+    )
+    return _RouteAttempt(tier=tier, reason=reason, model=requested_model, tool_names=names)
+
+
+def _routed_fallback_attempt(
+    *, response_guard_tools: list[str], requested_model: str, names: list[str], tier: str
+) -> _RouteAttempt:
+    """Build the passthrough attempt for a routed call that returned no body.
+
+    Args:
+        response_guard_tools: Tool names the tier flagged for premium handling
+            mid-response; empty means an ordinary routed fallback.
+        requested_model: Model the client asked for.
+        names: Pending tool-result names for this turn.
+        tier: Resolved tier name.
+
+    Returns:
+        A passthrough route attempt distinguishing a response-side premium
+        guard from a generic routed fallback.
+    """
+    reason = "response_premium_guard" if response_guard_tools else "routed_fallback"
+    if response_guard_tools:
+        logger.info(
+            "acr: premium guard decision reason=%s model=%r tools=%s response_tools=%s tier=%s",
+            reason,
+            requested_model,
+            names,
+            response_guard_tools,
+            tier,
+        )
+    return _RouteAttempt(tier=tier, reason=reason, model=requested_model, tool_names=names)
 
 
 async def _try_route(
@@ -190,31 +283,12 @@ async def _try_route(
         logger.debug("resolved tier=%s routable=%s", tier, tier_cfg is not None)
         if tier_cfg is None:
             reason = "request_premium_guard" if tier == "premium" else "tier_unavailable"
-            logger.info(
-                "acr: premium guard decision reason=%s model=%r tools=%s tier=%s",
-                reason,
-                requested_model,
-                names,
-                tier,
-            )
-            return _RouteAttempt(
-                tier=tier,
-                reason=reason,
-                model=requested_model,
-                tool_names=names,
+            return _premium_guard_attempt(
+                reason=reason, requested_model=requested_model, names=names, tier=tier
             )
         if api_key is None:
-            logger.info(
-                "acr: premium guard decision reason=tier_unavailable model=%r tools=%s tier=%s",
-                requested_model,
-                names,
-                tier,
-            )
-            return _RouteAttempt(
-                tier=tier,
-                reason="tier_unavailable",
-                model=requested_model,
-                tool_names=names,
+            return _premium_guard_attempt(
+                reason="tier_unavailable", requested_model=requested_model, names=names, tier=tier
             )
         savings.register_tier_prices(routes)
         settings_cfg = routes.get("settings") or {}
@@ -236,22 +310,11 @@ async def _try_route(
             on_premium_guard=_mark_response_guard,
         )
         if result is None:
-            reason = "response_premium_guard" if response_guard_tools else "routed_fallback"
-            if response_guard_tools:
-                logger.info(
-                    "acr: premium guard decision reason=%s model=%r tools=%s "
-                    "response_tools=%s tier=%s",
-                    reason,
-                    requested_model,
-                    names,
-                    response_guard_tools,
-                    tier,
-                )
-            return _RouteAttempt(
+            return _routed_fallback_attempt(
+                response_guard_tools=response_guard_tools,
+                requested_model=requested_model,
+                names=names,
                 tier=tier,
-                reason=reason,
-                model=requested_model,
-                tool_names=names,
             )
         if body.get("stream"):
             return _RouteAttempt(
@@ -356,8 +419,16 @@ async def _handle_messages(request: Request) -> Response:
         agent=agent,
         session_id=session or "",
         decision_reason=attempt.reason,
+        request_id=logging_setup.current_request_id(),
     )
-    return await _serve_passthrough(request, body_bytes)
+    return await _serve_passthrough(
+        request,
+        body_bytes,
+        on_complete=_premium_usage_callback(
+            m=m,
+            request_id=logging_setup.current_request_id(),
+        ),
+    )
 
 
 async def proxy(request: Request) -> Response:
