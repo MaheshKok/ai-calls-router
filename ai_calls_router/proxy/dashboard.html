@@ -155,7 +155,8 @@ function buildSessionRows(data) {
 
 function buildRecentRows(data) {
   const rows = data.last_requests || [];
-  const rowHtml = rows.length ? rows.map((x) => {
+  const recentRows = rows.slice(0, 20);
+  const rowHtml = recentRows.length ? recentRows.map((x) => {
     const totalInput = Number(x.input_tokens || 0) + Number(x.cache_read_tokens || 0) + Number(x.cache_creation_tokens || 0);
     const cacheMiss = Math.max(totalInput - Number(x.cache_read_tokens || 0), 0);
     return (
@@ -173,6 +174,7 @@ function buildRecentRows(data) {
     );
   }).join('') : '<tr><td colspan="9" class="empty">no requests yet</td></tr>';
   $('rows').innerHTML = rowHtml;
+  return { shown: recentRows.length, total: rows.length };
 }
 
 function apply(data) {
@@ -203,8 +205,15 @@ function apply(data) {
   $('pcc').textContent = num(pt.cache_creation);
   buildAgentRows(data);
   buildSessionRows(data);
-  buildRecentRows(data);
-  $('status').textContent = 'live · refreshed ' + new Date().toLocaleTimeString();
+  const rowStats = buildRecentRows(data);
+  const shown = Math.min(rowStats.total || 0, 20);
+  if (rowStats.total > 20) {
+    $('status').textContent = 'showing recent 20 of ' + num(rowStats.total) + ' · refreshed ' + new Date().toLocaleTimeString();
+  } else if (rowStats.total === 0) {
+    $('status').textContent = 'no recent requests · refreshed ' + new Date().toLocaleTimeString();
+  } else {
+    $('status').textContent = 'showing last ' + num(shown) + ' request' + (shown === 1 ? '' : 's') + ' · refreshed ' + new Date().toLocaleTimeString();
+  }
 }
 
 async function refresh() {
@@ -217,7 +226,7 @@ async function refresh() {
   }
 }
 refresh();
-setInterval(refresh, 4000);
+setInterval(refresh, 1000);
 </script>
 </body>
 </html>
