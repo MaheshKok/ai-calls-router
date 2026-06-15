@@ -16,11 +16,14 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from ai_calls_router._lib import config
 from ai_calls_router._lib.litellm_guard import load_litellm
 from ai_calls_router.accounting.metrics import get_metrics, identify_provider
+
+if TYPE_CHECKING:
+    from ai_calls_router.accounting.shrink_stats import ShrinkStats
 
 logger = logging.getLogger("acr.savings")
 
@@ -166,6 +169,9 @@ def record_routing_savings(
     user_agent: str = "",
     agent: str = "",
     session_id: str = "",
+    shrink_path: str = "",
+    shrink_chars_before: int = 0,
+    shrink_chars_after: int = 0,
 ) -> None:
     """Append one savings entry comparing routed cost against premium cost.
 
@@ -195,6 +201,9 @@ def record_routing_savings(
         user_agent: Raw User-Agent header from the client.
         agent: Identified agent label (e.g. ``claude-code-cli``).
         session_id: Session fingerprint hex string.
+        shrink_path: Shrink pass that ran on this turn (``reduce``/``compress``).
+        shrink_chars_before: tool_result characters before the shrink pass.
+        shrink_chars_after: tool_result characters after the shrink pass.
     """
     if not premium_model or premium_model == routed_model:
         return
@@ -240,6 +249,9 @@ def record_routing_savings(
             "agent": agent,
             "session_id": session_id,
             "provider": identify_provider(routed_model),
+            "shrink_path": shrink_path,
+            "shrink_chars_before": max(int(shrink_chars_before), 0),
+            "shrink_chars_after": max(int(shrink_chars_after), 0),
         }
         ledger = ledger if ledger is not None else config.ledger_path()
         with _ledger_lock:
@@ -267,6 +279,7 @@ def record_savings_from_response(
     user_agent: str = "",
     agent: str = "",
     session_id: str = "",
+    shrink: ShrinkStats | None = None,
 ) -> None:
     """Record savings using token counts taken from a routed response body.
 
@@ -285,6 +298,9 @@ def record_savings_from_response(
         user_agent: Raw User-Agent header from the client.
         agent: Identified agent label (e.g. ``claude-code-cli``).
         session_id: Session fingerprint hex string.
+        shrink: Read-only tool_result shrink measurement for this turn; its
+            character counts ride along on the ledger entry so the dashboard's
+            cumulative compression survives a proxy restart.
     """
     try:
         usage = response_body.get("usage") if isinstance(response_body, dict) else None
@@ -310,4 +326,7 @@ def record_savings_from_response(
         user_agent=user_agent,
         agent=agent,
         session_id=session_id,
+        shrink_path=shrink.path if shrink else "",
+        shrink_chars_before=shrink.chars_before if shrink else 0,
+        shrink_chars_after=shrink.chars_after if shrink else 0,
     )

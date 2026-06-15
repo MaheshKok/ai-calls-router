@@ -29,7 +29,7 @@ from ai_calls_router._lib.conversion import (
 )
 from ai_calls_router._lib.litellm_guard import load_litellm
 from ai_calls_router.accounting import metrics as metrics_mod
-from ai_calls_router.accounting import savings
+from ai_calls_router.accounting import savings, shrink_stats
 from ai_calls_router.routing import compression, reduce
 from ai_calls_router.routing import direct as anthropic_direct
 
@@ -115,6 +115,16 @@ def _usage_summary(response_body: dict[str, Any]) -> str:
     )
 
 
+def _shrink_summary(stats: shrink_stats.ShrinkStats) -> str:
+    """Return a compact tool_result compression summary for routing logs."""
+    return (
+        f"shrink={stats.path} "
+        f"chars={stats.chars_before}->{stats.chars_after} "
+        f"saved={stats.chars_saved}({stats.ratio:.0%}) "
+        f"est_tok=-{stats.est_tokens_saved()}"
+    )
+
+
 def escalates(response_body: dict[str, Any], settings: dict[str, Any]) -> bool:
     """Check whether a routed response invokes a premium tool.
 
@@ -156,7 +166,7 @@ async def _serve_via_litellm(
     tier_cfg: dict[str, Any],
     api_key: str,
     settings: dict[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], shrink_stats.ShrinkStats]:
     """Serve a turn through LiteLLM with built-in compression.
 
     Compresses old tool results, rewrites the body for the tier model,
@@ -172,14 +182,16 @@ async def _serve_via_litellm(
         settings: The config "settings" section (drives compression).
 
     Returns:
-        The routed response in Anthropic format, tagged with the tier model.
+        A pair of the routed response in Anthropic format (tagged with the tier
+        model) and a read-only ShrinkStats measuring the compression pass.
     """
     compressed = compression.compress_body(body, settings)
+    stats = shrink_stats.compute_shrink(path="compress", before=body, after=compressed)
     routed_body = _prepare_routed_body(compressed, tier_cfg)
     kwargs = completion_kwargs(routed_body, api_key)
     litellm = load_litellm()
     raw = await litellm.acompletion(**kwargs)
-    return to_anthropic_response(raw, tier_cfg["model"])
+    return to_anthropic_response(raw, tier_cfg["model"]), stats
 
 
 async def _serve_via_direct(
@@ -187,7 +199,7 @@ async def _serve_via_direct(
     body: dict[str, Any],
     tier_cfg: dict[str, Any],
     api_key: str,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, shrink_stats.ShrinkStats]:
     """Serve a turn directly on the provider's native Anthropic endpoint.
 
     Skips LiteLLM conversion and the position-dependent compression pass so
@@ -204,11 +216,17 @@ async def _serve_via_direct(
         api_key: The tier API key.
 
     Returns:
-        The routed response in Anthropic format, or None when the direct call
-        fails (non-200, transport error) and the turn must pass through.
+        A pair of the routed response in Anthropic format (or None when the
+        direct call fails and the turn must pass through) and a read-only
+        ShrinkStats measuring the reduction pass.
     """
-    routed_body = _prepare_routed_body(reduce.reduce_tool_results(body), tier_cfg)
-    return await anthropic_direct.direct_call(body=routed_body, tier_cfg=tier_cfg, api_key=api_key)
+    reduced = reduce.reduce_tool_results(body)
+    stats = shrink_stats.compute_shrink(path="reduce", before=body, after=reduced)
+    routed_body = _prepare_routed_body(reduced, tier_cfg)
+    response = await anthropic_direct.direct_call(
+        body=routed_body, tier_cfg=tier_cfg, api_key=api_key
+    )
+    return response, stats
 
 
 def _token_fields(body: dict[str, Any]) -> dict[str, int]:
@@ -235,6 +253,7 @@ def _record_metrics(
     user_agent: str,
     anthropic_body: dict[str, Any],
     elapsed: float,
+    shrink: shrink_stats.ShrinkStats,
     agent: str = "",
     session_id: str = "",
 ) -> None:
@@ -247,6 +266,7 @@ def _record_metrics(
         cache_read=tok["cache_read"],
         cache_creation=tok["cache_creation"],
     )
+    mtr.add_shrink(chars_before=shrink.chars_before, chars_after=shrink.chars_after)
     mtr.record_request(
         method="POST",
         path="/v1/messages",
@@ -314,9 +334,11 @@ async def routed_call(
     try:
         started = time.monotonic()
         if direct:
-            anthropic_body = await _serve_via_direct(body=body, tier_cfg=tier_cfg, api_key=api_key)
+            anthropic_body, shrink = await _serve_via_direct(
+                body=body, tier_cfg=tier_cfg, api_key=api_key
+            )
         else:
-            anthropic_body = await _serve_via_litellm(
+            anthropic_body, shrink = await _serve_via_litellm(
                 body=body, tier_cfg=tier_cfg, api_key=api_key, settings=settings
             )
         elapsed = time.monotonic() - started
@@ -351,11 +373,12 @@ async def routed_call(
         return None
 
     logger.info(
-        "acr: routed tier=%s model=%s route=%s %s duration=%.2fs",
+        "acr: routed tier=%s model=%s route=%s %s %s duration=%.2fs",
         tier_name,
         model,
         "direct" if direct else "litellm",
         _usage_summary(anthropic_body),
+        _shrink_summary(shrink),
         elapsed,
     )
     savings.record_savings_from_response(
@@ -368,6 +391,7 @@ async def routed_call(
         user_agent=user_agent,
         agent=agent,
         session_id=session_id,
+        shrink=shrink,
     )
     if isinstance(premium_model, str) and premium_model:
         anthropic_body = {**anthropic_body, "model": premium_model}
@@ -380,6 +404,7 @@ async def routed_call(
         user_agent=user_agent,
         anthropic_body=anthropic_body,
         elapsed=elapsed,
+        shrink=shrink,
         agent=agent,
         session_id=session_id,
     )

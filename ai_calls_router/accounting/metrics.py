@@ -14,6 +14,8 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from ai_calls_router.accounting.shrink_stats import ShrinkStats
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -70,6 +72,9 @@ class _Metrics:
         self._routed_usd = 0.0
         self._premium_usd = 0.0
         self._saved_usd = 0.0
+        # Cumulative tool_result compression chars (reduce + compress passes)
+        self._shrink_chars_before = 0
+        self._shrink_chars_after = 0
         # Latest per-request metadata for the recent-activity table
         self._last_requests: list[dict[str, Any]] = []
 
@@ -140,6 +145,17 @@ class _Metrics:
             self._routed_usd += routed_usd
             self._premium_usd += premium_usd
             self._saved_usd += saved_usd
+
+    def add_shrink(self, *, chars_before: int, chars_after: int) -> None:
+        """Accumulate one routed turn's tool_result compression measurement.
+
+        Args:
+            chars_before: tool_result characters before the shrink pass.
+            chars_after: tool_result characters after the shrink pass.
+        """
+        with self._lock:
+            self._shrink_chars_before += max(int(chars_before), 0)
+            self._shrink_chars_after += max(int(chars_after), 0)
 
     # ── recent requests ────────────────────────────────────────────────
 
@@ -233,6 +249,8 @@ class _Metrics:
             self.routed_usd = 0.0
             self.premium_usd = 0.0
             self.saved_usd = 0.0
+            self.shrink_chars_before = 0
+            self.shrink_chars_after = 0
             self.recent: list[dict[str, Any]] = []
 
         def process_one(self, rec: dict[str, Any]) -> None:
@@ -251,6 +269,8 @@ class _Metrics:
             self.routed_usd += float(rec.get("routed_usd") or 0.0)
             self.premium_usd += float(rec.get("premium_usd") or 0.0)
             self.saved_usd += float(rec.get("saved_usd") or 0.0)
+            self.shrink_chars_before += max(int(rec.get("shrink_chars_before") or 0), 0)
+            self.shrink_chars_after += max(int(rec.get("shrink_chars_after") or 0), 0)
 
             self.recent.append(
                 self._build_recent_entry(
@@ -342,6 +362,8 @@ class _Metrics:
             self._routed_usd += acc.routed_usd
             self._premium_usd += acc.premium_usd
             self._saved_usd += acc.saved_usd
+            self._shrink_chars_before += acc.shrink_chars_before
+            self._shrink_chars_after += acc.shrink_chars_after
             self._last_requests = acc.recent[:max_recent] + self._last_requests
             self._last_requests = self._last_requests[:100]
 
@@ -349,6 +371,11 @@ class _Metrics:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            compression = ShrinkStats(
+                path="cumulative",
+                chars_before=self._shrink_chars_before,
+                chars_after=self._shrink_chars_after,
+            )
             return {
                 "uptime_seconds": round(time.time() - self._started_at, 1),
                 "requests": {
@@ -375,6 +402,13 @@ class _Metrics:
                     "routed_usd": round(self._routed_usd, 8),
                     "premium_usd": round(self._premium_usd, 8),
                     "saved_usd": round(self._saved_usd, 8),
+                },
+                "compression": {
+                    "chars_before": compression.chars_before,
+                    "chars_after": compression.chars_after,
+                    "chars_saved": compression.chars_saved,
+                    "ratio": round(compression.ratio, 4),
+                    "est_tokens_saved": compression.est_tokens_saved(),
                 },
                 "last_requests": self._last_requests[:50],
             }

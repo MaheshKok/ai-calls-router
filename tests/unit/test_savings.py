@@ -18,6 +18,7 @@ import pytest
 
 from ai_calls_router._lib.litellm_guard import load_litellm
 from ai_calls_router.accounting import savings
+from ai_calls_router.accounting.shrink_stats import ShrinkStats
 
 CHEAP_MODEL = "deepseek/acr-test-cheap"
 PREMIUM_MODEL = "deepseek/acr-test-premium"
@@ -628,6 +629,123 @@ class TestCacheAwareSavings:
         entry = _read_entries(ledger)[0]
         assert entry["cache_read_input_tokens"] == 0
         assert entry["routed_usd"] == pytest.approx(1.0, abs=1e-6)
+
+
+class TestShrinkFieldsInLedger:
+    """The read-only tool_result shrink measurement rides along on each ledger
+    entry (shrink_path/shrink_chars_before/shrink_chars_after) so the dashboard's
+    cumulative compression figure survives a proxy restart. The measurement is a
+    side-channel: its presence or absence never changes whether or how a savings
+    entry is priced."""
+
+    def test_defaults_to_empty_path_and_zero_chars(self, tmp_path: Path) -> None:
+        # When the engine does not pass shrink fields, the entry still carries
+        # the keys with neutral values rather than omitting them, so bootstrap
+        # replay reads a stable schema.
+        ledger = tmp_path / "savings.jsonl"
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
+        )
+        entry = _read_entries(ledger)[0]
+        assert entry["shrink_path"] == ""
+        assert entry["shrink_chars_before"] == 0
+        assert entry["shrink_chars_after"] == 0
+
+    def test_explicit_shrink_fields_are_written_verbatim(self, tmp_path: Path) -> None:
+        ledger = tmp_path / "savings.jsonl"
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
+            shrink_path="reduce",
+            shrink_chars_before=8000,
+            shrink_chars_after=3200,
+        )
+        entry = _read_entries(ledger)[0]
+        assert entry["shrink_path"] == "reduce"
+        assert entry["shrink_chars_before"] == 8000
+        assert entry["shrink_chars_after"] == 3200
+
+    def test_negative_shrink_chars_are_clamped_to_zero(self, tmp_path: Path) -> None:
+        # Character counts cannot be negative; a malformed count must clamp like
+        # the token counts, never be persisted as a negative figure.
+        ledger = tmp_path / "savings.jsonl"
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=0,
+            ledger=ledger,
+            shrink_path="compress",
+            shrink_chars_before=-50,
+            shrink_chars_after=-9,
+        )
+        entry = _read_entries(ledger)[0]
+        assert entry["shrink_chars_before"] == 0
+        assert entry["shrink_chars_after"] == 0
+
+    def test_shrink_fields_do_not_alter_savings_math(self, tmp_path: Path) -> None:
+        # The shrink side-channel must not perturb the priced figures: an entry
+        # with shrink fields prices identically to one without.
+        with_shrink = tmp_path / "with.jsonl"
+        without_shrink = tmp_path / "without.jsonl"
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            ledger=with_shrink,
+            shrink_path="reduce",
+            shrink_chars_before=9000,
+            shrink_chars_after=100,
+        )
+        savings.record_routing_savings(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            ledger=without_shrink,
+        )
+        a = _read_entries(with_shrink)[0]
+        b = _read_entries(without_shrink)[0]
+        assert a["routed_usd"] == b["routed_usd"]
+        assert a["premium_usd"] == b["premium_usd"]
+        assert a["saved_usd"] == b["saved_usd"]
+
+    def test_response_path_threads_shrink_stats_to_entry(self, tmp_path: Path) -> None:
+        ledger = tmp_path / "savings.jsonl"
+        response = {"usage": {"input_tokens": 1_000_000, "output_tokens": 0}}
+        savings.record_savings_from_response(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            response_body=response,
+            ledger=ledger,
+            shrink=ShrinkStats(path="reduce", chars_before=12000, chars_after=4500),
+        )
+        entry = _read_entries(ledger)[0]
+        assert entry["shrink_path"] == "reduce"
+        assert entry["shrink_chars_before"] == 12000
+        assert entry["shrink_chars_after"] == 4500
+
+    def test_response_path_without_shrink_writes_neutral_fields(self, tmp_path: Path) -> None:
+        ledger = tmp_path / "savings.jsonl"
+        response = {"usage": {"input_tokens": 1_000_000, "output_tokens": 0}}
+        savings.record_savings_from_response(
+            premium_model=PREMIUM_MODEL,
+            routed_model=CHEAP_MODEL,
+            response_body=response,
+            ledger=ledger,
+        )
+        entry = _read_entries(ledger)[0]
+        assert entry["shrink_path"] == ""
+        assert entry["shrink_chars_before"] == 0
+        assert entry["shrink_chars_after"] == 0
 
 
 class TestFailOpen:

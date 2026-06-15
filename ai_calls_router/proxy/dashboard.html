@@ -58,6 +58,12 @@ td.empty { color:#484f58; text-align:center; padding: 24px;}
     <div class="card accent"><div class="label">saved</div><div class="value" id="saved">--</div><div class="sub">total delta</div></div>
     <div class="card accent"><div class="label">save rate</div><div class="value" id="saveRate">--</div><div class="sub">vs premium</div></div>
   </section>
+  <section class="grid">
+    <div class="card green"><div class="label">tool_result shrunk</div><div class="value" id="compSaved">--</div><div class="sub" id="compRatio">reduce + compress</div></div>
+    <div class="card accent"><div class="label">est tokens shrunk</div><div class="value" id="compTokens">--</div><div class="sub">~3.5 chars/token</div></div>
+    <div class="card"><div class="label">chars before</div><div class="value mono" id="compBefore">--</div><div class="sub">tool_result in</div></div>
+    <div class="card"><div class="label">chars after</div><div class="value mono" id="compAfter">--</div><div class="sub">tool_result out</div></div>
+  </section>
   <section class="panels">
     <div class="panel" id="agent-panel"><h2>agents</h2><div class="row"><span class="mono">--</span><span>no data yet</span></div></div>
     <div class="panel" id="session-panel"><h2>sessions</h2><div class="row"><span class="mono">--</span><span>no sessions yet</span></div></div>
@@ -195,6 +201,12 @@ function apply(data) {
   $('costPremium').textContent = usd(c.premium_usd);
   $('saved').textContent = usd(c.saved_usd);
   $('saveRate').textContent = pct(Number(c.premium_usd) ? Number(c.saved_usd) / Number(c.premium_usd) * 100 : NaN);
+  const comp = data.compression || {};
+  $('compSaved').textContent = num(comp.chars_saved) + ' ch';
+  $('compRatio').textContent = pct(Number(comp.ratio || 0) * 100) + ' of ' + num(comp.chars_before) + ' chars';
+  $('compTokens').textContent = '~' + num(comp.est_tokens_saved);
+  $('compBefore').textContent = num(comp.chars_before);
+  $('compAfter').textContent = num(comp.chars_after);
   $('ri').textContent = num(rt.input);
   $('ro').textContent = num(rt.output);
   $('rcr').textContent = num(rt.cache_read);

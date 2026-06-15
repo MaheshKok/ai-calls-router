@@ -161,3 +161,106 @@ class TestMetricsBootstrapIntegration:
         m._passthrough_requests = 3
         snap = m.snapshot()
         assert snap["requests"]["total"] == 8
+
+
+class TestMetricsCompression:
+    """add_shrink accumulates per-turn tool_result character deltas, and the
+    snapshot exposes a compression block with the derived savings figures. The
+    character counts are authoritative; est_tokens_saved is a coarse divisor
+    estimate (chars_saved / 3.5, truncated)."""
+
+    def test_fresh_metrics_report_zero_compression(self) -> None:
+        snap = _Metrics().snapshot()
+        comp = snap["compression"]
+        assert comp["chars_before"] == 0
+        assert comp["chars_after"] == 0
+        assert comp["chars_saved"] == 0
+        assert comp["ratio"] == 0.0
+        assert comp["est_tokens_saved"] == 0
+
+    def test_add_shrink_accumulates_across_turns(self) -> None:
+        # Two turns: 10000->4000 and 5000->2000. Totals derived independently:
+        # before=15000, after=6000, saved=9000, ratio=9000/15000=0.6,
+        # est=floor(9000/3.5)=2571.
+        m = _Metrics()
+        m.add_shrink(chars_before=10000, chars_after=4000)
+        m.add_shrink(chars_before=5000, chars_after=2000)
+        comp = m.snapshot()["compression"]
+        assert comp["chars_before"] == 15000
+        assert comp["chars_after"] == 6000
+        assert comp["chars_saved"] == 9000
+        assert comp["ratio"] == pytest.approx(0.6)
+        assert comp["est_tokens_saved"] == 2571
+
+    def test_add_shrink_clamps_negative_inputs(self) -> None:
+        m = _Metrics()
+        m.add_shrink(chars_before=-100, chars_after=-40)
+        comp = m.snapshot()["compression"]
+        assert comp["chars_before"] == 0
+        assert comp["chars_after"] == 0
+
+    def test_no_op_pass_reports_zero_savings_not_negative(self) -> None:
+        # A pass that does not shrink (after == before) contributes no savings,
+        # and chars_saved is floored at 0 even if a later turn grows the body.
+        m = _Metrics()
+        m.add_shrink(chars_before=3000, chars_after=3000)
+        comp = m.snapshot()["compression"]
+        assert comp["chars_saved"] == 0
+        assert comp["ratio"] == 0.0
+
+    def test_bootstrap_restores_shrink_chars_from_ledger(self) -> None:
+        rec1 = _make_record(ts=1718000000, saved_usd=0.0)
+        rec1["shrink_chars_before"] = 8000
+        rec1["shrink_chars_after"] = 3000
+        rec2 = _make_record(ts=1718000001, saved_usd=0.0)
+        rec2["shrink_chars_before"] = 2000
+        rec2["shrink_chars_after"] = 1000
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(rec1) + "\n")
+            f.write(json.dumps(rec2) + "\n")
+            ledger_path = Path(f.name)
+
+        try:
+            m = _Metrics()
+            m.bootstrap(ledger_path=ledger_path, max_recent=2)
+            comp = m.snapshot()["compression"]
+            assert comp["chars_before"] == 10000
+            assert comp["chars_after"] == 4000
+            assert comp["chars_saved"] == 6000
+        finally:
+            ledger_path.unlink(missing_ok=True)
+
+    def test_bootstrap_missing_shrink_fields_default_to_zero(self) -> None:
+        # Legacy ledger entries predate the shrink fields; replay must treat
+        # their absence as zero rather than raising.
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(_make_record(ts=1718000000, saved_usd=0.0)) + "\n")
+            ledger_path = Path(f.name)
+
+        try:
+            m = _Metrics()
+            m.bootstrap(ledger_path=ledger_path, max_recent=1)
+            comp = m.snapshot()["compression"]
+            assert comp["chars_before"] == 0
+            assert comp["chars_after"] == 0
+        finally:
+            ledger_path.unlink(missing_ok=True)
+
+    def test_bootstrap_clamps_negative_shrink_fields(self) -> None:
+        rec = _make_record(ts=1718000000, saved_usd=0.0)
+        rec["shrink_chars_before"] = -500
+        rec["shrink_chars_after"] = -9
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(rec) + "\n")
+            ledger_path = Path(f.name)
+
+        try:
+            m = _Metrics()
+            m.bootstrap(ledger_path=ledger_path, max_recent=1)
+            comp = m.snapshot()["compression"]
+            assert comp["chars_before"] == 0
+            assert comp["chars_after"] == 0
+        finally:
+            ledger_path.unlink(missing_ok=True)
