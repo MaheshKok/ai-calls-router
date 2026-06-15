@@ -88,9 +88,9 @@ td.empty { color:#484f58; text-align:center; padding: 24px;}
     <div class="table-header"><h2>recent requests</h2><span class="status" id="status">loading</span></div>
     <table>
       <thead id="table-head">
-        <tr><th>time</th><th>model</th><th>tools</th><th>total input</th><th>cache miss</th><th>output</th><th>ms</th><th>agent</th><th>session</th></tr>
+        <tr><th>time</th><th>model</th><th>tools</th><th>total input</th><th>cache miss</th><th>output</th><th>shrunk</th><th>ms</th><th>agent</th><th>session</th></tr>
       </thead>
-      <tbody id="rows"><tr><td colspan="9" class="empty">no requests yet</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="10" class="empty">no requests yet</td></tr></tbody>
     </table>
   </section>
 </div>
@@ -103,6 +103,13 @@ const usd = (n) => '$' + Number(n || 0).toFixed(Number(n || 0) >= 1 ? 2 : 4);
 const pct = (n) => Number.isFinite(n) ? n.toFixed(1) + '%' : '--';
 function uptime(s) { s = Number(s || 0); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60); return (h ? h + 'h ' : '') + (m ? m + 'm ' : '') + sec + 's'; }
 function shortModel(m) { m = (m || '').trim(); const idx = m.lastIndexOf('/'); return idx >= 0 ? m.substring(idx + 1) : m; }
+function shrunkCell(x) {
+  const before = Number(x.shrink_chars_before || 0);
+  const after = Number(x.shrink_chars_after || 0);
+  if (before <= 0) return '--';
+  const saved = Math.max(before - after, 0);
+  return num(saved) + ' (' + pct(saved / before * 100) + ')';
+}
 function agentKey(agent) {
   const a = (agent || '').trim();
   if (!a) return 'unknown';
@@ -159,11 +166,19 @@ function buildSessionRows(data) {
   $('session-panel').innerHTML = sessionHtml.join('');
 }
 
+function rowTotalInput(x) {
+  return Number(x.input_tokens || 0) + Number(x.cache_read_tokens || 0) + Number(x.cache_creation_tokens || 0);
+}
+
 function buildRecentRows(data) {
   const rows = data.last_requests || [];
-  const recentRows = rows.slice(0, 20);
+  // Skip rows whose total input is still 0: token usage is filled in by a
+  // later accounting pass, so a fresh row would otherwise read as a real
+  // zero-input request and confuse the viewer.
+  const scored = rows.filter((x) => rowTotalInput(x) > 0);
+  const recentRows = scored.slice(0, 20);
   const rowHtml = recentRows.length ? recentRows.map((x) => {
-    const totalInput = Number(x.input_tokens || 0) + Number(x.cache_read_tokens || 0) + Number(x.cache_creation_tokens || 0);
+    const totalInput = rowTotalInput(x);
     const cacheMiss = Math.max(totalInput - Number(x.cache_read_tokens || 0), 0);
     return (
       '<tr>' +
@@ -173,14 +188,15 @@ function buildRecentRows(data) {
       '<td>' + num(totalInput) + '</td>' +
       '<td>' + num(cacheMiss) + '</td>' +
       '<td>' + num(x.output_tokens || 0) + '</td>' +
+      '<td>' + shrunkCell(x) + '</td>' +
       '<td>' + num(x.duration_ms) + '</td>' +
       '<td class="truncate">' + esc(agentKey(x.agent) || '--') + '</td>' +
       '<td class="truncate">' + esc((x.session_id || '--').substring(0, 12)) + '</td>' +
       '</tr>'
     );
-  }).join('') : '<tr><td colspan="9" class="empty">no requests yet</td></tr>';
+  }).join('') : '<tr><td colspan="10" class="empty">no requests yet</td></tr>';
   $('rows').innerHTML = rowHtml;
-  return { shown: recentRows.length, total: rows.length };
+  return { shown: recentRows.length, total: scored.length };
 }
 
 function apply(data) {

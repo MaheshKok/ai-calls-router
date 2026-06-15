@@ -3,9 +3,11 @@
 routed_call rewrites the client's Anthropic request for the tier model
 (_prepare_routed_body) and serves it on one of two paths: providers with a
 native Anthropic endpoint (DeepSeek) receive the body directly -- no LiteLLM
-conversion, no compression -- so consecutive tool-result turns keep
-byte-identical prefixes for the provider's prefix cache; every other provider
-goes through LiteLLM with built-in compression. Responses that invoke a premium
+conversion -- so consecutive tool-result turns keep byte-identical prefixes for
+the provider's prefix cache; every other provider goes through LiteLLM. The
+direct path applies no compression (the byte-identical prefix is what the cache
+needs); the LiteLLM path optionally runs the converted messages through headroom
+when "compress_routed" is set. Responses that invoke a premium
 tool are discarded (escalates) so the caller replays the turn on premium
 passthrough, and savings are recorded under the true routed model before the
 served body is masked to the client-requested model. Every failure path returns
@@ -30,8 +32,8 @@ from ai_calls_router._lib.conversion import (
 from ai_calls_router._lib.litellm_guard import load_litellm
 from ai_calls_router.accounting import metrics as metrics_mod
 from ai_calls_router.accounting import savings, shrink_stats
-from ai_calls_router.routing import compression, reduce
 from ai_calls_router.routing import direct as anthropic_direct
+from ai_calls_router.routing.compression import compress_litellm_messages
 
 logger = logging.getLogger("acr.routed_call")
 
@@ -165,30 +167,40 @@ async def _serve_via_litellm(
     body: dict[str, Any],
     tier_cfg: dict[str, Any],
     api_key: str,
-    settings: dict[str, Any],
+    compress: bool,
 ) -> tuple[dict[str, Any], shrink_stats.ShrinkStats]:
-    """Serve a turn through LiteLLM with built-in compression.
+    """Serve a turn through LiteLLM, optionally compressing the routed messages.
 
-    Compresses old tool results, rewrites the body for the tier model,
-    converts it to OpenAI format, calls the provider through litellm with only
-    the tier key, and converts the result back to Anthropic format. This is the
-    provider-agnostic path for every provider without a native Anthropic
-    endpoint.
+    Rewrites the body for the tier model, converts it to OpenAI format, calls
+    the provider through litellm with only the tier key, and converts the
+    result back to Anthropic format. When ``compress`` is set, the converted
+    OpenAI messages are passed through headroom before the provider call: that
+    is the wire shape headroom is effective on (role="tool" messages with string
+    content), and headroom's default exclusions still leave coding-agent output
+    verbatim. This is the provider-agnostic path for every provider without a
+    native Anthropic endpoint.
 
     Args:
         body: Anthropic-format request body from the client.
         tier_cfg: Tier config with "model" and optional "max_tokens".
         api_key: The tier API key.
-        settings: The config "settings" section (drives compression).
+        compress: When True, compress the converted messages with headroom; when
+            False, the messages reach the provider unmodified.
 
     Returns:
         A pair of the routed response in Anthropic format (tagged with the tier
-        model) and a read-only ShrinkStats measuring the compression pass.
+        model) and a read-only ShrinkStats. The stats report the headroom
+        character delta when compression runs, or a no-op (path "none", zero
+        chars saved) when it is disabled or unavailable.
     """
-    compressed = compression.compress_body(body, settings)
-    stats = shrink_stats.compute_shrink(path="compress", before=body, after=compressed)
-    routed_body = _prepare_routed_body(compressed, tier_cfg)
+    routed_body = _prepare_routed_body(body, tier_cfg)
     kwargs = completion_kwargs(routed_body, api_key)
+    if compress:
+        kwargs["messages"], stats = compress_litellm_messages(
+            kwargs["messages"], model=tier_cfg["model"]
+        )
+    else:
+        stats = shrink_stats.compute_shrink(path="none", before=body, after=body)
     litellm = load_litellm()
     raw = await litellm.acompletion(**kwargs)
     return to_anthropic_response(raw, tier_cfg["model"]), stats
@@ -202,13 +214,11 @@ async def _serve_via_direct(
 ) -> tuple[dict[str, Any] | None, shrink_stats.ShrinkStats]:
     """Serve a turn directly on the provider's native Anthropic endpoint.
 
-    Skips LiteLLM conversion and the position-dependent compression pass so
-    consecutive tool-result turns keep byte-identical prefixes, letting the
-    provider's prefix cache do the work its own caching outperforms our
-    compression. A deterministic, position-independent reduction of tool_result
-    content runs first: because it is a pure function of the text, the same
-    tool_result reduces to identical bytes on every turn, so the prefix stays
-    cache-stable while shedding non-informative bytes.
+    Skips LiteLLM conversion and sends the body unmodified so consecutive
+    tool-result turns keep byte-identical prefixes, letting the provider's
+    prefix cache do the work. The router applies no compression or reduction on
+    this path: DeepSeek's input is never shrunk, preserving cache stability, and
+    any token reduction is delegated to the upstream Headroom layer.
 
     Args:
         body: Anthropic-format request body from the client.
@@ -218,11 +228,11 @@ async def _serve_via_direct(
     Returns:
         A pair of the routed response in Anthropic format (or None when the
         direct call fails and the turn must pass through) and a read-only
-        ShrinkStats measuring the reduction pass.
+        ShrinkStats. No shrink pass runs, so the stats report a no-op (path
+        "none", zero chars saved).
     """
-    reduced = reduce.reduce_tool_results(body)
-    stats = shrink_stats.compute_shrink(path="reduce", before=body, after=reduced)
-    routed_body = _prepare_routed_body(reduced, tier_cfg)
+    stats = shrink_stats.compute_shrink(path="none", before=body, after=body)
+    routed_body = _prepare_routed_body(body, tier_cfg)
     response = await anthropic_direct.direct_call(
         body=routed_body, tier_cfg=tier_cfg, api_key=api_key
     )
@@ -285,6 +295,8 @@ def _record_metrics(
         premium_model=premium_model,
         agent=agent,
         session_id=session_id,
+        shrink_chars_before=shrink.chars_before,
+        shrink_chars_after=shrink.chars_after,
     )
 
 
@@ -304,8 +316,11 @@ async def routed_call(
     """Serve a request on the tier model, falling back to None on any failure.
 
     Dispatches on the tier model: providers with a native Anthropic endpoint
-    (DeepSeek) are served directly with no compression or LiteLLM conversion;
-    every other provider goes through LiteLLM. Escalating responses (premium
+    (DeepSeek) are served directly without LiteLLM conversion; every other
+    provider goes through LiteLLM. The direct path never compresses (it must
+    keep byte-identical prefixes); the LiteLLM path compresses the converted
+    messages with headroom when settings["compress_routed"] is true (the
+    default). Escalating responses (premium
     tool calls) are discarded. On success, savings are recorded under the true
     routed model and the served body is then masked to claim the
     client-requested model.
@@ -339,7 +354,10 @@ async def routed_call(
             )
         else:
             anthropic_body, shrink = await _serve_via_litellm(
-                body=body, tier_cfg=tier_cfg, api_key=api_key, settings=settings
+                body=body,
+                tier_cfg=tier_cfg,
+                api_key=api_key,
+                compress=bool(settings.get("compress_routed", True)),
             )
         elapsed = time.monotonic() - started
         if anthropic_body is None:

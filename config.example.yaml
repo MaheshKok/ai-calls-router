@@ -30,16 +30,20 @@ settings:
   # and forces passthrough.
   tier_precedence: [premium, code, fast, crud]
 
-  compress_routed: true
-  compression:
-    keep_recent_messages: 6        # never truncate the last N messages
-    max_tool_result_chars: 4000    # char budget for older tool_result text
-    use_rtk: auto                  # auto = use the rtk CLI when on PATH; never = built-in only
-
   # Tools whose appearance in a routed response means the cheap model is trying
   # to take a premium action. The turn is escalated back to passthrough.
   premium_tools: [Edit, Write, MultiEdit, NotebookEdit, Task, ExitPlanMode, AskUserQuestion]
   escalate_on_premium_tools: true   # false disables the guard (routed responses are served as-is)
+
+  # Run routed messages through headroom on the LiteLLM (non-direct) path only.
+  # Compression applies to the OpenAI-format messages after conversion and
+  # respects headroom's defaults, so coding-agent tool output (Read/Edit/Bash)
+  # is left verbatim; non-coding-agent tool output (the OpenAI providers this
+  # router will serve) is shrunk. The DeepSeek direct path is never compressed
+  # (it must keep byte-identical prefixes for the provider cache). Requires the
+  # "compression" extra (`pip install ai-calls-router[compression]`); a no-op
+  # when headroom-ai is not installed. Default: true.
+  compress_routed: true
 
 # Cheap serving tiers. `model` is any LiteLLM-supported id; `key_env` names the
 # environment variable holding that provider's API key (never the Anthropic

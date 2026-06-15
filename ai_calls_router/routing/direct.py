@@ -1,13 +1,13 @@
 """Direct Anthropic-format calls to providers with native Anthropic endpoints.
 
 When a tier model belongs to a provider that accepts Anthropic-format requests
-natively, bypassing LiteLLM conversion and our built-in compression preserves
-byte-identical prefixes for the provider's prefix cache (DeepSeek bills cache
-hits ~50x cheaper than misses, beating our token compression on the repetitive
-tool-result turns this proxy routes). This module owns the detection rule, the
-endpoint table, and the raw httpx POST the routed_call engine invokes instead
-of the LiteLLM path. Every failure returns None so routing falls back to
-passthrough and never breaks a turn.
+natively, bypassing LiteLLM conversion preserves byte-identical prefixes for the
+provider's prefix cache (DeepSeek bills cache hits ~50x cheaper than misses, so
+the cache does the work on the repetitive tool-result turns this proxy routes).
+The router applies no compression on this path, keeping the prefix byte-stable.
+This module owns the detection rule, the endpoint table, and the raw httpx POST
+the routed_call engine invokes instead of the LiteLLM path. Every failure
+returns None so routing falls back to passthrough and never breaks a turn.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def direct_endpoint(model: Any) -> str | None:
     """Return the direct Anthropic base URL for a tier model, if one applies.
 
     This is the detection gate routed_call branches on: a non-None result means
-    the tier bypasses LiteLLM and compression.
+    the tier bypasses LiteLLM.
 
     Args:
         model: A tier model id (e.g. ``deepseek/deepseek-v4-pro``).

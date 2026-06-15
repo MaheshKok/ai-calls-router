@@ -1,12 +1,14 @@
 """Read-only measurement of how much a shrink pass removed from a request body.
 
-The two routing shrink passes -- ``reduce.reduce_tool_results`` (DeepSeek direct
-path) and ``compression.compress_body`` (LiteLLM path) -- are pure functions that
-map a request body to a smaller body. This module counts the tool_result
-characters in a body and packages a before/after measurement (``ShrinkStats``)
-so the engine can report compression savings to logs, the savings ledger, and
-the metrics snapshot without changing what is sent. Counting walks the Anthropic
-body shape, never mutates it, and treats any non-tool_result content as zero.
+This module counts the tool_result characters in a request body and packages a
+before/after measurement (``ShrinkStats``) so the engine can report compression
+savings to logs, the savings ledger, and the metrics snapshot without changing
+what is sent. The router no longer runs a shrink pass of its own -- token
+reduction is delegated to the upstream Headroom layer -- so the engine currently
+feeds an unchanged body as both before and after and the stats report a no-op
+(path "none", zero chars saved). The plumbing is retained so upstream Headroom
+compression can be measured here later. Counting walks the Anthropic body shape,
+never mutates it, and treats any non-tool_result content as zero.
 """
 
 from __future__ import annotations

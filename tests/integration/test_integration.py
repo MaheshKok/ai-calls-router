@@ -43,7 +43,6 @@ server:
   port: 8747
 settings:
   tier_precedence: [premium, fast]
-  compress_routed: false
   premium_tools: [Edit]
   escalate_on_premium_tools: true
 tiers:
@@ -70,7 +69,6 @@ server:
   port: 8747
 settings:
   tier_precedence: [premium, fast]
-  compress_routed: false
   premium_tools: [Edit]
 tiers:
   fast:

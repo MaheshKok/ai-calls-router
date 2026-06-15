@@ -3,7 +3,7 @@
 These tests use the real server application (via ``make_client``) to POST
 malformed or edge-case request bodies and verify that the proxy *falls back to
 passthrough* instead of crashing — exercising the defensive isinstance/continue
-guards in routing, compression, and the server itself.
+guards in routing and the server itself.
 """
 
 from __future__ import annotations

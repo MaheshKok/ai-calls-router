@@ -22,10 +22,27 @@ from typing import Any
 import pytest
 
 from ai_calls_router.accounting import savings
+from ai_calls_router.routing import compression, synthesis
 from ai_calls_router.routing import engine as rc
-from ai_calls_router.routing import synthesis
 from tests.acr_testkit import FakeLitellm
 from tests.acr_testkit import make_response as _fake_response
+
+
+def _halving_compressor(messages: list[dict[str, Any]], **_: Any) -> Any:
+    """Fake headroom.compress: halve every string role="tool" content.
+
+    Returns a CompressResult-shaped object (``.messages``) without mutating the
+    input, so engine tests can assert real shrinkage on the LiteLLM path without
+    depending on headroom's heuristics.
+    """
+    out = [
+        {**m, "content": m["content"][: len(m["content"]) // 2]}
+        if m.get("role") == "tool" and isinstance(m.get("content"), str)
+        else m
+        for m in messages
+    ]
+    return SimpleNamespace(messages=out)
+
 
 # Non-DeepSeek ids keep these tests on the LiteLLM path: DeepSeek tier models
 # are diverted to the native direct path (see TestRoutedCallDeepSeekDirect).
@@ -52,7 +69,6 @@ TIER_CFG: dict[str, Any] = {"model": CHEAP_MODEL, "max_tokens": 8192}
 SETTINGS: dict[str, Any] = {
     "premium_tools": ["Edit", "Write", "Task", "ExitPlanMode", "AskUserQuestion"],
     "escalate_on_premium_tools": True,
-    "compress_routed": False,
 }
 
 
@@ -317,9 +333,15 @@ class TestRoutedCall:
         assert fake.calls[0]["max_tokens"] == 8192
         assert fake.calls[0]["model"] == CHEAP_MODEL
 
-    def test_compression_applied_before_provider_call(
+    def test_litellm_path_leaves_excluded_tool_output_verbatim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Contract: under headroom's default policy, output from excluded
+        # coding-agent tools (Bash here) is left verbatim even when compression
+        # is enabled on the LiteLLM path. A large, old Bash tool_result must
+        # therefore reach the provider unshrunk -- never truncated. This runs the
+        # real wrapper (no compressor injected); when headroom-ai is absent the
+        # wrapper no-ops, which yields the same verbatim outcome.
         body = _request_body()
         body["messages"] = [
             {
@@ -339,23 +361,74 @@ class TestRoutedCall:
                 "content": [{"type": "tool_result", "tool_use_id": "t2", "content": "short"}],
             },
         ]
-        settings = {
-            **SETTINGS,
-            "compress_routed": True,
-            "compression": {
-                "keep_recent_messages": 1,
-                "max_tool_result_chars": 50,
-                "use_rtk": "never",
-            },
-        }
         fake = FakeLitellm(_fake_response())
-        _call(monkeypatch=monkeypatch, fake=fake, body=body, settings=settings)
+        _call(monkeypatch=monkeypatch, fake=fake, body=body, settings=SETTINGS)
         sent = fake.calls[0]["messages"]
         old_result = next(m for m in sent if m.get("tool_call_id") == "t1")
-        assert "truncated" in old_result["content"]
-        assert len(old_result["content"]) < 200
+        assert old_result["content"] == "x" * 5000
+        assert "truncated" not in old_result["content"]
         recent_result = next(m for m in sent if m.get("tool_call_id") == "t2")
         assert recent_result["content"] == "short"
+
+    def test_litellm_path_compresses_non_excluded_tool_results(
+        self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
+    ) -> None:
+        # With compression enabled (the default) a non-excluded tool's output is
+        # shrunk on the converted OpenAI messages: the provider receives the
+        # smaller content and the ledger records path "compress" with a positive
+        # char delta. A fake compressor (halving role="tool" content) keeps the
+        # test hermetic and independent of headroom's real heuristics.
+        monkeypatch.setattr(compression, "_load_compressor", lambda: _halving_compressor)
+        body = _request_body()
+        body["messages"] = [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "shell", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x" * 4000}],
+            },
+        ]
+        fake = FakeLitellm(_fake_response())
+        _call(monkeypatch=monkeypatch, fake=fake, body=body, settings=SETTINGS)
+
+        sent = next(m for m in fake.calls[0]["messages"] if m.get("tool_call_id") == "t1")
+        assert sent["content"] == "x" * 2000
+        entries = [json.loads(line) for line in ledger_file.read_text().splitlines()]
+        assert entries[0]["shrink_path"] == "compress"
+        assert entries[0]["shrink_chars_after"] < entries[0]["shrink_chars_before"]
+
+    def test_compress_routed_false_disables_compression(
+        self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
+    ) -> None:
+        # compress_routed=False must bypass headroom entirely: the converted
+        # messages reach the provider verbatim and the ledger records a no-op
+        # ("none") shrink, even for a non-excluded tool with compressible output.
+        # The compressor seam raises if touched, proving it is never called.
+        def _must_not_run() -> Any:
+            raise AssertionError("compressor loaded despite compress_routed=False")
+
+        monkeypatch.setattr(compression, "_load_compressor", _must_not_run)
+        body = _request_body()
+        body["messages"] = [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "shell", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x" * 4000}],
+            },
+        ]
+        fake = FakeLitellm(_fake_response())
+        settings = {**SETTINGS, "compress_routed": False}
+        _call(monkeypatch=monkeypatch, fake=fake, body=body, settings=settings)
+
+        sent = next(m for m in fake.calls[0]["messages"] if m.get("tool_call_id") == "t1")
+        assert sent["content"] == "x" * 4000
+        entries = [json.loads(line) for line in ledger_file.read_text().splitlines()]
+        assert entries[0]["shrink_path"] == "none"
 
     def test_zero_usage_serves_response_without_ledger_entry(
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
@@ -425,15 +498,15 @@ def _call_direct(
     settings: dict[str, Any] | None = None,
     api_key: str = "ds-tier-key",
     tier_cfg: dict[str, Any] | None = None,
-) -> tuple[Any, dict[str, Any], list[Any]]:
+) -> tuple[Any, dict[str, Any]]:
     """Run routed_call on the DeepSeek direct path with direct_call stubbed.
 
-    Guards that the direct path never touches LiteLLM or the compressor, and
-    captures the arguments handed to direct_call so the caller can assert
-    credential isolation and body preparation.
+    Guards that the direct path never touches LiteLLM, and captures the
+    arguments handed to direct_call so the caller can assert credential
+    isolation and body preparation.
 
     Returns:
-        (routed_call result, captured direct_call args, compressor call log).
+        (routed_call result, captured direct_call args).
     """
     captured: dict[str, Any] = {}
 
@@ -448,15 +521,8 @@ def _call_direct(
     def _no_litellm() -> Any:
         raise AssertionError("load_litellm must not run on the direct path")
 
-    compress_calls: list[Any] = []
-
-    def _spy_compress(b: dict[str, Any], s: dict[str, Any]) -> dict[str, Any]:
-        compress_calls.append(b)
-        return b
-
     monkeypatch.setattr(rc.anthropic_direct, "direct_call", _fake_direct)
     monkeypatch.setattr(rc, "load_litellm", _no_litellm)
-    monkeypatch.setattr(rc.compression, "compress_body", _spy_compress)
 
     result = asyncio.run(
         rc.routed_call(
@@ -467,7 +533,7 @@ def _call_direct(
             settings=settings if settings is not None else SETTINGS,
         )
     )
-    return result, captured, compress_calls
+    return result, captured
 
 
 class TestRoutedCallDeepSeekDirect:
@@ -476,36 +542,28 @@ class TestRoutedCallDeepSeekDirect:
     ) -> None:
         # The guard in _call_direct raises if load_litellm runs; reaching a
         # served response proves the DeepSeek tier bypassed LiteLLM entirely.
-        result, captured, _ = _call_direct(monkeypatch, _direct_body())
+        result, captured = _call_direct(monkeypatch, _direct_body())
         assert result is not None
         assert captured["api_key"] == "ds-tier-key"
-
-    def test_direct_path_skips_compression(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # DeepSeek's prefix cache outperforms our compression, so the direct
-        # path must never compress -- compressing would break byte-identical
-        # prefixes and defeat the cache.
-        settings = {**SETTINGS, "compress_routed": True}
-        _, _, compress_calls = _call_direct(monkeypatch, _direct_body(), settings=settings)
-        assert compress_calls == []
 
     def test_direct_path_prepares_body_and_strips_stream(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # _prepare_routed_body still runs: model swapped to the tier id, the
         # stream flag dropped, max_tokens clamped to the tier ceiling.
-        _, captured, _ = _call_direct(monkeypatch, _direct_body())
+        _, captured = _call_direct(monkeypatch, _direct_body())
         sent = captured["body"]
         assert sent["model"] == DS_MODEL
         assert "stream" not in sent
         assert sent["max_tokens"] == 8192
 
-    def test_direct_path_reduces_tool_result_noise_before_send(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Deterministic reduction must run before the body reaches the provider:
-        # ANSI escapes and blank-line runs in tool_result content are stripped so
-        # fewer tokens go on the wire, and because the reduction is a pure
-        # function the prefix stays byte-stable across turns (cache-safe).
+    def test_direct_path_sends_tool_result_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The router applies no reduction on the direct path: tool_result content
+        # reaches DeepSeek byte-for-byte as the client sent it, so the prefix
+        # stays whatever the client (or upstream Headroom) produced and DeepSeek's
+        # prefix cache stays stable. ANSI escapes and blank-line runs must be
+        # preserved, not stripped.
+        noisy = "\x1b[32mok\x1b[0m\n\n\n\ntail"
         noisy_request = {
             "model": PREMIUM_MODEL,
             "max_tokens": 32000,
@@ -520,20 +578,20 @@ class TestRoutedCallDeepSeekDirect:
                         {
                             "type": "tool_result",
                             "tool_use_id": "t1",
-                            "content": "\x1b[32mok\x1b[0m\n\n\n\ntail",
+                            "content": noisy,
                         }
                     ],
                 },
             ],
         }
-        _, captured, _ = _call_direct(monkeypatch, _direct_body(), body=noisy_request)
+        _, captured = _call_direct(monkeypatch, _direct_body(), body=noisy_request)
         sent_result = captured["body"]["messages"][-1]["content"][0]["content"]
-        assert sent_result == "ok\n\ntail"
+        assert sent_result == noisy
 
     def test_direct_path_forwards_only_tier_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Invariant 2: the client's credential never reaches the routed
         # provider; only the tier key is handed to direct_call.
-        _, captured, _ = _call_direct(monkeypatch, _direct_body(), api_key="only-the-tier-key")
+        _, captured = _call_direct(monkeypatch, _direct_body(), api_key="only-the-tier-key")
         assert captured["api_key"] == "only-the-tier-key"
 
     def test_direct_path_masks_response_to_client_model(
@@ -541,11 +599,11 @@ class TestRoutedCallDeepSeekDirect:
     ) -> None:
         # Invariant 1: the served body claims the client-requested model, not
         # the DeepSeek native id the endpoint returned.
-        result, _, _ = _call_direct(monkeypatch, _direct_body())
+        result, _ = _call_direct(monkeypatch, _direct_body())
         assert result.body["model"] == PREMIUM_MODEL
 
     def test_direct_path_escalates_on_premium_tool(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        result, _, _ = _call_direct(monkeypatch, _direct_body(text=None, tool_name="Edit"))
+        result, _ = _call_direct(monkeypatch, _direct_body(text=None, tool_name="Edit"))
         assert result is None
 
     def test_direct_path_no_ledger_entry_when_escalated(
@@ -559,14 +617,14 @@ class TestRoutedCallDeepSeekDirect:
     ) -> None:
         # Invariant 3: a failed direct call (None) must fall back to passthrough
         # and record nothing.
-        result, _, _ = _call_direct(monkeypatch, None)
+        result, _ = _call_direct(monkeypatch, None)
         assert result is None
         assert not ledger_file.exists()
 
     def test_direct_path_exception_falls_through(
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
     ) -> None:
-        result, _, _ = _call_direct(monkeypatch, RuntimeError("transport down"))
+        result, _ = _call_direct(monkeypatch, RuntimeError("transport down"))
         assert result is None
         assert not ledger_file.exists()
 
@@ -579,7 +637,7 @@ class TestRoutedCallDeepSeekDirect:
         #   routed = 100_000*0.435/1e6 + 900_000*0.003625/1e6 + 1_000*0.87/1e6
         #          = 0.0435 + 0.0032625 + 0.00087 = 0.0476325
         #   premium = 1_000_000*10/1e6 + 1_000*20/1e6 = 10.00 + 0.02 = 10.02
-        result, _, _ = _call_direct(
+        result, _ = _call_direct(
             monkeypatch,
             _direct_body(
                 input_tokens=0,

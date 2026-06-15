@@ -30,6 +30,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# headroom compression for the LiteLLM serving path. Optional: the runtime
+# import is guarded, so without this extra installed compression is a no-op and
+# the router still serves every request.
+compression = ["headroom-ai>=0.25"]
 dev = [
     "bandit>=1.7",
     "build>=1.2",
@@ -173,8 +177,7 @@ max-complexity = 15
     "PLW0603", "PLC0415",  # lazy loading with global + deferred import by design
 ]
 "ai_calls_router/routing/compression.py" = [
-    "S603", "S607", "PLW1510",  # subprocess for rtk compression tool
-    "TRY300",  # try/except flow is intentional for resilience
+    "PLC0415",  # headroom imported lazily inside _load_compressor (optional dep)
 ]
 "ai_calls_router/routing/decide.py" = [
     "TRY300",  # try/except flow returns at end by design

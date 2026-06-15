@@ -213,12 +213,6 @@ def _build_config(
         "premium": {"provider": "anthropic"},
         "settings": {
             "tier_precedence": ["premium", "code", "fast", "crud"],
-            "compress_routed": True,
-            "compression": {
-                "keep_recent_messages": 6,
-                "max_tool_result_chars": 4000,
-                "use_rtk": "auto",
-            },
             "premium_tools": list(PREMIUM_TOOLS),
             "escalate_on_premium_tools": True,
         },
