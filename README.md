@@ -250,6 +250,44 @@ otherwise a built-in compressor runs. `rtk` is never required.
 | `~/.ai-calls-router/acr.log` | Daemon log. |
 | `$ACR_HOME` | Overrides the state directory root. |
 
+## Claude Desktop embedded Claude Code shim
+
+Claude Desktop does not inherit your shell's `ANTHROPIC_BASE_URL`, and its
+embedded Claude Code binary may reset the API base URL to Anthropic's default.
+For Desktop-launched Claude Code sessions, use the optional binary shim:
+
+```bash
+scripts/desktop-shim/apply.sh
+```
+
+The installer patches each Desktop-managed Claude Code version under
+`~/Library/Application Support/Claude/claude-code/`, saves the original Mach-O
+binary as `claude-real`, and replaces `claude` with a wrapper that routes only
+the default Anthropic endpoint through `http://127.0.0.1:8747` when ACR answers
+`/health`. Custom API endpoints pass through untouched, and a down ACR proxy
+does not break Desktop sessions.
+
+To confirm the shim state without changing anything:
+
+```bash
+scripts/desktop-shim/apply.sh --status
+```
+
+Do not run `scripts/desktop-shim/claude-shim.zsh` directly from the repo; it is
+a template that only works after `apply.sh` copies it next to the saved
+`claude-real` binary inside Claude Desktop's managed app bundle.
+
+Re-run the script after Claude Desktop updates, because updates create a fresh
+version directory. To restore the original binaries:
+
+```bash
+scripts/desktop-shim/apply.sh --revert
+```
+
+If another shim is already installed and `claude-real` is present, the ACR
+installer refuses to overwrite it by default. Use `--force` only when you have
+confirmed `claude-real` is the original Desktop-managed binary.
+
 ## Limitations
 
 - Routed turns are buffered, not streamed: the escalation guard needs the
@@ -257,7 +295,8 @@ otherwise a built-in compressor runs. `rtk` is never required.
   turn equals its full completion latency. Decision turns stream normally
   through passthrough.
 - v1 supports the Anthropic passthrough only for the premium path.
-- The desktop Claude app is out of scope for v1; `acr code` covers the terminal.
+- Claude Desktop support requires the optional embedded Claude Code shim above;
+  plain shell environment variables are not enough for Desktop-launched sessions.
 
 ## Contributing
 
