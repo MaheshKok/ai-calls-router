@@ -264,3 +264,130 @@ class TestMetricsCompression:
             assert comp["chars_after"] == 0
         finally:
             ledger_path.unlink(missing_ok=True)
+
+
+def _record_routed(
+    m: _Metrics,
+    *,
+    shrink_chars_before: int = 0,
+    shrink_chars_after: int = 0,
+) -> None:
+    """Record one routed request row with the given shrink measurement.
+
+    Args:
+        m: The metrics instance to record into.
+        shrink_chars_before: tool_result characters before the shrink pass.
+        shrink_chars_after: tool_result characters after the shrink pass.
+    """
+    m.record_request(
+        method="POST",
+        path="/v1/messages",
+        status=200,
+        tier="deepseek",
+        route="direct",
+        model="deepseek-chat",
+        user_agent="claude-code/2.0.0",
+        client_ip="",
+        tool_names=[],
+        input_tokens=500,
+        output_tokens=400,
+        cache_read=100,
+        cache_creation=50,
+        duration=0.5,
+        shrink_chars_before=shrink_chars_before,
+        shrink_chars_after=shrink_chars_after,
+    )
+
+
+class TestRecordRequestPerRowShrink:
+    """A live recorded request carries its own tool_result shrink measurement
+    on the recent-requests row, so the dashboard can show per-row shrinkage
+    rather than only the cumulative total."""
+
+    def test_recorded_row_carries_explicit_shrink_fields(self) -> None:
+        m = _Metrics()
+        _record_routed(m, shrink_chars_before=12000, shrink_chars_after=4500)
+        row = m.snapshot()["last_requests"][0]
+        assert row["shrink_chars_before"] == 12000
+        assert row["shrink_chars_after"] == 4500
+
+    def test_recorded_row_defaults_shrink_to_zero(self) -> None:
+        # A path that does not pass shrink must produce neutral zeros, not a
+        # missing key the dashboard would read as undefined.
+        m = _Metrics()
+        _record_routed(m)
+        row = m.snapshot()["last_requests"][0]
+        assert row["shrink_chars_before"] == 0
+        assert row["shrink_chars_after"] == 0
+
+    def test_recorded_row_clamps_negative_shrink_to_zero(self) -> None:
+        m = _Metrics()
+        _record_routed(m, shrink_chars_before=-7, shrink_chars_after=-3)
+        row = m.snapshot()["last_requests"][0]
+        assert row["shrink_chars_before"] == 0
+        assert row["shrink_chars_after"] == 0
+
+    def test_no_op_pass_records_equal_before_and_after(self) -> None:
+        # When the shrink pass removed nothing (before == after) the row keeps
+        # both counts verbatim, so a per-row "0 saved" stays distinguishable
+        # from "no measurement". 77892 mirrors the observed real-traffic no-op.
+        m = _Metrics()
+        _record_routed(m, shrink_chars_before=77892, shrink_chars_after=77892)
+        row = m.snapshot()["last_requests"][0]
+        assert row["shrink_chars_before"] == 77892
+        assert row["shrink_chars_after"] == 77892
+
+
+class TestBootstrapPerRowShrink:
+    """Bootstrap rebuilds recent-request rows from the ledger, and each row
+    carries the shrink measurement persisted with that record."""
+
+    def test_bootstrap_row_carries_shrink_fields(self) -> None:
+        rec = _make_record(ts=1718000000, saved_usd=0.0)
+        rec["shrink_chars_before"] = 8000
+        rec["shrink_chars_after"] = 3000
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(rec) + "\n")
+            ledger_path = Path(f.name)
+
+        try:
+            m = _Metrics()
+            m.bootstrap(ledger_path=ledger_path, max_recent=1)
+            row = m.snapshot()["last_requests"][0]
+            assert row["shrink_chars_before"] == 8000
+            assert row["shrink_chars_after"] == 3000
+        finally:
+            ledger_path.unlink(missing_ok=True)
+
+    def test_bootstrap_row_missing_shrink_defaults_to_zero(self) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(_make_record(ts=1718000000, saved_usd=0.0)) + "\n")
+            ledger_path = Path(f.name)
+
+        try:
+            m = _Metrics()
+            m.bootstrap(ledger_path=ledger_path, max_recent=1)
+            row = m.snapshot()["last_requests"][0]
+            assert row["shrink_chars_before"] == 0
+            assert row["shrink_chars_after"] == 0
+        finally:
+            ledger_path.unlink(missing_ok=True)
+
+    def test_bootstrap_row_clamps_negative_shrink_to_zero(self) -> None:
+        rec = _make_record(ts=1718000000, saved_usd=0.0)
+        rec["shrink_chars_before"] = -500
+        rec["shrink_chars_after"] = -9
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(rec) + "\n")
+            ledger_path = Path(f.name)
+
+        try:
+            m = _Metrics()
+            m.bootstrap(ledger_path=ledger_path, max_recent=1)
+            row = m.snapshot()["last_requests"][0]
+            assert row["shrink_chars_before"] == 0
+            assert row["shrink_chars_after"] == 0
+        finally:
+            ledger_path.unlink(missing_ok=True)

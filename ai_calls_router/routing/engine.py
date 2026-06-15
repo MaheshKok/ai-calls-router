@@ -285,6 +285,8 @@ def _record_metrics(
         premium_model=premium_model,
         agent=agent,
         session_id=session_id,
+        shrink_chars_before=shrink.chars_before,
+        shrink_chars_after=shrink.chars_after,
     )
 
 

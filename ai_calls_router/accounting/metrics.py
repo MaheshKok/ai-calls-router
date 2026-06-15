@@ -182,6 +182,8 @@ class _Metrics:
         provider: str = "",
         decision_reason: str = "",
         request_id: str = "",
+        shrink_chars_before: int = 0,
+        shrink_chars_after: int = 0,
     ) -> None:
         entry: dict[str, Any] = {
             "ts": int(time.time()),
@@ -205,6 +207,8 @@ class _Metrics:
             "cache_read_tokens": cache_read,
             "cache_creation_tokens": cache_creation,
             "duration_ms": int(duration * 1000),
+            "shrink_chars_before": max(int(shrink_chars_before), 0),
+            "shrink_chars_after": max(int(shrink_chars_after), 0),
         }
         with self._lock:
             self._last_requests.insert(0, entry)
@@ -330,6 +334,8 @@ class _Metrics:
                 "cache_read_tokens": cache_read,
                 "cache_creation_tokens": cache_creation,
                 "duration_ms": 0,
+                "shrink_chars_before": max(int(rec.get("shrink_chars_before") or 0), 0),
+                "shrink_chars_after": max(int(rec.get("shrink_chars_after") or 0), 0),
             }
 
     def bootstrap(self, *, ledger_path: Path | None, max_recent: int = 100) -> None:
