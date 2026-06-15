@@ -35,13 +35,13 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
-        stages: [commit]
+        stages: [pre-commit]
       - id: lizard-cyclomatic-complexity
         name: lizard cyclomatic complexity check (CCN <= 20)
         entry: sh -c '.venv/bin/python -m lizard --languages python -C 20 -w ai_calls_router'
         language: system
         types: [python]
         pass_filenames: false
-        stages: [commit]
+        stages: [pre-commit]
   # flake8/wemake removed — cognitive complexity via Ruff C901 (mccabe)
   # docstring-outdated detection via Ruff D417 (pydocstyle: args-match-signature)
