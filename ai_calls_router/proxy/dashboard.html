@@ -82,9 +82,9 @@ td.empty { color:#484f58; text-align:center; padding: 24px;}
     <div class="table-header"><h2>recent requests</h2><span class="status" id="status">loading</span></div>
     <table>
       <thead id="table-head">
-        <tr><th>time</th><th>model</th><th>tools</th><th>new input</th><th>cache read</th><th>cache write</th><th>total input</th><th>output</th><th>ms</th><th>agent</th><th>session</th></tr>
+        <tr><th>time</th><th>model</th><th>tools</th><th>total input</th><th>cache miss</th><th>output</th><th>ms</th><th>agent</th><th>session</th></tr>
       </thead>
-      <tbody id="rows"><tr><td colspan="11" class="empty">no requests yet</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="9" class="empty">no requests yet</td></tr></tbody>
     </table>
   </section>
 </div>
@@ -132,33 +132,60 @@ function buildSessionRows(data) {
     if (!buckets[sid]) buckets[sid] = { count: 0, agent };
     buckets[sid].count++;
   }
-  const html = ['<h2>sessions</h2>'];
-  const entries = Object.entries(buckets).sort((a,b) => b[1].count - a[1].count).slice(0, 20);
+  const entries = Object.entries(buckets).sort((a, b) => b[1].count - a[1].count).slice(0, 20);
+  const sessionHtml = ['<h2>sessions</h2>'];
   if (entries.length === 0) {
-    html.push('<div class="row"><span class="mono">--</span><span>no sessions yet</span></div>');
+    sessionHtml.push('<div class="row"><span class="mono">--</span><span>no sessions yet</span></div>');
   } else {
     let shown = 0;
     for (const [sid, info] of entries) {
       if (sid === '__no__session__') continue;
-      const label = sid.substring(0, 8) + '\u2026';
-      html.push('<div class="row"><span class="mono">' + esc(label) + '</span><span class="mono">' + esc(agentKey(info.agent)) + ' \u00B7 ' + num(info.count) + ' reqs</span></div>');
+      const label = sid.substring(0, 8) + '…';
+      sessionHtml.push('<div class="row"><span class="mono">' + esc(label) + '</span><span class="mono">' + esc(agentKey(info.agent)) + ' · ' + num(info.count) + ' reqs</span></div>');
       shown++;
     }
     if (shown === 0 && entries.length > 0) {
-      for (const [sid, info] of entries) {
-        html.push('<div class="row"><span class="mono">--</span><span class="mono">' + esc(agentKey(info.agent)) + ' \u00B7 ' + num(info.count) + ' reqs</span></div>');
+      for (const [_, info] of entries) {
+        sessionHtml.push('<div class="row"><span class="mono">--</span><span class="mono">' + esc(agentKey(info.agent)) + ' · ' + num(info.count) + ' reqs</span></div>');
       }
     }
   }
-  $('session-panel').innerHTML = html.join('');
+  $('session-panel').innerHTML = sessionHtml.join('');
 }
+
+function buildRecentRows(data) {
+  const rows = data.last_requests || [];
+  const rowHtml = rows.length ? rows.map((x) => {
+    const totalInput = Number(x.input_tokens || 0) + Number(x.cache_read_tokens || 0) + Number(x.cache_creation_tokens || 0);
+    const cacheMiss = Math.max(totalInput - Number(x.cache_read_tokens || 0), 0);
+    return (
+      '<tr>' +
+      '<td>' + new Date(Number(x.ts || 0) * 1000).toLocaleTimeString() + '</td>' +
+      '<td class="truncate">' + esc(shortModel(x.model) || '--') + '</td>' +
+      '<td class="truncate">' + esc((x.tool_names || []).join(', ') || '--') + '</td>' +
+      '<td>' + num(totalInput) + '</td>' +
+      '<td>' + num(cacheMiss) + '</td>' +
+      '<td>' + num(x.output_tokens || 0) + '</td>' +
+      '<td>' + num(x.duration_ms) + '</td>' +
+      '<td class="truncate">' + esc(agentKey(x.agent) || '--') + '</td>' +
+      '<td class="truncate">' + esc((x.session_id || '--').substring(0, 12)) + '</td>' +
+      '</tr>'
+    );
+  }).join('') : '<tr><td colspan="9" class="empty">no requests yet</td></tr>';
+  $('rows').innerHTML = rowHtml;
+}
+
 function apply(data) {
-  const r = data.requests || {}, rt = data.routed_tokens || {}, pt = data.premium_tokens || {}, c = data.costs || {};
-  const total = Number(r.total || 0), routed = Number(r.routed || 0);
+  const r = data.requests || {};
+  const rt = data.routed_tokens || {};
+  const pt = data.premium_tokens || {};
+  const c = data.costs || {};
+  const total = Number(r.total || 0);
+  const routed = Number(r.routed || 0);
   $('uptime').textContent = uptime(data.uptime_seconds);
   $('total').textContent = num(total);
   $('routed').textContent = num(routed);
-  $('routedPct').textContent = pct(total ? routed / total * 100 : NaN) + ' of total';
+  $('routedPct').textContent = (total ? pct(routed / total * 100) : '--') + ' of total';
   $('passthrough').textContent = num(r.passthrough);
   $('errors').textContent = num(r.errors);
   $('escFallback').textContent = num(r.escalated) + ' escalated / ' + num(r.fallback) + ' fallback';
@@ -166,29 +193,20 @@ function apply(data) {
   $('costPremium').textContent = usd(c.premium_usd);
   $('saved').textContent = usd(c.saved_usd);
   $('saveRate').textContent = pct(Number(c.premium_usd) ? Number(c.saved_usd) / Number(c.premium_usd) * 100 : NaN);
-  $('ri').textContent = num(rt.input); $('ro').textContent = num(rt.output); $('rcr').textContent = num(rt.cache_read); $('rcc').textContent = num(rt.cache_creation);
-  $('pi').textContent = num(pt.input); $('po').textContent = num(pt.output); $('pcr').textContent = num(pt.cache_read); $('pcc').textContent = num(pt.cache_creation);
+  $('ri').textContent = num(rt.input);
+  $('ro').textContent = num(rt.output);
+  $('rcr').textContent = num(rt.cache_read);
+  $('rcc').textContent = num(rt.cache_creation);
+  $('pi').textContent = num(pt.input);
+  $('po').textContent = num(pt.output);
+  $('pcr').textContent = num(pt.cache_read);
+  $('pcc').textContent = num(pt.cache_creation);
   buildAgentRows(data);
   buildSessionRows(data);
-  const rows = data.last_requests || [];
-  $('rows').innerHTML = rows.length ? rows.map(x => {
-    const totalInput = Number(x.input_tokens || 0) + Number(x.cache_read_tokens || 0) + Number(x.cache_creation_tokens || 0);
-    return '<tr>' +
-      '<td>' + new Date(Number(x.ts || 0) * 1000).toLocaleTimeString() + '</td>' +
-      '<td class="truncate">' + esc(shortModel(x.model) || '--') + '</td>' +
-      '<td class="truncate">' + esc((x.tool_names || []).join(', ') || '--') + '</td>' +
-      '<td>' + num(x.input_tokens || 0) + '</td>' +
-      '<td>' + num(x.cache_read_tokens || 0) + '</td>' +
-      '<td>' + num(x.cache_creation_tokens || 0) + '</td>' +
-      '<td>' + num(totalInput) + '</td>' +
-      '<td>' + num(x.output_tokens || 0) + '</td>' +
-      '<td>' + num(x.duration_ms) + '</td>' +
-      '<td class="truncate">' + esc(agentKey(x.agent) || '--') + '</td>' +
-      '<td class="truncate">' + esc((x.session_id || '--').substring(0, 12)) + '</td>' +
-    '</tr>';
-  }).join('') : '<tr><td colspan="11" class="empty">no requests yet</td></tr>';
-  $('status').textContent = 'live \u00B7 refreshed ' + new Date().toLocaleTimeString();
+  buildRecentRows(data);
+  $('status').textContent = 'live · refreshed ' + new Date().toLocaleTimeString();
 }
+
 async function refresh() {
   try {
     const res = await fetch('/metrics', { cache: 'no-store' });
