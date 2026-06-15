@@ -5,9 +5,12 @@ Anthropic Messages API request is processing, and resolves the serving tier.
 Every failure path returns the premium/passthrough decision -- routing must
 never break traffic that would otherwise succeed.
 
-Ported from the proven headroom-tool-router engine; the only behavioral
-changes are a per-path cache (instead of a single global slot) and tilde
-expansion for the env_file setting.
+Tool names that arrive from Claude Code are canonicalized against the
+configured premium tool list before matching, so alias/casing drift (e.g.
+``edit`` -> ``Edit``) still resolves to the configured literal. Ported from the
+proven headroom-tool-router engine; the only behavioral changes are a per-path
+cache (instead of a single global slot) and tilde expansion for the env_file
+setting.
 """
 
 from __future__ import annotations
@@ -59,8 +62,61 @@ def load_routes(path: Path | None = None) -> dict[str, Any]:
         return {}
 
 
-def _tool_id_to_name_map(messages: list[Any]) -> dict[str, str]:
-    """Build a mapping from tool_use ids to tool names from assistant messages."""
+def _premium_aliases(settings: dict[str, Any]) -> dict[str, str]:
+    """Derive accepted aliases from the configured premium tool list.
+
+    The configured ``premium_tools`` list is the single source of truth: each
+    literal yields case-insensitive and separator-insensitive keys mapping back
+    to the literal, so the router never carries a second hardcoded premium list.
+
+    Args:
+        settings: The settings: section of config.yaml.
+
+    Returns:
+        A mapping from normalized alias keys to the configured literal.
+    """
+    premium_tools = settings.get("premium_tools")
+    if not isinstance(premium_tools, list):
+        return {}
+    aliases: dict[str, str] = {}
+    for tool in premium_tools:
+        if not isinstance(tool, str):
+            continue
+        canonical = tool.strip()
+        if not canonical:
+            continue
+        aliases[canonical.lower()] = canonical
+        aliases[canonical.replace(" ", "").lower()] = canonical
+        aliases[canonical.replace("_", "").lower()] = canonical
+        aliases[canonical.replace("-", "").lower()] = canonical
+    return aliases
+
+
+def _canonical_tool_name(name: str, settings: dict[str, Any]) -> str:
+    """Resolve a Claude Code tool name to the configured premium literal.
+
+    Args:
+        name: Raw tool name from the conversation.
+        settings: The settings: section of config.yaml (may be empty).
+
+    Returns:
+        The configured literal when the name is a known alias, otherwise the
+        whitespace-stripped name unchanged.
+    """
+    normalized = name.strip()
+    return _premium_aliases(settings).get(normalized.lower(), normalized)
+
+
+def _tool_id_to_name_map(messages: list[Any], settings: dict[str, Any]) -> dict[str, str]:
+    """Build a mapping from tool_use ids to canonicalized tool names.
+
+    Args:
+        messages: The messages array, excluding the final user turn.
+        settings: The settings: section of config.yaml (drives canonicalization).
+
+    Returns:
+        A mapping from tool_use id to the canonical tool name.
+    """
     id_to_name: dict[str, str] = {}
     for msg in messages[:-1]:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
@@ -75,25 +131,31 @@ def _tool_id_to_name_map(messages: list[Any]) -> dict[str, str]:
                 and block.get("id")
                 and block.get("name")
             ):
-                id_to_name[str(block["id"])] = str(block["name"])
+                id_to_name[str(block["id"])] = _canonical_tool_name(str(block["name"]), settings)
     return id_to_name
 
 
-def pending_tool_names(body: dict[str, Any]) -> list[str]:
+def pending_tool_names(body: dict[str, Any], settings: dict[str, Any] | None = None) -> list[str]:
     """Extract the tool names whose results this request is processing.
 
     In the Anthropic Messages format, pending tool results are tool_result
     blocks in the LAST message (role=user). Each block carries a tool_use_id
     that matches a tool_use block in an earlier assistant message, which holds
-    the tool NAME.
+    the tool NAME. Names are canonicalized against the configured premium tool
+    list so alias/casing drift still resolves to the configured literal.
 
     Args:
         body: Parsed /v1/messages request body.
+        settings: The settings: section of config.yaml; when omitted, no
+            canonicalization is applied and raw names are returned.
 
     Returns:
         Ordered, deduplicated tool names; [] when the request is a turn
         opener / plain reply (no pending results) or on shape surprises.
+        ["<unknown>"] when any result id cannot be resolved to a name, which
+        forces the whole batch onto the premium path.
     """
+    settings = settings or {}
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         return []
@@ -115,7 +177,7 @@ def pending_tool_names(body: dict[str, Any]) -> list[str]:
     if not result_ids:
         return []
 
-    id_to_name = _tool_id_to_name_map(messages)
+    id_to_name = _tool_id_to_name_map(messages, settings)
     names: list[str] = []
     for rid in result_ids:
         name = id_to_name.get(str(rid))
@@ -128,20 +190,25 @@ def pending_tool_names(body: dict[str, Any]) -> list[str]:
     return names
 
 
-def lookup_tool(name: str, tools_map: dict[str, str]) -> str | None:
+def lookup_tool(
+    name: str, tools_map: dict[str, str], settings: dict[str, Any] | None = None
+) -> str | None:
     """Resolve a tool name to a tier, exact match first then trailing-* glob.
 
     Args:
         name: Tool name from the conversation.
         tools_map: The `tools:` section of config.yaml.
+        settings: The settings: section of config.yaml; drives alias
+            canonicalization before matching when provided.
 
     Returns:
         Tier name, or None when unmapped (callers treat None as premium).
     """
-    if name in tools_map:
-        return tools_map[name]
+    canonical_name = _canonical_tool_name(name, settings or {})
+    if canonical_name in tools_map:
+        return tools_map[canonical_name]
     for pattern, tier in tools_map.items():
-        if pattern.endswith("*") and fnmatch.fnmatch(name, pattern):
+        if pattern.endswith("*") and fnmatch.fnmatch(canonical_name, pattern):
             return tier
     return None
 
@@ -160,13 +227,12 @@ def tier_for_tools(names: list[str], routes: dict[str, Any]) -> str:
         Tier name ("premium" means passthrough).
     """
     tools_map = routes.get("tools") or {}
-    precedence = (routes.get("settings") or {}).get(
-        "tier_precedence", ["premium", "structured", "code", "fast", "crud"]
-    )
+    settings = routes.get("settings") or {}
+    precedence = settings.get("tier_precedence", ["premium", "structured", "code", "fast", "crud"])
 
     tiers = set()
     for name in names:
-        tier = lookup_tool(name, tools_map)
+        tier = lookup_tool(name, tools_map, settings)
         if tier is None or tier == "premium":
             return "premium"
         tiers.add(tier)
