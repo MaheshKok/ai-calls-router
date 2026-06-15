@@ -82,9 +82,9 @@ td.empty { color:#484f58; text-align:center; padding: 24px;}
     <div class="table-header"><h2>recent requests</h2><span class="status" id="status">loading</span></div>
     <table>
       <thead id="table-head">
-        <tr><th>time</th><th>model</th><th>tools</th><th>input</th><th>cache hit</th><th>cache miss</th><th>output</th><th>ms</th><th>agent</th><th>session</th></tr>
+        <tr><th>time</th><th>model</th><th>tools</th><th>route</th><th>input</th><th>cache hit</th><th>cache miss</th><th>output</th><th>ms</th><th>agent</th><th>session</th></tr>
       </thead>
-      <tbody id="rows"><tr><td colspan="10" class="empty">no requests yet</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="11" class="empty">no requests yet</td></tr></tbody>
     </table>
   </section>
 </div>
@@ -97,6 +97,12 @@ const usd = (n) => '$' + Number(n || 0).toFixed(Number(n || 0) >= 1 ? 2 : 4);
 const pct = (n) => Number.isFinite(n) ? n.toFixed(1) + '%' : '--';
 function uptime(s) { s = Number(s || 0); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60); return (h ? h + 'h ' : '') + (m ? m + 'm ' : '') + sec + 's'; }
 function shortModel(m) { m = (m || '').trim(); const idx = m.lastIndexOf('/'); return idx >= 0 ? m.substring(idx + 1) : m; }
+function routeLabel(r) {
+  const route = (r.route || '').trim();
+  const reason = (r.decision_reason || '').trim();
+  if (reason && reason !== 'routed') return (route || 'passthrough') + ' / ' + reason;
+  return route || r.tier || '--';
+}
 function agentKey(agent) {
   const a = (agent || '').trim();
   if (!a) return 'unknown';
@@ -177,6 +183,7 @@ function apply(data) {
       '<td>' + new Date(Number(x.ts || 0) * 1000).toLocaleTimeString() + '</td>' +
       '<td class="truncate">' + esc(shortModel(x.model) || '--') + '</td>' +
       '<td class="truncate">' + esc((x.tool_names || []).join(', ') || '--') + '</td>' +
+      '<td class="truncate">' + esc(routeLabel(x)) + '</td>' +
       '<td>' + num(x.input_tokens || 0) + '</td>' +
       '<td>' + num(x.cache_read_tokens || 0) + '</td>' +
       '<td>' + num(cacheMiss) + '</td>' +
@@ -185,7 +192,7 @@ function apply(data) {
       '<td class="truncate">' + esc(agentKey(x.agent) || '--') + '</td>' +
       '<td class="truncate">' + esc((x.session_id || '--').substring(0, 12)) + '</td>' +
     '</tr>';
-  }).join('') : '<tr><td colspan="10" class="empty">no requests yet</td></tr>';
+  }).join('') : '<tr><td colspan="11" class="empty">no requests yet</td></tr>';
   $('status').textContent = 'live \u00B7 refreshed ' + new Date().toLocaleTimeString();
 }
 async function refresh() {

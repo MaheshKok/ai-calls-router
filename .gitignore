@@ -13,3 +13,4 @@ htmlcov/
 .serena/
 .idea/
 .DS_Store
+.codebase-memory/
