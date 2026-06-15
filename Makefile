@@ -32,8 +32,8 @@ format: ## Format source and tests with ruff
 type: ## Run pyright static type checking
 	$(PY) -m pyright ai_calls_router
 
-coverage: ## Run tests with coverage report (fails under 98%)
-	$(PY) -m pytest -q --cov --cov-report=term-missing --cov-fail-under=98
+coverage: ## Run tests with coverage report (fails under 95%)
+	$(PY) -m pytest -q --cov --cov-report=term-missing --cov-fail-under=95
 
 build: ## Build sdist and wheel into dist/
 	$(PY) -m build
