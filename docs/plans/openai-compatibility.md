@@ -156,8 +156,16 @@ New:
   `_lib/conversion.py` focused on the existing LiteLLM direction.
 - `ai_calls_router/routing/synthesis_openai.py` — OpenAI chat + Responses SSE
   renderers (Phase 3/4).
+- `ai_calls_router/routing/provider_config.py` — assemble the per-provider YAML
+  files into the canonical `agents:` routes dict + identity resolution (Phase 7).
+- `ai_calls_router/ops/bootstrap.py` — materialize missing per-provider YAMLs from
+  `agent_defaults.py` before serving; idempotent (Phase 7).
+- Per-provider config templates on disk under `~/.ai-calls-router/config/`:
+  `claude-code.yaml`, `codex.yaml`, `hermes.yaml` (Phase 7; written by bootstrap,
+  not committed source).
 - Tests: `tests/unit/test_agent_defaults.py`, `tests/unit/test_adapters_*.py`,
   `tests/unit/test_openai_inbound.py`, `tests/unit/test_synthesis_openai.py`,
+  `tests/unit/test_provider_config.py`, `tests/unit/test_bootstrap.py` (Phase 7),
   plus integration cases in `tests/` mirroring `test_routed_call.py`.
 
 Changed:
@@ -170,7 +178,14 @@ Changed:
 - `ai_calls_router/ops/wizard.py` — emit `agents:` sections from
   `agent_defaults.py` instead of the hardcoded `DEFAULT_TOOLS`/`PREMIUM_TOOLS`.
 - `config.example.yaml` — replace flat `tools:`/`premium_tools:` with `agents:`.
-- `docs/` / `README` — document the new endpoints and config.
+- `ai_calls_router/_lib/config.py` — add `provider_config_dir()`,
+  `provider_config_path(group)`, `KNOWN_GROUPS` (Phase 7).
+- `ai_calls_router/proxy/server.py` — call `bootstrap.ensure_provider_configs()` in
+  `_lifespan` before serving; load via `provider_config.assemble_routes()`; resolve
+  the agent group per request and fail closed on unattributable identity (Phase 7).
+- `ai_calls_router/ops/wizard.py` — `acr init` also runs bootstrap and seeds the
+  global `router:` block (Phase 7).
+- `docs/` / `README` — document the new endpoints, config, and per-provider layout.
 
 ---
 
@@ -182,7 +197,13 @@ Changed:
 (`:41`) is one flat list; `server.upstream` (`:15`) is the single passthrough
 target.
 
-### After (per agent group)
+### After (per agent group — logical schema)
+
+This `agents:` block is the **in-memory canonical shape** the decision core
+consumes (`routes["agents"][group]`). Phase 2 ships it as one block in one
+`config.yaml`; Phase 7 repackages the same shape onto three per-provider files on
+disk and merges them back into this identical dict (see §4.1 and Phase 7). The
+decision core is indifferent to which packaging produced the dict.
 
 ```yaml
 agents:
@@ -260,6 +281,78 @@ top-level `tools:`, `settings.premium_tools`, and `server.upstream`. Existing
 configs must keep working with zero edits. Add a test that an old flat config
 routes identically before and after this change.
 
+### 4.1 On-disk layout (Phase 7 — provider-specific YAML files)
+
+Phase 7 splits the `agents:` block onto one self-contained file per provider
+family, keeping the cheap side global. The decision core still consumes the §4
+canonical dict; only the *source on disk* changes.
+
+```
+~/.ai-calls-router/
+  config.yaml            # global: server:, settings:, tiers:, router:  (cheap side + identity policy)
+  config/
+    claude-code.yaml     # agents.claude_code payload only
+    codex.yaml           # agents.codex payload only
+    hermes.yaml          # agents.hermes payload only
+```
+
+Three packaging modes coexist and all converge to one canonical dict (KISS/DRY —
+no fork of the decision core):
+
+- (a) **legacy flat single file** → Phase 2 compat shim → one `claude_code` group;
+- (b) **single file with an `agents:` block** → Phase 2 schema verbatim;
+- (c) **three per-provider files + `router:` map** → Phase 7, the target layout.
+
+`provider_config.assemble_routes()` (Phase 7) reads whichever mode is present and
+returns the identical `{"server", "settings", "tiers", "agents"}` dict.
+
+Hard rules for the per-provider files (enforced by bootstrap validation):
+
+- **The cheap-provider credential lives only in global `tiers.*.key_env`.** A
+  per-provider file MUST NOT carry a cheap `key_env` (invariants 2 and 5). This
+  keeps the DeepSeek key single-sourced and unreachable from the premium side.
+- Each per-provider file owns its **premium side only**: `upstream`, `auth`,
+  `wire`, model defaults, `tools`, `premium_tools`, `tool_choice`, `reasoning`,
+  `fallback`.
+- `auth` names a credential *source*, never a secret:
+  `auth: { mode: oauth_passthrough }` (forward the client's own Authorization
+  header verbatim — the default; invariant 2) or
+  `auth: { mode: api_key_env, key_env: SOME_ENV }` (names an env var only).
+
+Per-provider file schema (`claude-code.yaml` shown):
+
+```yaml
+group: claude_code
+upstream: https://api.anthropic.com
+auth: { mode: oauth_passthrough }     # forward client credential verbatim; never store a secret
+wire: anthropic_messages              # anthropic_messages | openai_chat | openai_responses
+endpoints: [/v1/messages]             # endpoints this family may arrive on
+model_defaults: {}                    # optional premium model hints (passthrough is verbatim; informational)
+tool_choice: passthrough              # provider tool-choice policy (informational in v1)
+reasoning: strip                      # strip | preserve — codex/hermes-codex strip Reasoning items (invariant 4)
+tools:                                # == agents.claude_code.tools (§4); seeded from agent_defaults
+  Bash: fast
+  Read: code
+  # ...full map from agent_defaults.AGENT_DEFAULT_TOOLS["claude_code"]
+premium_tools: [Edit, Write, MultiEdit, NotebookEdit, Task, ExitPlanMode, AskUserQuestion]
+fallback: passthrough                 # per-family serving fallback when not cheap-routed
+```
+
+Router map (global `config.yaml` `router:` block) — drives §5 resolution:
+
+```yaml
+router:
+  endpoint_defaults:
+    /v1/messages: claude_code
+    /v1/chat/completions: hermes
+    /v1/responses: codex
+  user_agent_map:                     # desktop-shim identity -> family (CLI and desktop share one group)
+    - { contains: claude,  group: claude_code }
+    - { contains: codex,   group: codex }
+    - { contains: hermes,  group: hermes }
+  fallback: null                      # null => fail closed on ambiguity; a group name => explicit passthrough policy
+```
+
 ---
 
 ## 5. Agent group vs adapter (important distinction)
@@ -267,10 +360,21 @@ routes identically before and after this change.
 - **Adapter** = wire-format handler, chosen by **endpoint**. Converts request and
   response shapes. One adapter per format.
 - **Agent group** = identity used to pick the tool map / premium list / upstream.
-  Resolved by `resolve_agent_group(default_for_endpoint, headers)`:
+  Resolved by `resolve_agent_group(*, path, headers, routes)` in precedence order
+  (Phase 7 finalizes this against the `router:` block, §4.1):
   1. `x-acr-agent` request header if present and valid (`codex|claude_code|hermes`).
-  2. else the endpoint default (`/v1/messages`→`claude_code`,
+  2. else `router.user_agent_map` — first `contains`-match against the inbound
+     `User-Agent` (the desktop-shim signal: CLI and desktop of one family share
+     one group, so this maps the shim's UA onto the family, never to a new group).
+  3. else `router.endpoint_defaults[path]` (`/v1/messages`→`claude_code`,
      `/v1/chat/completions`→`hermes`, `/v1/responses`→`codex`).
+  4. else `router.fallback` if set (an explicit operator opt-in to passthrough for
+     a named group); else **fail closed** — return `None`, and the handler rejects
+     with `400` rather than guess an upstream (invariant 2: forwarding the client's
+     own credential to a guessed upstream risks a cross-provider leak). Fail-closed
+     is an *attribution-layer* decision and does not violate invariant 1 (fail
+     open), which governs the *serving* layer: once a group resolves, any later
+     error still falls back to that group's passthrough. See Phase 7.
 
 They are NOT 1:1 — the override is load-bearing, because Hermes is multi-wire
 (Phase 0). A Hermes session can arrive on ANY of the three endpoints depending on
@@ -431,6 +535,13 @@ decisions, savings, or SSE bytes for the Anthropic path. Immutability:
 
 **Objective.** Move tool defaults out of `wizard.py` into a data module, add the
 `agents:` schema, make the decision read per-agent maps, keep old configs working.
+
+> **Canonical-merge contract (load-bearing for Phase 7).** The `agents:` block
+> defined here is the single in-memory canonical shape `routes["agents"][group]`.
+> Phase 7 changes only *where the bytes live on disk* (three per-provider files +
+> a `router:` map), then merges them back into a dict byte-equivalent to this one
+> before `decide`/`engine` see it. Do not bake "one file" assumptions into the
+> decision core — read only from `routes["agents"][group]`, never from a file path.
 
 **Preconditions.** Phase 1 merged. Phase 0 Hermes/Codex tool maps available (for
 seeding defaults; can stub if Phase 0 still running, but real maps required before
@@ -706,6 +817,10 @@ release blocker, not a warning.
 | 4 | Wrong per-agent premium-tool mapping | Escalation guard misfires; cheap model performs premium action | Per-agent `premium_tools`; escalation tests per group (Phase 2) |
 | 5 | Argument JSON round-trip reorders keys/normalizes floats | Cache misses | Preserve key order; do not reformat; test |
 | 6 | Flat-config users regress | Existing deployments break | Mandatory compat shim + regression test (Phase 2) |
+| 7 | A cheap-tier `key_env` leaks into a per-provider file | Cheap key reachable from premium side; breaks single-sourcing | Bootstrap/load validation rejects any cheap `key_env` in a per-provider file; cheap creds live only in global `tiers.*.key_env` (invariants 2, 5; Phase 7) |
+| 8 | Ambiguous caller identity mis-routes to the wrong upstream | Client credential forwarded to a guessed provider → cross-provider leak | Fail closed: unresolved identity → `400`, never a guessed upstream, unless `router.fallback` is explicitly set (Phase 7) |
+| 9 | Bootstrap overwrites an operator's edited per-provider file | Silent loss of hand-tuned config | Bootstrap is create-if-absent only; never rewrites an existing file; idempotent; test asserts an existing file is untouched (Phase 7) |
+| 10 | Partial config (some per-provider files present, some missing) | Routing silently degrades for the missing family | Bootstrap materializes the full known set before serving; `assemble_routes` errors if a resolvable group has no file and no compat source (Phase 7) |
 
 ---
 
@@ -729,62 +844,208 @@ release blocker, not a warning.
   plan): whether `reduce.reduce_text(drop_duplicate_lines=True)` should be enabled
   per tier/tool. Default ships OFF. Decide separately; not required for any phase
   here.
+- **D5. On-disk config layout** — DECIDED (Phase 7): three per-provider files
+  (`config/{claude-code,codex,hermes}.yaml`) plus a global `config.yaml`
+  (`server`/`settings`/`tiers`/`router`) are the target layout. The single-file
+  `agents:` block (Phase 2) and the legacy flat file are both retained as
+  compat-only load modes; all three converge to one canonical `agents:` dict via
+  `provider_config.assemble_routes()`. Rationale: per-family isolation and
+  ownership (R5) without forking the decision core (KISS/DRY). Cheap-tier creds
+  stay single-sourced in global `tiers:`; per-provider files carry the premium
+  side only.
+- **D6. Fail-closed vs invariant 1** — DECIDED (Phase 7): fail-OPEN remains the
+  serving-layer rule (a resolved group's turn never breaks; errors fall back to
+  that group's passthrough). Fail-CLOSED applies only at the attribution layer:
+  an unresolved/ambiguous identity returns `400` rather than forward the client's
+  credential to a guessed upstream (invariant 2). `router.fallback: <group>` is
+  the explicit operator opt-out back into passthrough. The two rules do not
+  conflict because they govern different layers.
 
 
-## Phase X: Provider-specific YAML routing
+## Phase 7 — Provider-specific YAML routing (drafted as "Phase X")
 
-### Objective
-Make provider identity a first-class routing dimension so Claude Code CLI/Desktop, Codex CLI/Desktop, and Hermes CLI/Desktop each resolve through their own YAML configuration file, with explicit routing rules and isolated defaults.
+**Objective.** Make provider identity a first-class routing dimension: Claude Code,
+Codex, and Hermes (CLI and desktop of each share one group, R5) each resolve
+through their own on-disk YAML file with isolated premium-side settings, driven by
+an explicit `router:` map, while the cheap-routing decision core stays byte-for-byte
+unchanged. This is the on-disk repackaging of the Phase 2 `agents:` canonical shape
+(§4.1) — not a second decision engine.
 
-### Tasks
-1. Add one YAML per provider family:
-   - `config/claude-code.yaml`
-   - `config/codex.yaml`
-   - `config/hermes.yaml`
+**Relationship to Phase 2 (read before coding).** Phase 2 defined the canonical
+in-memory shape `routes["agents"][group]` and a flat-config compat shim. Phase 7
+adds a third load mode that assembles three per-provider files into that *same*
+dict. After assembly, `decide.tier_for_tools`, `engine.escalates`, `routed_call`,
+and `_serve_passthrough` are untouched. If Phase 7 requires any change to the
+decision core, the design is wrong — stop and reconcile against §4.
 
-2. Define explicit provider routing rules:
-   - Claude Code CLI / Claude Desktop -> `config/claude-code.yaml`
-   - Codex CLI / Codex Desktop -> `config/codex.yaml`
-   - Hermes CLI / Hermes Desktop -> `config/hermes.yaml`
+**Fail-closed vs invariant 1 (decision, D6).** Fail-OPEN stays at the serving
+layer: once a group resolves, every downstream error falls back to *that group's*
+passthrough (invariant 1 intact). Fail-CLOSED applies only to identity
+attribution: a request whose group cannot be resolved (no header, no UA match, no
+endpoint default, no `router.fallback`) is rejected `400` rather than forwarded to
+a guessed upstream — because forwarding the client's own premium credential to the
+wrong provider is a credential leak (invariant 2). The two never fire on the same
+condition.
 
-3. Keep provider-local settings isolated in each YAML:
-   - upstream base URL
-   - auth mode and credential source
-   - transport / wire format
-   - model defaults
-   - tool-choice policy
-   - reasoning preservation policy
-   - fallback / passthrough behavior
+**Preconditions.** Phases 1–5 merged (adapters, per-agent `agents:` schema +
+compat shim, per-agent passthrough upstream). Phase 7 is the last structural phase
+before Phase 6 docs.
 
-4. Add a top-level router map that resolves:
-   - client family
-   - request shape / endpoint
-   - desktop shim identity
-   - to the correct provider YAML
+### On-disk layout (target)
 
-5. Add bootstrap behavior for missing files:
-   - create provider YAMLs when absent
-   - initialize them before routing proceeds
-   - keep setup idempotent
+```
+~/.ai-calls-router/
+  config.yaml            # server:, settings:, tiers:, router:   (cheap side + identity policy)
+  config/
+    claude-code.yaml     # agents.claude_code payload (premium side only)
+    codex.yaml           # agents.codex payload
+    hermes.yaml          # agents.hermes payload
+```
 
-6. Update documentation:
-   - document the provider-to-YAML mapping
-   - document routing precedence rules
-   - document ambiguous / unknown caller handling
-   - document how Claude Code, Codex, and Hermes differ in ownership of config and endpoints
+Per-provider file schema and `router:` block schema: see §4.1. Hard rule
+(invariants 2, 5): a per-provider file carries the **premium side only** and MUST
+NOT contain a cheap-tier `key_env`; the cheap credential lives only in global
+`tiers.*.key_env`. `auth:` names a credential *source* (`oauth_passthrough` |
+`api_key_env`), never a literal secret.
 
-### Acceptance Criteria
-- Claude Code requests resolve only to `config/claude-code.yaml`.
-- Codex requests resolve only to `config/codex.yaml`.
-- Hermes requests resolve only to `config/hermes.yaml`.
-- Provider-local settings are isolated and do not cross boundaries.
-- Unknown or ambiguous provider identity fails closed unless an explicit fallback policy is defined.
-- Bootstrap/init creates missing provider YAMLs before any routing work proceeds.
-- The plan clearly states provider routing behavior with no ambiguity for implementation.
+### Steps
 
-### Verification
-- Add tests that each provider family loads its own YAML.
-- Add tests that credentials and defaults do not leak across provider boundaries.
-- Add tests for ambiguous / unknown caller handling.
-- Add tests for bootstrap/init behavior when YAMLs are missing.
-- Add tests for routing precedence when multiple hints are present.
+1. **`ai_calls_router/_lib/config.py`** — add path resolvers and the known-group
+   set (no IO beyond path construction):
+   ```python
+   KNOWN_GROUPS: tuple[str, ...] = ("claude_code", "codex", "hermes")
+
+   def provider_config_dir() -> Path:
+       """Directory holding per-provider YAMLs ($ACR_HOME/config)."""
+       return home_dir() / "config"
+
+   def provider_config_path(group: str) -> Path:
+       """Path to one group's per-provider YAML (claude_code -> claude-code.yaml)."""
+       return provider_config_dir() / f"{group.replace('_', '-')}.yaml"
+   ```
+
+2. **`ai_calls_router/routing/provider_config.py`** (new; assembly + identity —
+   pure functions, fail-open on read like `decide.load_routes`):
+   ```python
+   def assemble_routes(*, base: dict[str, Any]) -> dict[str, Any]:
+       """Merge per-provider files into the canonical routes dict.
+
+       Reads each existing provider_config_path(group), validates it
+       (reject cheap key_env; require group/upstream/wire), and writes its
+       payload to base['agents'][group]. Falls back to base['agents'] /
+       the Phase 2 compat shim for any group without a file. Never mutates
+       base; returns a new dict. On any per-file error: log WARNING, skip
+       that file, keep serving (invariant 1)."""
+
+   def router_map(routes: dict[str, Any]) -> dict[str, Any]:
+       """Return routes['router'] with safe defaults (endpoint_defaults from §5,
+       empty user_agent_map, fallback=None)."""
+
+   def resolve_agent_group(
+       *, path: str, headers: Mapping[str, str], routes: dict[str, Any]
+   ) -> str | None:
+       """Resolve the agent group by §5 precedence:
+       x-acr-agent > user_agent_map contains-match > endpoint_defaults[path]
+       > router.fallback. Return None when nothing resolves (caller fails
+       closed). Validate header/result against KNOWN_GROUPS."""
+
+   def provider_upstream(routes: dict[str, Any], group: str) -> str:
+       """agents[group]['upstream'] (compat shim -> server.upstream)."""
+   ```
+   Validation helper rejects a per-provider file that carries any `key_env` under
+   a cheap tier or at top level (raises -> file skipped + WARNING; risk #7).
+
+3. **`ai_calls_router/ops/bootstrap.py`** (new; materialize-if-absent, idempotent):
+   ```python
+   def ensure_provider_configs(*, ask: Callable[[str], str] | None = None) -> list[Path]:
+       """Create any missing per-provider YAML from agent_defaults.py.
+
+       For each group in KNOWN_GROUPS whose provider_config_path is absent,
+       write a template (group, upstream, auth=oauth_passthrough, wire,
+       endpoints, tools from AGENT_DEFAULT_TOOLS[group], premium_tools from
+       AGENT_DEFAULT_PREMIUM_TOOLS[group], fallback=passthrough). NEVER
+       overwrite an existing file (risk #9). Returns the paths created
+       (empty list when all present)."""
+   ```
+   Templates derive entirely from `agent_defaults.py` (DRY) — no tool maps
+   duplicated here. Writes are create-only (`if not path.exists()`), so re-running
+   is a no-op.
+
+4. **`ai_calls_router/proxy/server.py`**:
+   - In `_lifespan` (`server.py:447`), before serving, call
+     `bootstrap.ensure_provider_configs()` so missing files are materialized once
+     at startup (risk #10).
+   - Replace the `routing.load_routes()` call sites that feed serving
+     (`_serve_passthrough` `server.py:113`, `_resolve_tier_config`
+     `server.py:182`) with `provider_config.assemble_routes(base=load_routes())`
+     so every handler sees the merged canonical dict. (Cache the assembled dict on
+     the same mtime key `load_routes` already uses; assembly is pure.)
+   - Per endpoint handler: resolve identity with
+     `resolve_agent_group(path=..., headers=request.headers, routes=routes)`.
+     On `None`, reject `400` (`{"error": "unresolved agent identity"}`) — do NOT
+     passthrough to a guessed upstream (invariant 2 / D6). Thread the resolved
+     `group` into `_try_route` and `_serve_passthrough` exactly as Phases 2/5
+     already do.
+
+5. **`ai_calls_router/ops/wizard.py`** — `acr init` also calls
+   `bootstrap.ensure_provider_configs()` and seeds the global `router:` block
+   (`endpoint_defaults` from §5, the three `user_agent_map` contains-rules, and
+   `fallback: null` = fail closed). The global `config.yaml` it writes keeps
+   `server`/`settings`/`tiers`; the per-provider `agents:` content now lives in the
+   `config/` files, not inline.
+
+6. **Docs** (folds into Phase 6): provider→YAML mapping, the `router:` precedence
+   rules (§5), ambiguous/unknown handling (`400` unless `router.fallback`), and how
+   the three families differ in config ownership and endpoints.
+
+### Constraints
+- **Decision core unchanged.** `assemble_routes` output must be a drop-in for
+  Phase 2's `routes` dict; no signature in `decide.py`/`engine.py` changes in this
+  phase.
+- **Invariants 2 + 5.** Per-provider files never carry a cheap key; validation
+  rejects them; `auth:` names a source, not a secret.
+- **Invariant 1 vs fail-closed (D6).** Read/assembly errors fail open (skip file,
+  keep serving). Only unresolved *identity* fails closed (`400`).
+- **Idempotent, non-destructive bootstrap.** Create-if-absent only; never rewrite
+  an edited file.
+- Immutability, no nested functions, Google docstrings, radon A/B as elsewhere.
+
+### Verification / done-when
+
+`tests/unit/test_provider_config.py` (spec-derived, adversarial):
+- `assemble_routes` merges three present files into
+  `routes["agents"][group]` for each group; result is byte-equivalent to a
+  hand-written single-file `agents:` block (proves the canonical-merge contract).
+- A per-provider file containing a cheap `key_env` is **rejected** (raises/skipped
+  + WARNING); the cheap key never appears in the assembled dict (risk #7).
+- A missing file for one group falls back to the compat shim / `agent_defaults`
+  without dropping the other groups (risk #10).
+- `resolve_agent_group` precedence: `x-acr-agent` wins over UA and endpoint;
+  UA `contains`-match wins over endpoint default; endpoint default applies when no
+  header/UA; **unresolved → `None`** when nothing matches and `fallback` unset;
+  `router.fallback` set → returns that group; invalid `x-acr-agent` value →
+  ignored, falls through (not honored).
+- `provider_upstream` returns the per-group upstream; compat shim →
+  `server.upstream`.
+- Immutability: `assemble_routes` does not mutate `base`.
+
+`tests/unit/test_bootstrap.py`:
+- All files absent → `ensure_provider_configs` creates exactly the KNOWN_GROUPS
+  set; each parses via `decide.load_routes` and assembles cleanly.
+- One file already present and edited → it is **left untouched** (byte-compare
+  before/after); only the missing ones are created (risk #9).
+- Second run is a no-op (returns `[]`).
+- Generated templates carry no cheap `key_env` and pass `provider_config`
+  validation (invariants 2, 5).
+
+Server-level (mirror existing handler tests):
+- A request with `x-acr-agent: codex` on `/v1/responses` resolves the `codex`
+  group; a Hermes UA on `/v1/chat/completions` resolves `hermes`.
+- A request that resolves no group (unknown UA, no header, no endpoint default,
+  `fallback: null`) returns `400` and forwards no credential upstream (assert the
+  client header never reaches any upstream — invariant 2 / risk #8).
+- A resolved-but-premium turn still passes through to that group's own upstream
+  (Phase 5 behavior unchanged).
+
+`make test`/`lint`/`type` clean; coverage ≥ 98%; byte-stability suite (§7) still
+green (assembly must not perturb the routed-body prefix).
