@@ -20,7 +20,7 @@ import os
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from starlette.applications import Starlette
@@ -33,7 +33,10 @@ from ai_calls_router.accounting import metrics, savings
 from ai_calls_router.proxy import passthrough
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
-from ai_calls_router.routing import synthesis
+from ai_calls_router.routing.adapters import adapter_for_path, resolve_agent_group
+
+if TYPE_CHECKING:
+    from ai_calls_router.routing.adapters.base import ClientAdapter
 
 logger = logging.getLogger("acr.server")
 
@@ -250,6 +253,8 @@ def _routed_fallback_attempt(
 async def _try_route(
     body_bytes: bytes,
     *,
+    adapter: ClientAdapter,
+    group: str,
     user_agent: str = "",
     agent: str = "",
     session: str | None = None,
@@ -261,6 +266,8 @@ async def _try_route(
     routing never breaks a turn).
 
     Args:
+        adapter: Client adapter for the request path.
+        group: Agent group to use for routing.
         body_bytes: Raw request body bytes.
         user_agent: Raw User-Agent header from the client.
         agent: Identified agent label.
@@ -273,8 +280,9 @@ async def _try_route(
         body = json.loads(body_bytes)
         if not isinstance(body, dict):
             return _RouteAttempt(reason="non_object_body")
-        requested_model = str(body.get("model") or "")
-        names = routing.pending_tool_names(body)
+        anthropic_body = adapter.to_anthropic_request(body)
+        requested_model = str(anthropic_body.get("model") or "")
+        names = adapter.extract_pending_tools(body)
         if not names:
             logger.debug("no pending tool results; passing through")
             return _RouteAttempt(reason="no_pending_tools", model=requested_model)
@@ -298,14 +306,14 @@ async def _try_route(
             response_guard_tools.extend(tool_names)
 
         result = await routed_call.routed_call(
-            body=body,
+            body=anthropic_body,
             tier_name=tier,
             tier_cfg=tier_cfg,
             api_key=api_key,
             settings=settings_cfg,
             tool_names=names,
             user_agent=user_agent,
-            agent=agent,
+            agent=group,
             session_id=session or "",
             on_premium_guard=_mark_response_guard,
         )
@@ -316,10 +324,11 @@ async def _try_route(
                 names=names,
                 tier=tier,
             )
-        if body.get("stream"):
+        client_body = adapter.to_client_response(result.body)
+        if anthropic_body.get("stream"):
             return _RouteAttempt(
                 response=Response(
-                    synthesis.synthesize_sse(result.body),
+                    b"".join(adapter.to_client_sse(result.body)),
                     media_type="text/event-stream",
                 ),
                 tier=tier,
@@ -328,7 +337,7 @@ async def _try_route(
                 tool_names=names,
             )
         return _RouteAttempt(
-            response=JSONResponse(result.body),
+            response=JSONResponse(client_body),
             tier=tier,
             reason="routed",
             model=requested_model,
@@ -374,8 +383,14 @@ async def _handle_messages(request: Request) -> Response:
     m = metrics.get_metrics()
     m.incr_total()
 
+    adapter = adapter_for_path(request.url.path)
+    if adapter is None:
+        return await _serve_passthrough(request, body_bytes)
+    group = resolve_agent_group(adapter.default_agent_group, request.headers)
     attempt = await _try_route(
         body_bytes,
+        adapter=adapter,
+        group=group,
         user_agent=_user_agent(request),
         agent=agent,
         session=session,

@@ -24,6 +24,7 @@ from ai_calls_router.accounting import metrics as metrics_mod
 from ai_calls_router.proxy.server import create_app
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as rc
+from ai_calls_router.routing import synthesis
 
 CONFIG_YAML = """
 server:
@@ -288,6 +289,7 @@ class TestMessagesRouted:
         response = client.post("/v1/messages", json=_tool_result_body(stream=True))
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
+        assert response.content == synthesis.synthesize_sse(ROUTED_BODY)
         assert "event: message_start" in response.text
         assert "event: message_stop" in response.text
         assert "routed answer" in response.text
