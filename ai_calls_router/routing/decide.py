@@ -25,11 +25,13 @@ from typing import Any
 import yaml
 
 from ai_calls_router._lib import config
+from ai_calls_router.routing.agent_defaults import AGENT_DEFAULT_PREMIUM_TOOLS, AGENT_DEFAULT_TOOLS
 
 logger = logging.getLogger("acr.routing")
 
 _cache_lock = threading.Lock()
 _cache: dict[Path, tuple[float, dict[str, Any]]] = {}
+_DEFAULT_AGENT_GROUP = "claude_code"
 
 
 def load_routes(path: Path | None = None) -> dict[str, Any]:
@@ -60,6 +62,108 @@ def load_routes(path: Path | None = None) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("acr: config load failed (%s); routing disabled", exc, exc_info=True)
         return {}
+
+
+def with_agent_compat(routes: dict[str, Any]) -> dict[str, Any]:
+    """Return routes with a legacy flat config exposed as agents.claude_code.
+
+    Args:
+        routes: Parsed config.yaml mapping.
+
+    Returns:
+        The original mapping when agents: already exists; otherwise a shallow
+        copy with agents.claude_code synthesized from legacy top-level fields.
+    """
+    if "agents" in routes:
+        return routes
+    settings = routes.get("settings")
+    settings_cfg = settings if isinstance(settings, dict) else {}
+    server = routes.get("server")
+    server_cfg = server if isinstance(server, dict) else {}
+    premium = routes.get("premium")
+    premium_cfg = premium if isinstance(premium, dict) else {"provider": "anthropic"}
+    tools = routes.get("tools")
+    tools_cfg = tools if isinstance(tools, dict) else AGENT_DEFAULT_TOOLS[_DEFAULT_AGENT_GROUP]
+    premium_tools = settings_cfg.get("premium_tools")
+    premium_tool_cfg = (
+        premium_tools
+        if isinstance(premium_tools, list)
+        else AGENT_DEFAULT_PREMIUM_TOOLS[_DEFAULT_AGENT_GROUP]
+    )
+    return {
+        **routes,
+        "agents": {
+            _DEFAULT_AGENT_GROUP: {
+                "tools": dict(tools_cfg),
+                "premium_tools": list(premium_tool_cfg),
+                "upstream": server_cfg.get("upstream", config.DEFAULT_UPSTREAM),
+                "premium": dict(premium_cfg),
+            }
+        },
+    }
+
+
+def _default_agent_group(group: str) -> str:
+    """Return a known agent group, defaulting to Claude Code."""
+    if group in AGENT_DEFAULT_TOOLS:
+        return group
+    return _DEFAULT_AGENT_GROUP
+
+
+def _agent_config(routes: dict[str, Any], group: str) -> dict[str, Any]:
+    """Return the agent config mapping for group, or an empty mapping."""
+    compat_routes = with_agent_compat(routes)
+    agents = compat_routes.get("agents")
+    if not isinstance(agents, dict):
+        return {}
+    cfg = agents.get(group)
+    if isinstance(cfg, dict):
+        return cfg
+    return {}
+
+
+def agent_tools(routes: dict[str, Any], group: str) -> dict[str, str]:
+    """Resolve the tool map for one agent group, falling back to defaults.
+
+    Args:
+        routes: Parsed config.yaml mapping.
+        group: Agent group name.
+
+    Returns:
+        A new tool-to-tier mapping. Malformed or missing config falls back to
+        the group's built-in defaults, preserving fail-open serving behavior.
+    """
+    try:
+        tools = _agent_config(routes, group).get("tools")
+        if isinstance(tools, dict) and all(
+            isinstance(name, str) and isinstance(tier, str) for name, tier in tools.items()
+        ):
+            return dict(tools)
+    except Exception as exc:
+        logger.warning("acr: agent tools lookup failed (%s); using defaults", exc, exc_info=True)
+    return dict(AGENT_DEFAULT_TOOLS[_default_agent_group(group)])
+
+
+def agent_premium_tools(routes: dict[str, Any], group: str) -> list[str]:
+    """Resolve the premium response-guard tools for one agent group.
+
+    Args:
+        routes: Parsed config.yaml mapping.
+        group: Agent group name.
+
+    Returns:
+        A new list of premium tool names, falling back to group defaults on
+        missing or malformed config.
+    """
+    try:
+        tools = _agent_config(routes, group).get("premium_tools")
+        if isinstance(tools, list) and all(isinstance(tool, str) for tool in tools):
+            return list(tools)
+    except Exception as exc:
+        logger.warning(
+            "acr: agent premium tools lookup failed (%s); using defaults", exc, exc_info=True
+        )
+    return list(AGENT_DEFAULT_PREMIUM_TOOLS[_default_agent_group(group)])
 
 
 def _premium_aliases(settings: dict[str, Any]) -> dict[str, str]:
@@ -213,7 +317,7 @@ def lookup_tool(
     return None
 
 
-def tier_for_tools(names: list[str], routes: dict[str, Any]) -> str:
+def tier_for_tools(names: list[str], routes: dict[str, Any], *, group: str) -> str:
     """Pick the serving tier for a batch of pending tools.
 
     Unknown tools resolve to premium; mixed batches resolve to the highest
@@ -222,11 +326,12 @@ def tier_for_tools(names: list[str], routes: dict[str, Any]) -> str:
     Args:
         names: Pending tool names (output of pending_tool_names).
         routes: Parsed config.yaml.
+        group: Agent group to use for tool-to-tier lookup.
 
     Returns:
         Tier name ("premium" means passthrough).
     """
-    tools_map = routes.get("tools") or {}
+    tools_map = agent_tools(routes, group)
     settings = routes.get("settings") or {}
     precedence = settings.get("tier_precedence", ["premium", "structured", "code", "fast", "crud"])
 

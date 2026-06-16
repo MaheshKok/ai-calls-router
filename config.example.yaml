@@ -28,11 +28,8 @@ settings:
   # Highest-to-lowest tier ranking. When one turn carries tool results from
   # several tiers, the highest-ranked tier serves it; "premium" always wins
   # and forces passthrough.
-  tier_precedence: [premium, code, fast, crud]
+  tier_precedence: [premium, structured, code, fast, crud]
 
-  # Tools whose appearance in a routed response means the cheap model is trying
-  # to take a premium action. The turn is escalated back to passthrough.
-  premium_tools: [Edit, Write, MultiEdit, NotebookEdit, Task, ExitPlanMode, AskUserQuestion]
   escalate_on_premium_tools: true   # false disables the guard (routed responses are served as-is)
 
   # Run routed messages through headroom on the LiteLLM (non-direct) path only.
@@ -69,6 +66,13 @@ tiers:
     input_cost_per_1m: 0.14            # cache miss -- placeholder, verify
     input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
     output_cost_per_1m: 0.28           # placeholder, verify
+  structured:
+    model: deepseek/deepseek-v4-flash
+    key_env: DEEPSEEK_API_KEY
+    max_tokens: 8192
+    input_cost_per_1m: 0.14            # cache miss -- placeholder, verify
+    input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
+    output_cost_per_1m: 0.28           # placeholder, verify
   code:
     model: deepseek/deepseek-v4-pro
     key_env: DEEPSEEK_API_KEY
@@ -84,25 +88,72 @@ tiers:
     input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
     output_cost_per_1m: 0.28           # placeholder, verify
 
-# Tool -> tier mapping. Exact names match first, then trailing-`*` globs.
-# Any tool not listed here (and any unresolvable tool) routes to premium.
-tools:
-  Bash: fast
-  BashOutput: fast
-  KillShell: fast
-  WebFetch: fast
-  WebSearch: fast
-  Read: code
-  Grep: code
-  Glob: code
-  LSP: code
-  TodoWrite: crud
-  TaskList: crud
-  TaskGet: crud
-  Edit: premium
-  Write: premium
-  MultiEdit: premium
-  NotebookEdit: premium
-  Task: premium
-  ExitPlanMode: premium
-  AskUserQuestion: premium
+# Per-agent tool -> tier mapping. Exact names match first, then trailing-`*`
+# globs. Any tool not listed here (and any unresolvable tool) routes to premium.
+agents:
+  claude_code:
+    upstream: https://api.anthropic.com
+    premium:
+      provider: anthropic
+    premium_tools: [Edit, Write, MultiEdit, NotebookEdit, Task, ExitPlanMode, AskUserQuestion]
+    tools:
+      Bash: fast
+      BashOutput: fast
+      KillShell: fast
+      WebFetch: fast
+      WebSearch: fast
+      Read: code
+      Grep: code
+      Glob: code
+      LSP: code
+      TodoWrite: crud
+      TaskList: crud
+      TaskGet: crud
+      Edit: premium
+      Write: premium
+      MultiEdit: premium
+      NotebookEdit: premium
+      Task: premium
+      ExitPlanMode: premium
+      AskUserQuestion: premium
+  hermes:
+    upstream: https://api.anthropic.com
+    premium:
+      provider: anthropic
+    premium_tools: [patch, clarify, delegate_task]
+    tools:
+      terminal: fast
+      process: fast
+      read_file: code
+      search_files: code
+      execute_code: code
+      skill_view: code
+      todo: crud
+      memory: crud
+      session_search: crud
+      skills_list: crud
+      write_file: structured
+      skill_manage: structured
+      cronjob: structured
+      patch: premium
+      clarify: premium
+      delegate_task: premium
+      browser_vision: premium
+      browser_*: premium
+  codex:
+    upstream: https://api.anthropic.com
+    premium:
+      provider: anthropic
+    premium_tools: [apply_patch, spawn_agent, request_user_input, request_plugin_install]
+    tools:
+      exec_command: fast
+      local_shell: fast
+      shell: fast
+      shell_command: fast
+      write_stdin: fast
+      update_plan: crud
+      get_context_remaining: crud
+      apply_patch: premium
+      spawn_agent: premium
+      request_user_input: premium
+      request_plugin_install: premium

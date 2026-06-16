@@ -17,6 +17,10 @@ from typing import Any
 import pytest
 
 from ai_calls_router.routing import decide as routing
+from ai_calls_router.routing.agent_defaults import (
+    AGENT_DEFAULT_PREMIUM_TOOLS,
+    AGENT_DEFAULT_TOOLS,
+)
 
 
 def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, Any]:
@@ -39,6 +43,13 @@ def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, Any]:
             {"role": "user", "content": user_blocks},
         ]
     }
+
+
+class _ExplodingRoutes(dict[str, Any]):
+    """Routes mapping that raises during lookup to exercise fail-open fallbacks."""
+
+    def get(self, key: str, default: Any = None) -> Any:
+        raise RuntimeError(f"boom: {key}")
 
 
 class TestLoadRoutes:
@@ -153,38 +164,109 @@ class TestLookupTool:
 class TestTierForTools:
     ROUTES: dict[str, Any] = {
         "settings": {"tier_precedence": ["premium", "structured", "code", "fast", "crud"]},
-        "tools": {"Bash": "fast", "Read": "code", "TodoWrite": "crud", "Edit": "premium"},
+        "agents": {
+            "claude_code": {
+                "tools": {"Bash": "fast", "Read": "code", "TodoWrite": "crud", "Edit": "premium"},
+                "premium_tools": ["Edit"],
+            },
+            "codex": {
+                "tools": {
+                    "exec_command": "fast",
+                    "update_plan": "crud",
+                    "apply_patch": "premium",
+                },
+                "premium_tools": ["apply_patch"],
+            },
+        },
     }
 
     def test_empty_batch_is_premium(self) -> None:
-        assert routing.tier_for_tools([], self.ROUTES) == "premium"
+        assert routing.tier_for_tools([], self.ROUTES, group="claude_code") == "premium"
 
     def test_unknown_tool_is_premium(self) -> None:
-        assert routing.tier_for_tools(["Mystery"], self.ROUTES) == "premium"
+        assert routing.tier_for_tools(["Mystery"], self.ROUTES, group="claude_code") == "premium"
 
     def test_explicit_premium_mapping_is_premium(self) -> None:
-        assert routing.tier_for_tools(["Edit"], self.ROUTES) == "premium"
+        assert routing.tier_for_tools(["Edit"], self.ROUTES, group="claude_code") == "premium"
 
     def test_single_mapped_tool_returns_its_tier(self) -> None:
-        assert routing.tier_for_tools(["Bash"], self.ROUTES) == "fast"
+        assert routing.tier_for_tools(["Bash"], self.ROUTES, group="claude_code") == "fast"
 
     def test_mixed_batch_resolves_by_precedence(self) -> None:
-        assert routing.tier_for_tools(["Bash", "Read"], self.ROUTES) == "code"
-        assert routing.tier_for_tools(["TodoWrite", "Bash"], self.ROUTES) == "fast"
+        assert routing.tier_for_tools(["Bash", "Read"], self.ROUTES, group="claude_code") == "code"
+        assert (
+            routing.tier_for_tools(["TodoWrite", "Bash"], self.ROUTES, group="claude_code")
+            == "fast"
+        )
 
     def test_premium_in_batch_overrides_everything(self) -> None:
-        assert routing.tier_for_tools(["Bash", "Edit"], self.ROUTES) == "premium"
+        assert (
+            routing.tier_for_tools(["Bash", "Edit"], self.ROUTES, group="claude_code") == "premium"
+        )
 
     def test_tier_absent_from_precedence_is_premium(self) -> None:
         routes = {
             "settings": {"tier_precedence": ["premium", "fast"]},
-            "tools": {"X": "exotic"},
+            "agents": {"claude_code": {"tools": {"X": "exotic"}}},
         }
-        assert routing.tier_for_tools(["X"], routes) == "premium"
+        assert routing.tier_for_tools(["X"], routes, group="claude_code") == "premium"
 
     def test_default_precedence_when_settings_missing(self) -> None:
-        routes = {"tools": {"Bash": "fast"}}
-        assert routing.tier_for_tools(["Bash"], routes) == "fast"
+        routes = {"agents": {"claude_code": {"tools": {"Bash": "fast"}}}}
+        assert routing.tier_for_tools(["Bash"], routes, group="claude_code") == "fast"
+
+    def test_codex_group_resolves_codex_tool_names(self) -> None:
+        assert routing.tier_for_tools(["exec_command"], self.ROUTES, group="codex") == "fast"
+        assert routing.tier_for_tools(["update_plan"], self.ROUTES, group="codex") == "crud"
+
+    def test_claude_code_group_matches_default_behavior(self) -> None:
+        routes = {"agents": {"claude_code": {"tools": AGENT_DEFAULT_TOOLS["claude_code"]}}}
+        assert routing.tier_for_tools(["Bash"], routes, group="claude_code") == "fast"
+        assert routing.tier_for_tools(["Read"], routes, group="claude_code") == "code"
+        assert routing.tier_for_tools(["Edit"], routes, group="claude_code") == "premium"
+
+    def test_legacy_flat_config_matches_explicit_agents_config(self) -> None:
+        flat = {
+            "settings": {"tier_precedence": ["premium", "structured", "code", "fast", "crud"]},
+            "tools": {"Bash": "crud", "Read": "code", "Edit": "premium"},
+        }
+        explicit = {
+            "settings": flat["settings"],
+            "agents": {"claude_code": {"tools": flat["tools"], "premium_tools": ["Edit"]}},
+        }
+        for names in (["Bash"], ["Read"], ["Edit"], ["Bash", "Read"], ["Mystery"]):
+            assert routing.tier_for_tools(
+                names, flat, group="claude_code"
+            ) == routing.tier_for_tools(names, explicit, group="claude_code")
+        assert routing.tier_for_tools(["Bash"], flat, group="claude_code") == "crud"
+
+    def test_agent_tools_does_not_mutate_flat_config(self) -> None:
+        routes = {"tools": {"Bash": "fast"}, "settings": {"premium_tools": ["Edit"]}}
+        before = dict(routes)
+        assert routing.agent_tools(routes, "claude_code") == {"Bash": "fast"}
+        assert routes == before
+
+    def test_empty_config_uses_requested_group_defaults(self) -> None:
+        assert routing.tier_for_tools(["exec_command"], {}, group="codex") == "fast"
+
+    def test_malformed_agent_config_falls_back_to_group_defaults(self) -> None:
+        routes = {"agents": {"claude_code": {"tools": "broken", "premium_tools": "broken"}}}
+        assert routing.agent_tools(routes, "claude_code") == AGENT_DEFAULT_TOOLS["claude_code"]
+        assert (
+            routing.agent_premium_tools(routes, "claude_code")
+            == AGENT_DEFAULT_PREMIUM_TOOLS["claude_code"]
+        )
+
+    def test_unknown_group_falls_back_to_claude_code_defaults(self) -> None:
+        assert routing.agent_tools({}, "unknown") == AGENT_DEFAULT_TOOLS["claude_code"]
+        assert (
+            routing.agent_premium_tools({}, "unknown") == AGENT_DEFAULT_PREMIUM_TOOLS["claude_code"]
+        )
+
+    def test_agent_lookup_exceptions_fail_open_to_defaults(self) -> None:
+        routes = _ExplodingRoutes()
+        assert routing.agent_tools(routes, "codex") == AGENT_DEFAULT_TOOLS["codex"]
+        assert routing.agent_premium_tools(routes, "codex") == AGENT_DEFAULT_PREMIUM_TOOLS["codex"]
 
 
 class TestResolveApiKey:

@@ -32,7 +32,7 @@ ACR_LOGGER_NAME = "acr"
 """Root of the proxy logger namespace; all module loggers are ``acr.*``."""
 
 LOG_FORMAT = (
-    "%(asctime)s %(levelname)-7s %(name)s %(filename)s:%(lineno)d " "[%(request_id)s] %(message)s"
+    "%(asctime)s %(levelname)-7s %(name)s %(filename)s:%(lineno)d [%(request_id)s] %(message)s"
 )
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 

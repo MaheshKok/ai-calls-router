@@ -176,6 +176,8 @@ def _premium_usage_callback(
 
 def _resolve_tier_config(
     names: list[str],
+    *,
+    group: str,
 ) -> tuple[str, dict[str, Any] | None, str | None, dict[str, Any]]:
     """Resolve the tier, its config, and API key from loaded routes.
 
@@ -183,7 +185,7 @@ def _resolve_tier_config(
     api_key is None the caller must pass through to premium.
     """
     routes = routing.load_routes()
-    tier = routing.tier_for_tools(names, routes)
+    tier = routing.tier_for_tools(names, routes, group=group)
     if tier == "premium":
         return "premium", None, None, routes
     tier_cfg = (routes.get("tiers") or {}).get(tier)
@@ -287,7 +289,7 @@ async def _try_route(
             logger.debug("no pending tool results; passing through")
             return _RouteAttempt(reason="no_pending_tools", model=requested_model)
         logger.debug("pending tools=%s", names)
-        tier, tier_cfg, api_key, routes = _resolve_tier_config(names)
+        tier, tier_cfg, api_key, routes = _resolve_tier_config(names, group=group)
         logger.debug("resolved tier=%s routable=%s", tier, tier_cfg is not None)
         if tier_cfg is None:
             reason = "request_premium_guard" if tier == "premium" else "tier_unavailable"
@@ -300,6 +302,7 @@ async def _try_route(
             )
         savings.register_tier_prices(routes)
         settings_cfg = routes.get("settings") or {}
+        premium_tools = routing.agent_premium_tools(routes, group)
         response_guard_tools: list[str] = []
 
         def _mark_response_guard(tool_names: list[str]) -> None:
@@ -312,6 +315,7 @@ async def _try_route(
             api_key=api_key,
             settings=settings_cfg,
             tool_names=names,
+            premium_tools=premium_tools,
             user_agent=user_agent,
             agent=group,
             session_id=session or "",

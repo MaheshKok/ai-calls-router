@@ -114,6 +114,7 @@ def _call(
     fake: FakeLitellm,
     body: dict[str, Any] | None = None,
     settings: dict[str, Any] | None = None,
+    premium_tools: list[str] | None = None,
     api_key: str = "test-tier-key",
     on_premium_guard: Any = None,
 ) -> Any:
@@ -126,6 +127,7 @@ def _call(
             tier_cfg=TIER_CFG,
             api_key=api_key,
             settings=settings if settings is not None else SETTINGS,
+            premium_tools=premium_tools if premium_tools is not None else SETTINGS["premium_tools"],
             on_premium_guard=on_premium_guard,
         )
     )
@@ -218,28 +220,41 @@ class TestEscalates:
         }
 
     def test_premium_tool_call_escalates(self) -> None:
-        assert rc.escalates(self._response_with_tool("Edit"), SETTINGS) is True
+        assert (
+            rc.escalates(self._response_with_tool("Edit"), SETTINGS, premium_tools=["Edit"]) is True
+        )
 
     def test_non_premium_tool_call_does_not_escalate(self) -> None:
-        assert rc.escalates(self._response_with_tool("Bash"), SETTINGS) is False
+        assert (
+            rc.escalates(self._response_with_tool("Bash"), SETTINGS, premium_tools=["Edit"])
+            is False
+        )
 
     def test_text_only_response_does_not_escalate(self) -> None:
         body = {"content": [{"type": "text", "text": "summary"}]}
-        assert rc.escalates(body, SETTINGS) is False
+        assert rc.escalates(body, SETTINGS, premium_tools=["Edit"]) is False
 
     def test_disabled_guard_never_escalates(self) -> None:
         settings = {**SETTINGS, "escalate_on_premium_tools": False}
-        assert rc.escalates(self._response_with_tool("Edit"), settings) is False
+        assert (
+            rc.escalates(self._response_with_tool("Edit"), settings, premium_tools=["Edit"])
+            is False
+        )
 
     def test_empty_premium_tools_never_escalates(self) -> None:
-        settings = {**SETTINGS, "premium_tools": []}
-        assert rc.escalates(self._response_with_tool("Edit"), settings) is False
+        assert rc.escalates(self._response_with_tool("Edit"), SETTINGS, premium_tools=[]) is False
 
     def test_missing_settings_keys_default_safe(self) -> None:
-        assert rc.escalates(self._response_with_tool("Edit"), {}) is False
+        assert rc.escalates(self._response_with_tool("Edit"), {}, premium_tools=[]) is False
 
     def test_non_list_content_does_not_escalate(self) -> None:
-        assert rc.escalates({"content": "plain"}, SETTINGS) is False
+        assert rc.escalates({"content": "plain"}, SETTINGS, premium_tools=["Edit"]) is False
+
+    def test_other_group_premium_tool_does_not_escalate(self) -> None:
+        assert (
+            rc.escalates(self._response_with_tool("apply_patch"), SETTINGS, premium_tools=["Edit"])
+            is False
+        )
 
 
 class TestRoutedCall:
@@ -313,6 +328,15 @@ class TestRoutedCall:
         assert blocks[0]["type"] == "tool_use"
         assert blocks[0]["name"] == "Bash"
         assert blocks[0]["input"] == {"command": "ls"}
+
+    def test_other_group_premium_tool_call_is_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        tool_calls = [_fake_tool_call(call_id="c1", name="apply_patch", arguments="{}")]
+        fake = FakeLitellm(
+            _fake_response(text=None, tool_calls=tool_calls, finish_reason="tool_calls")
+        )
+        response = _call(monkeypatch=monkeypatch, fake=fake, premium_tools=["Edit"])
+        assert response is not None
+        assert response.body["content"][0]["name"] == "apply_patch"
 
     def test_only_tier_key_sent_to_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Invariant 2: routed calls carry only the tier key.
@@ -496,6 +520,7 @@ def _call_direct(
     *,
     body: dict[str, Any] | None = None,
     settings: dict[str, Any] | None = None,
+    premium_tools: list[str] | None = None,
     api_key: str = "ds-tier-key",
     tier_cfg: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
@@ -531,6 +556,7 @@ def _call_direct(
             tier_cfg=tier_cfg if tier_cfg is not None else DS_TIER,
             api_key=api_key,
             settings=settings if settings is not None else SETTINGS,
+            premium_tools=premium_tools if premium_tools is not None else SETTINGS["premium_tools"],
         )
     )
     return result, captured

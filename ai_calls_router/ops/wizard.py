@@ -19,6 +19,10 @@ from typing import Any
 import yaml
 
 from ai_calls_router._lib import config
+from ai_calls_router.routing.agent_defaults import (
+    AGENT_DEFAULT_PREMIUM_TOOLS,
+    AGENT_DEFAULT_TOOLS,
+)
 
 DEFAULT_PROVIDER = "deepseek"
 
@@ -27,24 +31,28 @@ DEFAULT_PROVIDER = "deepseek"
 PRESETS: dict[str, dict[str, str]] = {
     "deepseek": {
         "fast": "deepseek/deepseek-v4-flash",
+        "structured": "deepseek/deepseek-v4-flash",
         "code": "deepseek/deepseek-v4-pro",
         "crud": "deepseek/deepseek-v4-flash",
         "key_env": "DEEPSEEK_API_KEY",
     },
     "groq": {
         "fast": "groq/llama-3.3-70b-versatile",
+        "structured": "groq/llama-3.3-70b-versatile",
         "code": "groq/llama-3.3-70b-versatile",
         "crud": "groq/llama-3.1-8b-instant",
         "key_env": "GROQ_API_KEY",
     },
     "kimi": {
         "fast": "moonshot/kimi-k2-0905-preview",
+        "structured": "moonshot/kimi-k2-0905-preview",
         "code": "moonshot/kimi-k2-0905-preview",
         "crud": "moonshot/kimi-k2-0905-preview",
         "key_env": "MOONSHOT_API_KEY",
     },
     "openrouter": {
         "fast": "openrouter/qwen/qwen3-coder",
+        "structured": "openrouter/qwen/qwen3-coder",
         "code": "openrouter/moonshotai/kimi-k2",
         "crud": "openrouter/qwen/qwen3-coder",
         "key_env": "OPENROUTER_API_KEY",
@@ -66,6 +74,11 @@ PRESET_PRICES: dict[str, dict[str, dict[str, float]]] = {
             "input_cached_cost_per_1m": 0.0028,
             "output_cost_per_1m": 0.28,
         },
+        "structured": {
+            "input_cost_per_1m": 0.14,
+            "input_cached_cost_per_1m": 0.0028,
+            "output_cost_per_1m": 0.28,
+        },
         "code": {
             "input_cost_per_1m": 0.435,
             "input_cached_cost_per_1m": 0.003625,
@@ -79,39 +92,7 @@ PRESET_PRICES: dict[str, dict[str, dict[str, float]]] = {
     },
 }
 
-TIER_MAX_TOKENS: dict[str, int] = {"fast": 8192, "code": 8192, "crud": 4096}
-
-DEFAULT_TOOLS: dict[str, str] = {
-    "Bash": "fast",
-    "BashOutput": "fast",
-    "KillShell": "fast",
-    "WebFetch": "fast",
-    "WebSearch": "fast",
-    "Read": "code",
-    "Grep": "code",
-    "Glob": "code",
-    "LSP": "code",
-    "TodoWrite": "crud",
-    "TaskList": "crud",
-    "TaskGet": "crud",
-    "Edit": "premium",
-    "Write": "premium",
-    "MultiEdit": "premium",
-    "NotebookEdit": "premium",
-    "Task": "premium",
-    "ExitPlanMode": "premium",
-    "AskUserQuestion": "premium",
-}
-
-PREMIUM_TOOLS: list[str] = [
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "NotebookEdit",
-    "Task",
-    "ExitPlanMode",
-    "AskUserQuestion",
-]
+TIER_MAX_TOKENS: dict[str, int] = {"fast": 8192, "structured": 8192, "code": 8192, "crud": 4096}
 
 AskFn = Callable[[str], str]
 
@@ -212,12 +193,19 @@ def _build_config(
         },
         "premium": {"provider": "anthropic"},
         "settings": {
-            "tier_precedence": ["premium", "code", "fast", "crud"],
-            "premium_tools": list(PREMIUM_TOOLS),
+            "tier_precedence": ["premium", "structured", "code", "fast", "crud"],
             "escalate_on_premium_tools": True,
         },
         "tiers": tiers,
-        "tools": dict(DEFAULT_TOOLS),
+        "agents": {
+            group: {
+                "tools": dict(tools),
+                "premium_tools": list(AGENT_DEFAULT_PREMIUM_TOOLS[group]),
+                "upstream": config.DEFAULT_UPSTREAM,
+                "premium": {"provider": "anthropic"},
+            }
+            for group, tools in AGENT_DEFAULT_TOOLS.items()
+        },
     }
 
 

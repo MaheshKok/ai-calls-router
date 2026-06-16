@@ -127,27 +127,41 @@ def _shrink_summary(stats: shrink_stats.ShrinkStats) -> str:
     )
 
 
-def escalates(response_body: dict[str, Any], settings: dict[str, Any]) -> bool:
+def escalates(
+    response_body: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    premium_tools: list[str] | None = None,
+) -> bool:
     """Check whether a routed response invokes a premium tool.
 
     Args:
         response_body: Anthropic-format response body from the routed call.
         settings: The config "settings" section; reads
-            escalate_on_premium_tools (default True) and premium_tools.
+            escalate_on_premium_tools (default True).
+        premium_tools: Agent-specific premium tool names. When omitted, falls
+            back to legacy settings.premium_tools.
 
     Returns:
         True when the guard is enabled and any tool_use block names a
         premium tool, otherwise False.
     """
-    return bool(_premium_tool_names(response_body, settings))
+    return bool(_premium_tool_names(response_body, settings, premium_tools=premium_tools))
 
 
-def _premium_tool_names(response_body: dict[str, Any], settings: dict[str, Any]) -> list[str]:
+def _premium_tool_names(
+    response_body: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    premium_tools: list[str] | None = None,
+) -> list[str]:
     """Return premium tool names invoked by a routed response."""
     if not settings.get("escalate_on_premium_tools", True):
         return []
-    premium_tools = set(settings.get("premium_tools") or [])
-    if not premium_tools:
+    guard_tools = set(
+        premium_tools if premium_tools is not None else settings.get("premium_tools") or []
+    )
+    if not guard_tools:
         return []
     content = response_body.get("content")
     if not isinstance(content, list):
@@ -157,7 +171,7 @@ def _premium_tool_names(response_body: dict[str, Any], settings: dict[str, Any])
         for block in content
         if isinstance(block, dict)
         and block.get("type") == "tool_use"
-        and block.get("name") in premium_tools
+        and block.get("name") in guard_tools
         and isinstance(block.get("name"), str)
     ]
 
@@ -308,6 +322,7 @@ async def routed_call(
     api_key: str,
     settings: dict[str, Any],
     tool_names: list[str] | None = None,
+    premium_tools: list[str] | None = None,
     user_agent: str = "",
     agent: str = "",
     session_id: str = "",
@@ -332,6 +347,8 @@ async def routed_call(
         api_key: The tier API key; the client's credentials never reach here.
         settings: The config "settings" section.
         tool_names: Tool names extracted from the request body.
+        premium_tools: Agent-specific premium tool names for response-side
+            escalation. When omitted, legacy settings.premium_tools is used.
         user_agent: Raw User-Agent header from the client.
         agent: Identified agent label.
         session_id: Session fingerprint hex string.
@@ -368,7 +385,9 @@ async def routed_call(
                 elapsed,
             )
             return None
-        premium_guard_tools = _premium_tool_names(anthropic_body, settings)
+        premium_guard_tools = _premium_tool_names(
+            anthropic_body, settings, premium_tools=premium_tools
+        )
         if premium_guard_tools:
             if on_premium_guard is not None:
                 on_premium_guard(premium_guard_tools)

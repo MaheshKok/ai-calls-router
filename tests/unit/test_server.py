@@ -274,7 +274,7 @@ class TestMessagesRouted:
         assert call["tier_name"] == "fast"
         assert call["tier_cfg"]["model"] == "deepseek/test-model"
         assert call["api_key"] == "tier-key"
-        assert call["settings"]["premium_tools"] == ["Edit"]
+        assert call["premium_tools"] == ["Edit"]
         assert call["body"] == _tool_result_body()
 
     def test_streaming_request_served_as_sse(
