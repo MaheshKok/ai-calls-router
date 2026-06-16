@@ -32,15 +32,16 @@ the cited `file:line` references.
     `Protocol`, `Callable`, `Literal`, etc.
   - **Immutability**: never mutate an input body/message/dict. Build new objects;
     share unchanged sub-objects; return the original object by identity on no-op
-    (see `routing/reduce.py` for the canonical pattern).
+    (see `_prepare_routed_body` in `routing/engine.py` for the build-new pattern
+    and the no-op passthrough in `routing/compression.py` for return-by-identity).
   - No nested functions; helpers are module-level.
   - A public function with more than two caller-supplied positional arguments
     makes the rest keyword-only with `*` (see `routed_call` in
     `ai_calls_router/routing/engine.py`).
   - One significant public class per file; `ClassName` -> `class_name.py`.
   - Complexity budget: keep new functions at radon grade A/B.
-- Tests are spec-derived and adversarial (see `tests/unit/test_reduce.py` for the
-  house style): derive expected values from the contract, cover boundaries and
+- Tests are spec-derived and adversarial (see `tests/unit/test_compression.py` for
+  the house style): derive expected values from the contract, cover boundaries and
   error paths, never mirror the implementation, never snapshot-match.
 
 ### Non-negotiable serving invariants (every phase must preserve all of these)
@@ -48,12 +49,12 @@ the cited `file:line` references.
 1. **Fail open.** Any error in decision, conversion, or the routed call resolves
    to passthrough. Routing must never break a turn. Pattern: catch broadly,
    log at WARNING, return `None`/passthrough (see `_try_route`
-   `ai_calls_router/proxy/server.py:73` and `routed_call`
-   `ai_calls_router/routing/engine.py:181`).
+   `ai_calls_router/proxy/server.py:250` and `routed_call`
+   `ai_calls_router/routing/engine.py:303`).
 2. **Credential isolation.** The client's premium credential (Anthropic OAuth /
    OpenAI key) must NEVER reach the routed cheap provider. The routed call uses
    only the tier key resolved from `key_env`/`env_file`
-   (`resolve_api_key` `ai_calls_router/routing/decide.py:190`). Passthrough
+   (`resolve_api_key` `ai_calls_router/routing/decide.py:261`). Passthrough
    forwards the client's own headers verbatim to the client's own upstream.
 3. **Accounting never raises into serving.** Savings recording is best-effort and
    must not propagate exceptions into the response path
@@ -62,7 +63,7 @@ the cited `file:line` references.
    native-Anthropic (DeepSeek) endpoint must be a deterministic pure function of
    the inbound request, so the cacheable prefix is byte-identical across turns.
    This is the entire reason routed DeepSeek calls bypass LiteLLM and compression
-   today (`_serve_via_direct` `ai_calls_router/routing/engine.py:152`). Violating
+   today (`_serve_via_direct` `ai_calls_router/routing/engine.py:209`). Violating
    it silently destroys the prefix cache — the highest-value property in the
    system.
 5. **No hardcoded secrets.** Keys come from env / env_file only.
@@ -102,15 +103,16 @@ The internal canonical representation is **already Anthropic Messages format**.
 The serving pipeline operates entirely on Anthropic bodies; it converts to OpenAI
 only for the LiteLLM provider path and converts the response back
 (`ai_calls_router/_lib/conversion.py:169`, `:218`). The DeepSeek direct path
-sends Anthropic-native verbatim (`ai_calls_router/routing/direct.py`) and
-`reduce.reduce_tool_results` keeps it byte-stable
-(`ai_calls_router/routing/engine.py:177`).
+sends Anthropic-native verbatim (`ai_calls_router/routing/direct.py`); it bypasses
+the LiteLLM conversion and applies no compression, which is what keeps the
+cacheable prefix byte-identical across turns
+(`_serve_via_direct` `ai_calls_router/routing/engine.py:209`).
 
 Therefore the design is **edge conversion, unchanged core**:
 
 ```
 inbound (any format) --ingress adapter--> Anthropic canonical
-        --> existing decide + routed_call + reduce + DeepSeek-direct (UNCHANGED)
+        --> existing decide + routed_call + DeepSeek-direct (UNCHANGED)
         --> Anthropic response --egress adapter--> caller's format (any)
 ```
 
@@ -131,7 +133,7 @@ flowchart TD
     F --> G{tier_for_tools using per-agent tool map}
     G -->|premium / unmapped| H[Passthrough verbatim to agent's own upstream]
     G -->|cheap tier| I[adapter.to_anthropic_request — deterministic canonical]
-    I --> J[routed_call -> _serve_via_direct: reduce + DeepSeek native Anthropic]
+    I --> J[routed_call -> _serve_via_direct: DeepSeek native Anthropic, no compression]
     J --> K{escalates? using per-agent premium_tools}
     K -->|yes| H
     K -->|no| L[adapter.to_client_response / to_client_sse: Anthropic -> client format]
@@ -511,10 +513,10 @@ through it, with zero behavioral change. Pure refactor.
 4. Refactor `proxy/server.py`:
    - Generalize `_try_route(body_bytes)` to
      `_try_route(body_bytes, *, adapter, group)`; replace the direct
-     `pending_tool_names` call (`server.py:90`) with
+     `pending_tool_names` call (`server.py:277`) with
      `adapter.extract_pending_tools(body)`; build the Anthropic body via
      `adapter.to_anthropic_request(body)` before `routed_call`; convert the
-     result via `adapter.to_client_response` / `to_client_sse` (`server.py:112`).
+     result via `adapter.to_client_response` / `to_client_sse` (`server.py:321-331`).
    - Keep `/v1/messages` wired to `AnthropicMessagesAdapter` +
      `claude_code` group. No new endpoints yet.
 
@@ -577,13 +579,13 @@ Phases 3/4).
      `server.upstream`.
    - Change `tier_for_tools(names, routes)` ->
      `tier_for_tools(names, routes, *, group)`, using `agent_tools(routes, group)`
-     instead of `routes.get("tools")` (`decide.py:157`). `tier_precedence` stays
+     instead of `routes.get("tools")` (`decide.py:229`). `tier_precedence` stays
      global.
 3. `routing/engine.py`:
    - Change `escalates(response_body, settings)` ->
      `escalates(response_body, settings, *, premium_tools)` (or thread `group`),
      reading the per-agent premium list instead of `settings.premium_tools`
-     (`engine.py:106`). The DeepSeek response names the agent's own tools, so the
+     (`engine.py:149`). The DeepSeek response names the agent's own tools, so the
      premium check must use the agent's list.
    - Thread `group` through `routed_call` to `escalates`.
 4. `proxy/server.py`: pass `group` into `tier_for_tools` and `routed_call`.
@@ -653,7 +655,7 @@ openrouter or any custom OpenAI-compatible provider, which is the DEFAULT Hermes
 4. `adapters/openai_chat.py`: `OpenAIChatAdapter` wiring the above;
    `extract_pending_tools` = last `role:"tool"` message's `tool_call_id`s matched
    to prior assistant `tool_calls[].function.name` (return `["<unknown>"]` on an
-   unresolvable id, mirroring `pending_tool_names` `decide.py:119`).
+   unresolvable id, mirroring `pending_tool_names` `decide.py:138`).
 5. `proxy/server.py`: add `Route("/v1/chat/completions", chat_completions,
    methods=["POST"])`; the handler resolves the adapter + group and calls the
    generalized `_try_route`, then `_serve_passthrough` to the **hermes** upstream
@@ -665,16 +667,17 @@ openrouter or any custom OpenAI-compatible provider, which is the DEFAULT Hermes
   order, preserved argument key order. No `uuid`/timestamp in the request path.
 - Invariant 1: malformed OpenAI body, unconvertible message, or conversion error
   → return `None` → passthrough.
-- Reuse, do not reimplement, the decision and serving core. `reduce` runs
-  automatically because the routed body goes through `_serve_via_direct`.
+- Reuse, do not reimplement, the decision and serving core. The routed body goes
+  through `_serve_via_direct`, which sends Anthropic-native verbatim with no
+  compression, preserving the byte-stable DeepSeek prefix.
 
 **Verification / done-when.**
 - `tests/unit/test_openai_inbound.py` (spec-derived): tool_call→tool_use round
   trip; tool result message→tool_result; tool-def conversion; system handling;
   text-only turns; **byte-stability across two turns** — convert turn N and turn
   N+1 sharing a prefix, assert the serialized shared prefix is byte-identical
-  (mirror `test_same_tool_result_reduces_identically_regardless_of_position` in
-  `tests/unit/test_reduce.py`); immutability (input not mutated); arguments with
+  (mirror the direct-path verbatim guard `test_direct_path_sends_tool_result_verbatim`
+  in `tests/unit/test_routed_call.py`); immutability (input not mutated); arguments with
   ordered keys survive round trip; unparseable arguments handled.
 - `extract_pending_tools` tests: resolvable ids → names; unresolvable id →
   `["<unknown>"]`; turn opener → `[]`.
@@ -708,7 +711,7 @@ separate adapters that can land in either order; do NOT couple them.
      findings; `instructions`/system → Anthropic `system`; message items → text.
    - **Strip inbound `Reasoning` items** (they carry `encrypted_content`) before
      building the canonical body — mirror `_strip_thinking_from_messages`
-     (`engine.py:35`). Leaving them in makes the DeepSeek prefix non-deterministic
+     (`engine.py:41`). Leaving them in makes the DeepSeek prefix non-deterministic
      and breaks the cache (invariant 4).
    - `responses_request_to_anthropic(body) -> dict`: assemble deterministically
      (same byte-stability rules as Phase 3).
@@ -750,7 +753,7 @@ own upstream in the agent's own format, not always Anthropic.
 3/4 for the OpenAI groups.
 
 **Steps.**
-1. `proxy/server.py` `_serve_passthrough` (`server.py:50`): select the upstream
+1. `proxy/server.py` `_serve_passthrough` (`server.py:96`): select the upstream
    from `routes["agents"][group]["upstream"]` (compat shim → `server.upstream`)
    instead of the single `settings.upstream`.
 2. Thread `group` into `_serve_passthrough` from each endpoint handler.
@@ -840,10 +843,13 @@ release blocker, not a warning.
   `anthropic_messages` (anthropic/minimax). Both Phase 3 and Phase 4 have real
   Hermes consumers — both ship; `/v1/messages` already covers the Anthropic case.
   `bedrock_converse` / `codex_app_server` out of scope (passthrough).
-- **D4. Per-tool dup-line reduction gating** (carried over, independent of this
-  plan): whether `reduce.reduce_text(drop_duplicate_lines=True)` should be enabled
-  per tier/tool. Default ships OFF. Decide separately; not required for any phase
-  here.
+- **D4. Content reduction on the routed path** — SUPERSEDED. The old
+  `reduce.reduce_text` module is gone; content reduction now runs as headroom
+  compression on the LiteLLM (non-direct) path, gated by the `compress_routed`
+  setting (default on) and respecting headroom's coding-agent tool exclusions
+  (`routing/compression.py`, `_serve_via_litellm` `engine.py:165`). The direct
+  (DeepSeek) path stays verbatim by design (invariant 4). No per-tier/per-tool
+  dup-line knob is planned; not required for any phase here.
 - **D5. On-disk config layout** — DECIDED (Phase 7): three per-provider files
   (`config/{claude-code,codex,hermes}.yaml`) plus a global `config.yaml`
   (`server`/`settings`/`tiers`/`router`) are the target layout. The single-file
@@ -972,12 +978,12 @@ NOT contain a cheap-tier `key_env`; the cheap credential lives only in global
    is a no-op.
 
 4. **`ai_calls_router/proxy/server.py`**:
-   - In `_lifespan` (`server.py:447`), before serving, call
+   - In `_lifespan` (`server.py:448`), before serving, call
      `bootstrap.ensure_provider_configs()` so missing files are materialized once
      at startup (risk #10).
    - Replace the `routing.load_routes()` call sites that feed serving
-     (`_serve_passthrough` `server.py:113`, `_resolve_tier_config`
-     `server.py:182`) with `provider_config.assemble_routes(base=load_routes())`
+     (`_serve_passthrough` `server.py:96`, `_resolve_tier_config`
+     `server.py:174`) with `provider_config.assemble_routes(base=load_routes())`
      so every handler sees the merged canonical dict. (Cache the assembled dict on
      the same mtime key `load_routes` already uses; assembly is pure.)
    - Per endpoint handler: resolve identity with
