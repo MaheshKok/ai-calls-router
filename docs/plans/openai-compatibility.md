@@ -362,21 +362,33 @@ router:
 - **Adapter** = wire-format handler, chosen by **endpoint**. Converts request and
   response shapes. One adapter per format.
 - **Agent group** = identity used to pick the tool map / premium list / upstream.
-  Resolved by `resolve_agent_group(*, path, headers, routes)` in precedence order
-  (Phase 7 finalizes this against the `router:` block, §4.1):
+  Resolved by `resolve_agent_group(*, path, headers, routes, adapter_default)` in
+  precedence order (Phase 7 finalizes this against the `router:` block, §4.1):
   1. `x-acr-agent` request header if present and valid (`codex|claude_code|hermes`).
-  2. else `router.user_agent_map` — first `contains`-match against the inbound
-     `User-Agent` (the desktop-shim signal: CLI and desktop of one family share
-     one group, so this maps the shim's UA onto the family, never to a new group).
-  3. else `router.endpoint_defaults[path]` (`/v1/messages`→`claude_code`,
-     `/v1/chat/completions`→`hermes`, `/v1/responses`→`codex`).
-  4. else `router.fallback` if set (an explicit operator opt-in to passthrough for
-     a named group); else **fail closed** — return `None`, and the handler rejects
-     with `400` rather than guess an upstream (invariant 2: forwarding the client's
-     own credential to a guessed upstream risks a cross-provider leak). Fail-closed
-     is an *attribution-layer* decision and does not violate invariant 1 (fail
-     open), which governs the *serving* layer: once a group resolves, any later
-     error still falls back to that group's passthrough. See Phase 7.
+  2. else `router.user_agent_map` — first `contains`-match (case-insensitive)
+     against the inbound `User-Agent` (the desktop-shim signal: CLI and desktop of
+     one family share one group, so this maps the shim's UA onto the family, never
+     to a new group). Skipped when no `router:` block is present.
+  3. else `router.endpoint_defaults[path]` when a `router:` block is present
+     (`/v1/messages`→`claude_code`, `/v1/chat/completions`→`hermes`,
+     `/v1/responses`→`codex`).
+  4. else `router.fallback` if set to a known group (an explicit operator opt-in to
+     passthrough for a named group).
+  5. else `adapter_default` — the adapter's own `default_agent_group`. This is the
+     SINGLE source of the endpoint→group map for the legacy flat file and the
+     single-file `agents:` block (modes a/b), which carry no `router:` block: those
+     deployments resolve all three known endpoints exactly as before and NEVER
+     return `None`. `resolve_agent_group` returns `None` ONLY when a `router:` block
+     IS present, `fallback` is `null`, and steps 1–3 all miss — i.e. the operator
+     opted into router-based routing and the request is genuinely ambiguous. On
+     `None` the handler rejects with `400` rather than guess an upstream (invariant
+     2: forwarding the client's own credential to a guessed upstream risks a
+     cross-provider leak). Fail-closed is an *attribution-layer* decision and does
+     not violate invariant 1 (fail open), which governs the *serving* layer: once a
+     group resolves, any later error still falls back to that group's passthrough.
+     The endpoint→group map lives in exactly two places by design —
+     `adapter.default_agent_group` (modes a/b) and `router.endpoint_defaults`
+     (mode c) — and is never duplicated a third time inside `router_map`. See Phase 7.
 
 They are NOT 1:1 — the override is load-bearing, because Hermes is multi-wire
 (Phase 0). A Hermes session can arrive on ANY of the three endpoints depending on
@@ -509,7 +521,10 @@ through it, with zero behavioral change. Pure refactor.
    `synthesis.synthesize_sse`).
 3. Create `adapters/__init__.py` with:
    - `adapter_for_path(path: str) -> ClientAdapter | None`
-   - `resolve_agent_group(default_group: str, headers) -> str` (§5).
+   - `resolve_agent_group(default_group: str, headers) -> str` (§5). NOTE: this
+     header-only form is the Phase 1/5 shape; Phase 7 replaces it with the
+     router-aware `provider_config.resolve_agent_group(*, path, headers, routes,
+     adapter_default)` and deletes this one.
 4. Refactor `proxy/server.py`:
    - Generalize `_try_route(body_bytes)` to
      `_try_route(body_bytes, *, adapter, group)`; replace the direct
@@ -823,7 +838,7 @@ release blocker, not a warning.
 | 7 | A cheap-tier `key_env` leaks into a per-provider file | Cheap key reachable from premium side; breaks single-sourcing | Bootstrap/load validation rejects any cheap `key_env` in a per-provider file; cheap creds live only in global `tiers.*.key_env` (invariants 2, 5; Phase 7) |
 | 8 | Ambiguous caller identity mis-routes to the wrong upstream | Client credential forwarded to a guessed provider → cross-provider leak | Fail closed: unresolved identity → `400`, never a guessed upstream, unless `router.fallback` is explicitly set (Phase 7) |
 | 9 | Bootstrap overwrites an operator's edited per-provider file | Silent loss of hand-tuned config | Bootstrap is create-if-absent only; never rewrites an existing file; idempotent; test asserts an existing file is untouched (Phase 7) |
-| 10 | Partial config (some per-provider files present, some missing) | Routing silently degrades for the missing family | Bootstrap materializes the full known set before serving; `assemble_routes` errors if a resolvable group has no file and no compat source (Phase 7) |
+| 10 | Partial config (some per-provider files present, some missing) | Routing silently degrades for the missing family | Bootstrap materializes the full known set before serving; `load_provider_files` skips a missing file and `assemble_routes` falls back to the compat shim for that group (fail open, invariant 1) — a missing file degrades to premium-default behavior, never a crash (Phase 7) |
 
 ---
 
@@ -847,7 +862,8 @@ release blocker, not a warning.
   `reduce.reduce_text` module is gone; content reduction now runs as headroom
   compression on the LiteLLM (non-direct) path, gated by the `compress_routed`
   setting (default on) and respecting headroom's coding-agent tool exclusions
-  (`routing/compression.py`, `_serve_via_litellm` `engine.py:165`). The direct
+  (`routing/compression.py`, `_serve_via_litellm` `engine.py:179`, compression
+  applied at `engine.py:213`). The direct
   (DeepSeek) path stays verbatim by design (invariant 4). No per-tier/per-tool
   dup-line knob is planned; not required for any phase here.
 - **D5. On-disk config layout** — DECIDED (Phase 7): three per-provider files
@@ -916,11 +932,9 @@ NOT contain a cheap-tier `key_env`; the cheap credential lives only in global
 
 ### Steps
 
-1. **`ai_calls_router/_lib/config.py`** — add path resolvers and the known-group
-   set (no IO beyond path construction):
+1. **`ai_calls_router/_lib/config.py`** — add path resolvers only (no IO beyond
+   path construction, no routing imports — `config.py` is the lowest layer):
    ```python
-   KNOWN_GROUPS: tuple[str, ...] = ("claude_code", "codex", "hermes")
-
    def provider_config_dir() -> Path:
        """Directory holding per-provider YAMLs ($ACR_HOME/config)."""
        return home_dir() / "config"
@@ -929,37 +943,75 @@ NOT contain a cheap-tier `key_env`; the cheap credential lives only in global
        """Path to one group's per-provider YAML (claude_code -> claude-code.yaml)."""
        return provider_config_dir() / f"{group.replace('_', '-')}.yaml"
    ```
+   Do **not** add `KNOWN_GROUPS` here. It is single-sourced at
+   `adapters/base.py:15` (`frozenset({"claude_code", "codex", "hermes"})`);
+   `provider_config_path` takes the group as an argument (no iteration), so
+   `config.py` stays free of any routing dependency. Callers that need to
+   iterate the set (`provider_config`, `bootstrap`) import `KNOWN_GROUPS` from
+   `adapters.base`.
 
-2. **`ai_calls_router/routing/provider_config.py`** (new; assembly + identity —
-   pure functions, fail-open on read like `decide.load_routes`):
+2. **`ai_calls_router/routing/provider_config.py`** (new; assembly + identity).
+   Separate the impure read from the pure merge — the doc's earlier "pure
+   functions that read each file" was self-contradictory. `provider_config`
+   imports `KNOWN_GROUPS` from `adapters.base` and `with_agent_compat` +
+   `agent_upstream` from `decide`; it must **not** be imported by `decide`
+   (that would cycle).
    ```python
-   def assemble_routes(*, base: dict[str, Any]) -> dict[str, Any]:
-       """Merge per-provider files into the canonical routes dict.
+   class ProviderConfigError(ValueError):
+       """A per-provider file violates an invariant (e.g. carries a cheap
+       key_env). Raised by assemble_routes; the caller fails open by skipping
+       the offending payload and logging a WARNING."""
 
-       Reads each existing provider_config_path(group), validates it
-       (reject cheap key_env; require group/upstream/wire), and writes its
-       payload to base['agents'][group]. Falls back to base['agents'] /
-       the Phase 2 compat shim for any group without a file. Never mutates
-       base; returns a new dict. On any per-file error: log WARNING, skip
-       that file, keep serving (invariant 1)."""
+   def load_provider_files() -> dict[str, dict[str, Any]]:
+       """Impure: read every present provider_config_path(group).
 
-   def router_map(routes: dict[str, Any]) -> dict[str, Any]:
-       """Return routes['router'] with safe defaults (endpoint_defaults from §5,
-       empty user_agent_map, fallback=None)."""
+       Returns {group: parsed_payload} for files that exist and parse.
+       A missing file is simply absent from the result (fail open). A
+       malformed file is skipped with a WARNING (never raises into serving,
+       invariant 1). Does no merging and no invariant validation — that is
+       assemble_routes' job."""
+
+   def assemble_routes(
+       base: dict[str, Any], *, provider_files: dict[str, dict[str, Any]]
+   ) -> dict[str, Any]:
+       """Pure: merge provider_files into a NEW canonical routes dict.
+
+       For each group present in provider_files, validate the payload
+       (reject any cheap-tier or top-level key_env -> ProviderConfigError;
+       require group/upstream/wire) and place it at result['agents'][group].
+       Any group without a file falls back to base['agents'] / the Phase 2
+       compat shim via with_agent_compat(base). Never mutates base. When
+       provider_files is empty, returns with_agent_compat(base) verbatim.
+       The caller catches ProviderConfigError, drops that one payload, logs
+       a WARNING, and keeps serving (invariant 1; risk #7)."""
+
+   def router_map(routes: dict[str, Any]) -> dict[str, Any] | None:
+       """Return routes['router'] if a router: block is present, else None.
+
+       Does NOT synthesize endpoint_defaults — the endpoint->group map lives
+       only in adapter.default_agent_group (modes a/b) and router.endpoint_defaults
+       (mode c), never a third place (see §5)."""
 
    def resolve_agent_group(
-       *, path: str, headers: Mapping[str, str], routes: dict[str, Any]
+       *,
+       path: str,
+       headers: Mapping[str, str],
+       routes: dict[str, Any],
+       adapter_default: str,
    ) -> str | None:
        """Resolve the agent group by §5 precedence:
-       x-acr-agent > user_agent_map contains-match > endpoint_defaults[path]
-       > router.fallback. Return None when nothing resolves (caller fails
-       closed). Validate header/result against KNOWN_GROUPS."""
-
-   def provider_upstream(routes: dict[str, Any], group: str) -> str:
-       """agents[group]['upstream'] (compat shim -> server.upstream)."""
+       x-acr-agent > router.user_agent_map contains-match (case-insensitive)
+       > router.endpoint_defaults[path] > router.fallback > adapter_default.
+       Steps 2-4 are skipped when no router: block is present, so modes a/b
+       fall straight through to adapter_default and never return None for a
+       known endpoint. Returns None ONLY when a router: block is present,
+       fallback is null, and steps 1-3 all miss (caller fails closed -> 400).
+       Validates header/result against KNOWN_GROUPS."""
    ```
-   Validation helper rejects a per-provider file that carries any `key_env` under
-   a cheap tier or at top level (raises -> file skipped + WARNING; risk #7).
+   Drop the planned `provider_upstream` — per-group upstream is already served by
+   Phase 5's `decide.agent_upstream(routes, group)`; reuse it (DRY). `auth.key_env`
+   naming a *premium* source is allowed; a bare or cheap-tier `key_env` is rejected
+   by `assemble_routes` (risk #7).
 
 3. **`ai_calls_router/ops/bootstrap.py`** (new; materialize-if-absent, idempotent):
    ```python
@@ -977,21 +1029,34 @@ NOT contain a cheap-tier `key_env`; the cheap credential lives only in global
    duplicated here. Writes are create-only (`if not path.exists()`), so re-running
    is a no-op.
 
-4. **`ai_calls_router/proxy/server.py`**:
+4. **`ai_calls_router/proxy/server.py`** (assembly happens at the server boundary,
+   NOT inside `decide.load_routes` — `provider_config` imports `decide`, so calling
+   `assemble_routes` from inside `decide` would cycle):
    - In `_lifespan` (`server.py:508`), before serving, call
      `bootstrap.ensure_provider_configs()` so missing files are materialized once
      at startup (risk #10).
-   - Replace the `routing.load_routes()` call sites that feed serving
-     (`_serve_passthrough` `server.py:99`, `_resolve_tier_config`
-     `server.py:177`) with `provider_config.assemble_routes(base=load_routes())`
-     so every handler sees the merged canonical dict. (Cache the assembled dict on
-     the same mtime key `load_routes` already uses; assembly is pure.)
-   - Per endpoint handler: resolve identity with
-     `resolve_agent_group(path=..., headers=request.headers, routes=routes)`.
-     On `None`, reject `400` (`{"error": "unresolved agent identity"}`) — do NOT
-     passthrough to a guessed upstream (invariant 2 / D6). Thread the resolved
-     `group` into `_try_route` and `_serve_passthrough` exactly as Phases 2/5
-     already do.
+   - Add one private helper `_load_assembled_routes()` at the server boundary that
+     does `assemble_routes(routing.load_routes(), provider_files=load_provider_files())`
+     and memoizes on the **max** mtime of the global `config.yaml` and every present
+     per-provider file (so editing any `config/*.yaml` invalidates the cache).
+     `load_routes` keeps its own mtime cache for the global file; this helper layers
+     the provider-file mtimes on top.
+   - Replace the two `routing.load_routes()` serving call sites with
+     `_load_assembled_routes()`: `_serve_passthrough` (`server.py:99`) and
+     `_resolve_tier_config` (def `server.py:187`, the `load_routes()` call at
+     `server.py:197`). Every handler then sees the merged canonical dict.
+   - At the `_messages` handler (call site `server.py:443`), replace the Phase 5
+     `resolve_agent_group(adapter.default_agent_group, request.headers)` with
+     `provider_config.resolve_agent_group(path=path, headers=request.headers,
+     routes=routes, adapter_default=adapter.default_agent_group)`. On `None`, reject
+     `400` (`{"error": "unresolved agent identity"}`) BEFORE any credential is
+     attached — do NOT passthrough to a guessed upstream (invariant 2 / D6). Thread
+     the resolved `group` into `_try_route` / `_serve_passthrough` exactly as Phases
+     2/5 already do.
+   - Delete the superseded header-only `resolve_agent_group(default_group, headers)`
+     from `adapters/__init__.py:49` and drop it from `__all__`; the
+     `provider_config` version (router-aware, fail-closed) replaces it. `server.py`
+     stops importing it from `...adapters`.
 
 5. **`ai_calls_router/ops/wizard.py`** — `acr init` also calls
    `bootstrap.ensure_provider_configs()` and seeds the global `router:` block
@@ -1027,12 +1092,14 @@ NOT contain a cheap-tier `key_env`; the cheap credential lives only in global
 - A missing file for one group falls back to the compat shim / `agent_defaults`
   without dropping the other groups (risk #10).
 - `resolve_agent_group` precedence: `x-acr-agent` wins over UA and endpoint;
-  UA `contains`-match wins over endpoint default; endpoint default applies when no
-  header/UA; **unresolved → `None`** when nothing matches and `fallback` unset;
-  `router.fallback` set → returns that group; invalid `x-acr-agent` value →
-  ignored, falls through (not honored).
-- `provider_upstream` returns the per-group upstream; compat shim →
-  `server.upstream`.
+  UA `contains`-match is **case-insensitive** and wins over endpoint default;
+  endpoint default applies when no header/UA; with no router: block (modes a/b)
+  it falls straight through to `adapter_default` and never returns `None`;
+  **unresolved → `None`** ONLY when a router: block is present, `fallback` is unset,
+  and steps 1-3 miss; `router.fallback` set → returns that group; invalid
+  `x-acr-agent` value → ignored, falls through (not honored).
+- `agent_upstream(routes, group)` (Phase 5, reused — no new `provider_upstream`)
+  returns the per-group upstream; compat shim → `server.upstream`.
 - Immutability: `assemble_routes` does not mutate `base`.
 
 `tests/unit/test_bootstrap.py`:
