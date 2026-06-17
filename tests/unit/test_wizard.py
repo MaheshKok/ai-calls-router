@@ -91,6 +91,7 @@ class TestDefaults:
         )
         assert decide.tier_for_tools(["Bash"], routes, group="claude_code") == "fast"
         assert decide.tier_for_tools(["exec_command"], routes, group="codex") == "fast"
+        assert decide.tier_for_tools(["terminal"], routes, group="hermes") == "fast"
 
     def test_default_tools_route_cheap_to_tiers_and_editing_to_premium(
         self, acr_home: Path

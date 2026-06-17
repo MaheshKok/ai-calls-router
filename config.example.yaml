@@ -6,8 +6,9 @@
 #
 # Routing model: each pending tool-result turn is served on the tier mapped to
 # the tool that produced it. Decision-making turns (no pending tool results)
-# and any tool mapped to "premium" pass straight through to Anthropic with the
-# client's OAuth/api-key untouched. Any failure falls back to passthrough.
+# and any tool mapped to "premium" pass straight through to the agent group's
+# own upstream with the client's OAuth/api-key untouched. Any failure falls
+# back to passthrough.
 
 server:
   host: 127.0.0.1

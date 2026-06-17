@@ -883,7 +883,6 @@ release blocker, not a warning.
   the explicit operator opt-out back into passthrough. The two rules do not
   conflict because they govern different layers.
 
-
 ## Phase 7 — Provider-specific YAML routing (drafted as "Phase X")
 
 **Objective.** Make provider identity a first-class routing dimension: Claude Code,
@@ -1122,3 +1121,8 @@ Server-level (mirror existing handler tests):
 
 `make test`/`lint`/`type` clean; coverage ≥ 95%; byte-stability suite (§7) still
 green (assembly must not perturb the routed-body prefix).
+
+## Phase 6 status
+
+DONE. README, example config, wizard parity, and end-to-end smoke coverage now
+document and exercise the three endpoint families and provider-file layout.

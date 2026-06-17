@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from ai_calls_router._lib import config
-from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
+from ai_calls_router.routing.adapters.base import (
+    AGENT_GROUP_ENDPOINTS,
+    AGENT_GROUP_WIRES,
+    KNOWN_GROUPS,
+)
 from ai_calls_router.routing.agent_defaults import (
     AGENT_DEFAULT_PREMIUM_TOOLS,
     AGENT_DEFAULT_TOOLS,
@@ -21,18 +25,6 @@ from ai_calls_router.routing.agent_defaults import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-_WIRE_BY_GROUP: dict[str, str] = {
-    "claude_code": "anthropic_messages",
-    "codex": "openai_responses",
-    "hermes": "openai_chat",
-}
-
-_ENDPOINTS_BY_GROUP: dict[str, list[str]] = {
-    "claude_code": ["/v1/messages"],
-    "codex": ["/v1/responses"],
-    "hermes": ["/v1/chat/completions"],
-}
 
 _UPSTREAM_BY_GROUP: dict[str, str] = {
     "claude_code": config.DEFAULT_UPSTREAM,
@@ -53,8 +45,8 @@ def _provider_template(group: str) -> dict[str, Any]:
         "group": group,
         "upstream": _UPSTREAM_BY_GROUP[group],
         "auth": {"mode": "oauth_passthrough"},
-        "wire": _WIRE_BY_GROUP[group],
-        "endpoints": list(_ENDPOINTS_BY_GROUP[group]),
+        "wire": AGENT_GROUP_WIRES[group],
+        "endpoints": list(AGENT_GROUP_ENDPOINTS[group]),
         "model_defaults": {},
         "tool_choice": "passthrough",
         "reasoning": "strip",

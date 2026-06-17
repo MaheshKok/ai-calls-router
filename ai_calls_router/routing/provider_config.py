@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from ai_calls_router._lib import config
-from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
+from ai_calls_router.routing.adapters.base import (
+    AGENT_GROUP_ENDPOINTS,
+    AGENT_GROUP_WIRES,
+    KNOWN_GROUPS,
+)
 from ai_calls_router.routing.decide import (
     agent_premium_tools,
     agent_tools,
@@ -27,18 +31,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 logger = logging.getLogger("acr.provider_config")
-
-_WIRE_BY_GROUP: dict[str, str] = {
-    "claude_code": "anthropic_messages",
-    "codex": "openai_responses",
-    "hermes": "openai_chat",
-}
-
-_ENDPOINTS_BY_GROUP: dict[str, tuple[str, ...]] = {
-    "claude_code": ("/v1/messages",),
-    "codex": ("/v1/responses",),
-    "hermes": ("/v1/chat/completions",),
-}
 
 
 class ProviderConfigError(ValueError):
@@ -105,12 +97,12 @@ def _validate_provider_payload(group: str, payload: dict[str, Any]) -> None:
         raise ProviderConfigError("provider config group mismatch", group=group)
     if not isinstance(payload.get("upstream"), str) or not payload.get("upstream"):
         raise ProviderConfigError("provider config requires upstream", group=group)
-    if payload.get("wire") != _WIRE_BY_GROUP[group]:
+    if payload.get("wire") != AGENT_GROUP_WIRES[group]:
         raise ProviderConfigError("provider config wire mismatch", group=group)
     endpoints = payload.get("endpoints")
     if not isinstance(endpoints, list) or not all(isinstance(item, str) for item in endpoints):
         raise ProviderConfigError("provider config requires endpoints", group=group)
-    if not set(_ENDPOINTS_BY_GROUP[group]).issubset(endpoints):
+    if not set(AGENT_GROUP_ENDPOINTS[group]).issubset(endpoints):
         raise ProviderConfigError("provider config endpoints mismatch", group=group)
     if _contains_forbidden_key_env(payload):
         raise ProviderConfigError("provider config must not carry cheap key_env", group=group)

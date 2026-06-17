@@ -14,6 +14,18 @@ if TYPE_CHECKING:
 
 KNOWN_GROUPS: frozenset[str] = frozenset({"claude_code", "codex", "hermes"})
 
+AGENT_GROUP_WIRES: dict[str, str] = {
+    "claude_code": "anthropic_messages",
+    "codex": "openai_responses",
+    "hermes": "openai_chat",
+}
+
+AGENT_GROUP_ENDPOINTS: dict[str, tuple[str, ...]] = {
+    "claude_code": ("/v1/messages",),
+    "codex": ("/v1/responses",),
+    "hermes": ("/v1/chat/completions",),
+}
+
 
 class ClientAdapter(Protocol):
     """Describe a client format bridge for the routing engine.

@@ -15,7 +15,11 @@ import pytest
 from ai_calls_router._lib import config
 from ai_calls_router.ops import bootstrap
 from ai_calls_router.routing import provider_config
-from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
+from ai_calls_router.routing.adapters.base import (
+    AGENT_GROUP_ENDPOINTS,
+    AGENT_GROUP_WIRES,
+    KNOWN_GROUPS,
+)
 
 
 def _base_routes() -> dict[str, Any]:
@@ -106,3 +110,10 @@ def test_templates_label_reserved_fields(acr_home: Path) -> None:
     body = config.provider_config_path("codex").read_text(encoding="utf-8")
     assert "Runtime fields: upstream, tools, premium_tools." in body
     assert "Reserved/validated fields:" in body
+
+
+def test_group_wire_endpoint_tables_match_bootstrap_templates() -> None:
+    assert set(AGENT_GROUP_WIRES) == set(KNOWN_GROUPS)
+    assert set(AGENT_GROUP_ENDPOINTS) == set(KNOWN_GROUPS)
+    for group in KNOWN_GROUPS:
+        provider_config._validate_provider_payload(group, bootstrap._provider_template(group))
