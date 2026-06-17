@@ -9,7 +9,7 @@
 Per-tool-result model routing proxy for Claude Code, Codex, and Hermes. It
 serves cheap tool-result-processing turns on any LiteLLM-supported model
 (DeepSeek, Groq, Kimi, OpenRouter, and others) while keeping decision-making
-turns on each agent's own premium upstream and credential.
+turns on each agent's own premium upstream, wire format, and credential.
 
 Claude Code spends a large share of its API turns doing mechanical work:
 reading a file you just grepped, interpreting a `Bash` result, summarizing a
@@ -18,9 +18,30 @@ local reverse proxy that detects them and routes only those turns to a cheaper
 model, transparently, while the turns that actually require reasoning go
 straight to Anthropic untouched.
 
-It is a standalone proxy, not a Claude Code plugin: Claude Code connects through
-`ANTHROPIC_BASE_URL`, Codex through `/v1/responses`, and Hermes through
-`/v1/chat/completions`.
+It is a standalone local proxy, not a Claude Code plugin. Claude Code connects
+through `ANTHROPIC_BASE_URL`, Codex through `/v1/responses`, and Hermes through
+`/v1/chat/completions`. Routed calls are normalized into Anthropic Messages for
+the internal serving core; passthrough calls stay byte-for-byte in the client's
+native provider format.
+
+## What it supports now
+
+- `POST /v1/messages` for Claude Code and Anthropic Messages clients.
+- `POST /v1/chat/completions` for Hermes Chat Completions sessions.
+- `POST /v1/responses` for Codex and Responses-speaking Hermes sessions.
+- Per-agent tool maps for `claude_code`, `hermes`, and `codex`.
+- Per-agent passthrough upstreams, so a non-routed Codex turn goes to OpenAI,
+  a Hermes turn goes to its configured upstream, and a Claude Code turn goes to
+  Anthropic.
+- Provider-specific config files in
+  `~/.ai-calls-router/config/{claude-code,codex,hermes}.yaml`.
+- Identity routing with `x-acr-agent`, `User-Agent` rules, endpoint defaults,
+  and fail-closed unresolved identity.
+- Responses and Chat Completions SSE synthesis for routed OpenAI-compatible
+  clients.
+- DeepSeek direct Anthropic-native serving for cache-stable routed calls.
+- Savings accounting, live dashboard, compression stats, and per-session
+  request history.
 
 ## How it works
 
@@ -34,7 +55,7 @@ flowchart TD
     ROUTE -- "response calls a<br/>premium tool" --> PASS
     ROUTE -- ok --> ACCT["savings.jsonl ledger<br/>(true routed model)"]
     ACCT --> MASK["mask response model to<br/>client-requested id"]
-    MASK --> OUT["synthesized Anthropic SSE<br/>or plain JSON"]
+    MASK --> OUT["client-format JSON/SSE<br/>Anthropic, Chat, or Responses"]
 ```
 
 A request that carries `tool_result` blocks is processing the output of a tool.
@@ -128,21 +149,26 @@ site-packages.
    acr serve
    ```
 
-4. In another terminal, run **any** normal `claude` command with
-   `ANTHROPIC_BASE_URL` pointing at the proxy:
+4. In another terminal, point a client at the proxy:
 
    ```bash
+   # Claude Code / Anthropic Messages
    ANTHROPIC_BASE_URL=http://127.0.0.1:8747 claude
+
+   # Codex / OpenAI Responses
+   OPENAI_BASE_URL=http://127.0.0.1:8747/v1 codex
+
+   # Hermes / OpenAI Chat Completions
+   OPENAI_BASE_URL=http://127.0.0.1:8747/v1 hermes
    ```
 
-   That's the entire Claude Code integration -- no special launcher required. The proxy
-   intercepts every API call and routes tool-result-processing turns to your
-   cheap model transparently; decision-making turns pass straight through to
-   Anthropic.
+   The proxy intercepts every API call and routes tool-result-processing turns
+   to your cheap model transparently. Decision-making turns pass through to the
+   active agent group's own upstream with the client's original headers.
 
-   If you prefer a launcher that also starts the daemon:
-   `acr code -- -p "task"`. For persistent routing across all sessions:
-   `acr desktop on`.
+   Claude Code also has a launcher that starts the daemon:
+   `acr code -- -p "task"`. For persistent Claude Code routing across all
+   sessions: `acr desktop on`.
 
 
 ## How to point Claude Code at the proxy
@@ -225,20 +251,29 @@ Codex should use the local OpenAI-compatible base URL with its own OpenAI
 credential and send `POST /v1/responses` traffic to the router:
 
 ```bash
+export OPENAI_API_KEY=your-openai-key
 OPENAI_BASE_URL=http://127.0.0.1:8747/v1 codex
 ```
 
 Codex passthrough turns go to `https://api.openai.com` by default, and the
 client's own `Authorization` header authenticates that call. Routed turns do
 not forward that header; they use only the cheap tier key named in
-`config.yaml`.
+`config.yaml`. Codex uses the `codex` agent group by default on
+`/v1/responses`; add `x-acr-agent: codex` only when a client or wrapper hides
+its identity.
 
 Hermes Chat Completions traffic should target the same local OpenAI-compatible
 base and send `POST /v1/chat/completions`:
 
 ```bash
+export OPENAI_API_KEY=your-hermes-upstream-key
 OPENAI_BASE_URL=http://127.0.0.1:8747/v1 hermes
 ```
+
+Hermes defaults to the `hermes` agent group on `/v1/chat/completions`.
+Responses-speaking Hermes sessions can still use `/v1/responses`; send
+`x-acr-agent: hermes` so the router uses the Hermes tool map instead of the
+Codex map.
 
 If a client cannot be identified by endpoint or `User-Agent`, send
 `x-acr-agent: codex`, `x-acr-agent: hermes`, or `x-acr-agent: claude_code`.
@@ -257,12 +292,44 @@ That header wins over every router rule.
 | `acr serve` | Run the proxy in the foreground (used by the daemon). |
 | `acr version` | Print the version. |
 
+## Dashboard and accounting
+
+The proxy exposes a local dashboard at:
+
+```text
+http://127.0.0.1:8747/dashboard
+```
+
+It shows recent requests, routed versus passthrough counts, provider labels,
+cache read/write tokens, per-session grouping, agent labels, shrink/compression
+stats, and cumulative savings. The dashboard is backed by in-process metrics
+plus `~/.ai-calls-router/savings.jsonl`; on startup, the proxy replays the
+ledger so routed-token counters and recent routed history survive restarts.
+
+Savings records use the true routed model, not the model name masked back to the
+client. Pricing is best-effort: when neither LiteLLM nor configured per-million
+prices can price a model, the router skips that savings row instead of inventing
+a number.
+
 ## Configuration
 
 The global config lives at `~/.ai-calls-router/config.yaml` (override with
 `$ACR_CONFIG`). Per-provider files live under
 `~/.ai-calls-router/config/{claude-code,codex,hermes}.yaml`. All are reloaded by
 mtime on each request, so edits apply without a restart. The global sections:
+
+```text
+~/.ai-calls-router/
+├── config.yaml
+├── config/
+│   ├── claude-code.yaml
+│   ├── codex.yaml
+│   └── hermes.yaml
+├── .env
+├── acr.log
+├── acr.pid
+└── savings.jsonl
+```
 
 - `server`: bind host, port (default 8747), and the premium upstream.
 - `premium`: reserved for future premium providers; v1 accepts only
@@ -276,6 +343,24 @@ mtime on each request, so edits apply without a restart. The global sections:
   `router.fallback`; `fallback: null` fails closed with `400` when identity is
   unresolved.
 
+Example router policy:
+
+```yaml
+router:
+  endpoint_defaults:
+    /v1/messages: claude_code
+    /v1/chat/completions: hermes
+    /v1/responses: codex
+  user_agent_map:
+    - contains: claude
+      group: claude_code
+    - contains: codex
+      group: codex
+    - contains: hermes
+      group: hermes
+  fallback: null
+```
+
 Provider-file fields actually consumed at runtime:
 
 - `upstream`: passthrough target for that group.
@@ -288,6 +373,33 @@ Provider-file fields reserved or validated but not behavior-driving in v1:
 `fallback`. Provider files must not contain cheap-tier `key_env`; cheap
 credentials live only in global `tiers.*.key_env`.
 
+Example provider file:
+
+```yaml
+group: codex
+upstream: https://api.openai.com
+auth:
+  mode: oauth_passthrough
+wire: responses
+endpoints:
+  - /v1/responses
+tools:
+  exec_command: fast
+  write_stdin: fast
+  update_plan: crud
+  apply_patch: premium
+premium_tools:
+  - apply_patch
+  - spawn_agent
+  - request_user_input
+  - request_plugin_install
+fallback: passthrough
+```
+
+The `auth` block names a credential source; it is not a secret. Do not put API
+keys in provider files. Put cheap-provider keys in environment variables named
+by `tiers.*.key_env`, or in `~/.ai-calls-router/.env`.
+
 Tier prices are optional. The ledger prices a routed model from LiteLLM's own
 pricing table first; supply `input_cost_per_1m` / `output_cost_per_1m` only for
 models LiteLLM does not already know. Unpriced models are omitted from the
@@ -295,11 +407,17 @@ ledger rather than estimated.
 
 ### Compression
 
-Routed turns can be compressed before they are sent to the cheap model to keep
-token costs down: the most recent messages are preserved intact and older
-`tool_result` text is truncated to a character budget. If the `rtk` CLI is on
-your `PATH` and `compression.use_rtk` is `auto`, it is used as the backend;
-otherwise a built-in compressor runs. `rtk` is never required.
+Routed LiteLLM-path turns can be compressed before they are sent to the cheap
+model. The optional `headroom-ai` integration is used when installed; otherwise
+compression is a no-op and serving continues. DeepSeek direct calls bypass this
+compression path so Anthropic-native request bytes stay deterministic for prefix
+caching.
+
+Install the optional compressor when you want it:
+
+```bash
+uv tool install "ai-calls-router[compression]"
+```
 
 ## State and environment
 
@@ -352,11 +470,15 @@ confirmed `claude-real` is the original Desktop-managed binary.
 
 ## Limitations
 
-- Routed turns are buffered, not streamed: the escalation guard needs the
-  complete response before it can be served, so time-to-first-token on a routed
-  turn equals its full completion latency. Decision turns stream normally
-  through passthrough.
-- v1 supports the Anthropic passthrough only for the premium path.
+- Routed turns are internally completed before the response is emitted because
+  the escalation guard must inspect the full cheap-provider response for premium
+  tool calls. Streaming clients still receive client-format SSE, but
+  time-to-first-token on a routed turn equals the cheap completion latency.
+- Passthrough supports each configured agent upstream in that agent's native
+  format. The router does not translate passthrough bodies.
+- Azure/OpenAI server-side Responses state is intentionally not implemented.
+  Codex/OpenAI requests must be self-contained; unsupported stateful turns should
+  passthrough instead of being routed.
 - Claude Desktop support requires the optional embedded Claude Code shim above;
   plain shell environment variables are not enough for Desktop-launched sessions.
 
