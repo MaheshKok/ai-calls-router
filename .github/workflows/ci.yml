@@ -22,7 +22,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install -e ".[dev]"
+      - run: uv pip install -e ".[dev,compression]"
       - run: uv run ruff check ai_calls_router tests
       - run: uv run ruff format --check ai_calls_router tests
 
@@ -35,7 +35,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install -e ".[dev]"
+      - run: uv pip install -e ".[dev,compression]"
       - run: uv run pyright ai_calls_router
 
   # ── Tests (matrix across Python versions) ─────────────────────────
@@ -51,7 +51,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv pip install -e ".[dev]"
+      - run: uv pip install -e ".[dev,compression]"
       - run: uv run pytest -q --cov --cov-report=term-missing --cov-fail-under=95
 
   # ── Security (SAST + dependency audit) ────────────────────────────
@@ -63,7 +63,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install -e ".[dev]"
+      - run: uv pip install -e ".[dev,compression]"
       - run: uv run bandit -r ai_calls_router -c pyproject.toml
       - run: uv run pip-audit
 
@@ -76,7 +76,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install -e ".[dev]"
+      - run: uv pip install -e ".[dev,compression]"
       - run: uv run deptry ai_calls_router
 
   # ── Complexity gate ───────────────────────────────────────────────
