@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from ai_calls_router.routing.adapters.anthropic_messages import AnthropicMessagesAdapter
 from ai_calls_router.routing.adapters.base import KNOWN_GROUPS, ClientAdapter
 from ai_calls_router.routing.adapters.openai_chat import OpenAIChatAdapter
+from ai_calls_router.routing.adapters.openai_responses import OpenAIResponsesAdapter
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -21,6 +22,7 @@ __all__ = [
     "AnthropicMessagesAdapter",
     "ClientAdapter",
     "OpenAIChatAdapter",
+    "OpenAIResponsesAdapter",
     "adapter_for_path",
     "resolve_agent_group",
 ]
@@ -39,6 +41,8 @@ def adapter_for_path(path: str) -> ClientAdapter | None:
         return AnthropicMessagesAdapter()
     if path == "/v1/chat/completions":
         return OpenAIChatAdapter()
+    if path == "/v1/responses":
+        return OpenAIResponsesAdapter()
     return None
 
 

@@ -13,6 +13,7 @@ from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import synthesis
 from ai_calls_router.routing.adapters import adapter_for_path, resolve_agent_group
 from ai_calls_router.routing.adapters.anthropic_messages import AnthropicMessagesAdapter
+from ai_calls_router.routing.adapters.openai_responses import OpenAIResponsesAdapter
 
 
 def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, Any]:
@@ -46,8 +47,11 @@ class TestAdapterForPath:
 
     def test_other_paths_return_none(self) -> None:
         """Leave non-Messages endpoints outside the Phase 1 seam."""
-        assert adapter_for_path("/v1/responses") is None
         assert adapter_for_path("/unknown") is None
+
+    def test_responses_path_returns_openai_responses_adapter(self) -> None:
+        """Return the Responses adapter for the OpenAI Responses endpoint."""
+        assert isinstance(adapter_for_path("/v1/responses"), OpenAIResponsesAdapter)
 
 
 class TestResolveAgentGroup:

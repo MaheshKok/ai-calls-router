@@ -392,6 +392,19 @@ async def chat_completions(request: Request) -> Response:
         return await _handle_routed_request(request)
 
 
+async def responses(request: Request) -> Response:
+    """Decide and serve one /v1/responses request.
+
+    Args:
+        request: Incoming OpenAI Responses request.
+
+    Returns:
+        The routed response or the streamed premium passthrough.
+    """
+    with logging_setup.request_context():
+        return await _handle_routed_request(request)
+
+
 async def _handle_routed_request(request: Request) -> Response:
     """Serve one adapter-backed request inside an active request context."""
     path = request.url.path
@@ -538,6 +551,7 @@ def create_app(transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
             Route("/dashboard", dashboard, methods=["GET"]),
             Route("/v1/messages", messages, methods=["POST"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
+            Route("/v1/responses", responses, methods=["POST"]),
             Route("/{path:path}", proxy, methods=PROXY_METHODS),
         ],
         lifespan=lifespan,

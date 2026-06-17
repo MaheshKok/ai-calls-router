@@ -192,12 +192,6 @@ include = ["ai_calls_router"]
 exclude = ["tests", "build", "dist", ".venv"]
 typeCheckingMode = "standard"
 reportMissingTypeStubs = false
-reportUnknownMemberType = false
-reportUnknownArgumentType = false
-reportUnknownVariableType = false
-reportUnknownParameterType = false
-reportUnknownLambdaType = false
-reportMissingTypeArgument = false
 
 
 [tool.coverage.run]
