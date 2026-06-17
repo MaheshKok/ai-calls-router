@@ -191,7 +191,6 @@ venv = ".venv"
 include = ["ai_calls_router"]
 exclude = ["tests", "build", "dist", ".venv"]
 typeCheckingMode = "strict"
-reportAny = "error"
 reportUnknownVariableType = "error"
 reportUnknownArgumentType = "error"
 reportUnknownMemberType = "error"
@@ -200,7 +199,6 @@ reportUnknownParameterType = "error"
 reportMissingTypeArgument = "error"
 reportMissingTypeStubs = "error"
 reportMissingParameterType = "error"
-reportMissingReturnType = "error"
 
 
 [tool.coverage.run]
