@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -23,7 +22,7 @@ from ai_calls_router.routing.agent_defaults import (
 )
 
 
-def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, Any]:
+def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, object]:
     """Build a request body whose last user message carries tool results.
 
     Args:
@@ -45,10 +44,10 @@ def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, Any]:
     }
 
 
-class _ExplodingRoutes(dict[str, Any]):
+class _ExplodingRoutes(dict[str, object]):
     """Routes mapping that raises during lookup to exercise fail-open fallbacks."""
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def get(self, key: str, default: object = None) -> object:
         raise RuntimeError(f"boom: {key}")
 
 
@@ -162,7 +161,7 @@ class TestLookupTool:
 
 
 class TestTierForTools:
-    ROUTES: dict[str, Any] = {
+    ROUTES: dict[str, object] = {
         "settings": {"tier_precedence": ["premium", "structured", "code", "fast", "crud"]},
         "agents": {
             "claude_code": {

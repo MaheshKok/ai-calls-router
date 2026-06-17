@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Any
 
 import pytest
 
@@ -23,7 +22,7 @@ from ai_calls_router._lib.openai_inbound import (
 from ai_calls_router.routing.adapters.openai_chat import OpenAIChatAdapter
 
 
-def _tool_call() -> dict[str, Any]:
+def _tool_call() -> dict[str, object]:
     """Return an OpenAI function tool call with ordered arguments."""
     return {
         "id": "call_abc",

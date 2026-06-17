@@ -11,7 +11,54 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Protocol, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
+
+
+class _LiteLLMFunction(Protocol):
+    """Function-call object shape returned by LiteLLM."""
+
+    name: str
+    arguments: str
+
+
+class _LiteLLMToolCall(Protocol):
+    """Tool-call object shape returned by LiteLLM."""
+
+    id: str
+    function: _LiteLLMFunction
+
+
+class _LiteLLMMessage(Protocol):
+    """Assistant message object shape returned by LiteLLM."""
+
+    content: str | None
+    tool_calls: Sequence[_LiteLLMToolCall] | None
+
+
+class _LiteLLMChoice(Protocol):
+    """Choice object shape returned by LiteLLM."""
+
+    message: _LiteLLMMessage
+    finish_reason: str | None
+
+
+class _LiteLLMUsage(Protocol):
+    """Usage object shape returned by LiteLLM."""
+
+    prompt_tokens: int
+    completion_tokens: int
+
+
+class LiteLLMResponse(Protocol):
+    """LiteLLM response shape consumed by this converter."""
+
+    choices: Sequence[_LiteLLMChoice]
+    usage: _LiteLLMUsage
 
 
 @dataclass
@@ -25,13 +72,13 @@ class BackendResponse:
         error: Error message, if any.
     """
 
-    body: dict[str, Any]
+    body: JsonObject
     status_code: int = 200
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=lambda: {})
     error: str | None = None
 
 
-def convert_anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
+def convert_anthropic_tool(tool: JsonObject) -> JsonObject:
     """Convert an Anthropic tool definition to OpenAI function format.
 
     Anthropic: {"name": ..., "description": ..., "input_schema": {...}}
@@ -43,7 +90,7 @@ def convert_anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
     Returns:
         OpenAI-format function tool definition.
     """
-    func: dict[str, Any] = {"name": tool.get("name", "")}
+    func: JsonObject = {"name": tool.get("name", "")}
     if "description" in tool:
         func["description"] = tool["description"]
     if "input_schema" in tool:
@@ -51,7 +98,7 @@ def convert_anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
     return {"type": "function", "function": func}
 
 
-def convert_tool_choice(choice: Any) -> Any:
+def convert_tool_choice(choice: JsonValue) -> str | JsonObject:
     """Convert an Anthropic tool_choice to OpenAI format.
 
     Anthropic: {"type": "auto"}, {"type": "any"}, {"type": "tool", "name": ...}
@@ -76,7 +123,7 @@ def convert_tool_choice(choice: Any) -> Any:
     return "auto"
 
 
-def parse_tool_arguments(arguments: Any) -> Any:
+def parse_tool_arguments(arguments: JsonValue) -> JsonValue:
     """Parse tool call arguments from a JSON string to a dict.
 
     LiteLLM/OpenAI returns arguments as a JSON string, but Anthropic expects
@@ -90,25 +137,25 @@ def parse_tool_arguments(arguments: Any) -> Any:
     """
     if isinstance(arguments, str):
         try:
-            return json.loads(arguments)
+            return cast("JsonValue", json.loads(arguments))
         except (json.JSONDecodeError, TypeError):
             return arguments
     return arguments
 
 
 def _partition_content_blocks(
-    content: list[dict[str, Any]],
-) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    content: Sequence[JsonValue],
+) -> tuple[list[str], list[JsonObject], list[JsonObject]]:
     """Partition Anthropic content blocks into text / tool_use / tool_result."""
     text_parts: list[str] = []
-    tool_use_blocks: list[dict[str, Any]] = []
-    tool_result_blocks: list[dict[str, Any]] = []
+    tool_use_blocks: list[JsonObject] = []
+    tool_result_blocks: list[JsonObject] = []
     for block in content:
         if not isinstance(block, dict):
             continue
         block_type = block.get("type", "")
         if block_type == "text":
-            text_parts.append(block.get("text", ""))
+            text_parts.append(str(block.get("text", "")))
         elif block_type == "tool_use":
             tool_use_blocks.append(block)
         elif block_type == "tool_result":
@@ -116,18 +163,22 @@ def _partition_content_blocks(
     return text_parts, tool_use_blocks, tool_result_blocks
 
 
-def _flatten_tool_result_content(tr_content: Any) -> str:
+def _flatten_tool_result_content(tr_content: JsonValue) -> str:
     """Flatten a tool_result content (list of text blocks) to a single string."""
     if isinstance(tr_content, list):
-        return "\n".join(b.get("text", "") for b in tr_content if b.get("type") == "text")
+        return "\n".join(
+            str(block.get("text", ""))
+            for block in cast("JsonArray", tr_content)
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
     return str(tr_content)
 
 
 def _emit_tool_result_messages(
-    tool_result_blocks: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+    tool_result_blocks: list[JsonObject],
+) -> list[JsonObject]:
     """Emit OpenAI role=tool messages for Anthropic tool_result blocks."""
-    messages: list[dict[str, Any]] = []
+    messages: list[JsonObject] = []
     for tr in tool_result_blocks:
         messages.append(
             {
@@ -139,11 +190,9 @@ def _emit_tool_result_messages(
     return messages
 
 
-def _emit_tool_use_message(
-    tool_use_blocks: list[dict[str, Any]], text_parts: list[str]
-) -> dict[str, Any]:
+def _emit_tool_use_message(tool_use_blocks: list[JsonObject], text_parts: list[str]) -> JsonObject:
     """Emit an OpenAI assistant message with tool_calls."""
-    msg: dict[str, Any] = {"role": "assistant"}
+    msg: JsonObject = {"role": "assistant"}
     msg["content"] = "\n".join(text_parts) if text_parts else None
     msg["tool_calls"] = [
         {
@@ -159,14 +208,14 @@ def _emit_tool_use_message(
     return msg
 
 
-def _backfill_reasoning(converted: list[dict[str, Any]]) -> None:
+def _backfill_reasoning(converted: list[JsonObject]) -> None:
     """Ensure every assistant message has reasoning_content (DeepSeek requirement)."""
     for msg in converted:
         if msg.get("role") == "assistant":
             msg.setdefault("reasoning_content", "")
 
 
-def convert_messages_for_litellm(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def convert_messages_for_litellm(messages: list[JsonObject]) -> list[JsonObject]:
     """Convert Anthropic messages to LiteLLM/OpenAI format.
 
     Anthropic represents tool traffic as content blocks (type=tool_use on
@@ -183,14 +232,14 @@ def convert_messages_for_litellm(messages: list[dict[str, Any]]) -> list[dict[st
     Returns:
         New OpenAI-format message list.
     """
-    converted: list[dict[str, Any]] = []
+    converted: list[JsonObject] = []
     for msg in messages:
         converted.extend(_convert_single_message(msg))
     _backfill_reasoning(converted)
     return converted
 
 
-def _convert_single_message(msg: dict[str, Any]) -> list[dict[str, Any]]:
+def _convert_single_message(msg: JsonObject) -> list[JsonObject]:
     """Convert one Anthropic message to zero or more LiteLLM/OpenAI messages."""
     role = msg.get("role", "user")
     content = msg.get("content", "")
@@ -200,6 +249,7 @@ def _convert_single_message(msg: dict[str, Any]) -> list[dict[str, Any]]:
 
     if not isinstance(content, list):
         return []
+    content = cast("list[JsonObject]", content)
 
     text_parts, tool_use_blocks, tool_result_blocks = _partition_content_blocks(content)
 
@@ -215,7 +265,7 @@ def _convert_single_message(msg: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"role": role, "content": ""}]
 
 
-def to_anthropic_response(litellm_response: Any, original_model: str) -> dict[str, Any]:
+def to_anthropic_response(litellm_response: LiteLLMResponse, original_model: str) -> JsonObject:
     """Convert a LiteLLM/OpenAI completion response to Anthropic format.
 
     Args:
@@ -230,7 +280,7 @@ def to_anthropic_response(litellm_response: Any, original_model: str) -> dict[st
     choice = litellm_response.choices[0]
     message = choice.message
 
-    content: list[dict[str, Any]] = []
+    content: list[JsonObject] = []
     if message.content:
         content.append({"type": "text", "text": message.content})
 
@@ -251,35 +301,41 @@ def to_anthropic_response(litellm_response: Any, original_model: str) -> dict[st
         "tool_calls": "tool_use",
         "content_filter": "end_turn",
     }
-    stop_reason = stop_reason_map.get(choice.finish_reason, "end_turn")
+    stop_reason = stop_reason_map.get(choice.finish_reason or "", "end_turn")
 
     usage = {
         "input_tokens": getattr(litellm_response.usage, "prompt_tokens", 0),
         "output_tokens": getattr(litellm_response.usage, "completion_tokens", 0),
     }
 
-    return {
-        "id": msg_id,
-        "type": "message",
-        "role": "assistant",
-        "content": content,
-        "model": original_model,
-        "stop_reason": stop_reason,
-        "stop_sequence": None,
-        "usage": usage,
-    }
+    return cast(
+        "JsonObject",
+        {
+            "id": msg_id,
+            "type": "message",
+            "role": "assistant",
+            "content": content,
+            "model": original_model,
+            "stop_reason": stop_reason,
+            "stop_sequence": None,
+            "usage": usage,
+        },
+    )
 
 
-def _insert_system_message(messages: list[dict[str, Any]], system: Any) -> None:
+def _insert_system_message(messages: list[JsonObject], system: JsonValue) -> None:
     """Insert a system message at the front of the message list."""
     if isinstance(system, str):
         messages.insert(0, {"role": "system", "content": system})
     elif isinstance(system, list):
-        parts = (s.get("text", "") if isinstance(s, dict) else str(s) for s in system)
+        parts = (
+            str(item.get("text", "")) if isinstance(item, dict) else str(item)
+            for item in cast("JsonArray", system)
+        )
         messages.insert(0, {"role": "system", "content": " ".join(parts)})
 
 
-def completion_kwargs(body: dict[str, Any], api_key: str | None = None) -> dict[str, Any]:
+def completion_kwargs(body: JsonObject, api_key: str | None = None) -> JsonObject:
     """Assemble litellm.acompletion kwargs from an Anthropic request body.
 
     Only explicitly recognized fields are translated; everything else in the
@@ -294,9 +350,13 @@ def completion_kwargs(body: dict[str, Any], api_key: str | None = None) -> dict[
     Returns:
         Keyword arguments for litellm.acompletion.
     """
-    kwargs: dict[str, Any] = {
+    messages = body.get("messages")
+    converted_messages = convert_messages_for_litellm(
+        cast("list[JsonObject]", messages) if isinstance(messages, list) else []
+    )
+    kwargs: JsonObject = {
         "model": body.get("model", ""),
-        "messages": convert_messages_for_litellm(body.get("messages", [])),
+        "messages": cast("JsonValue", converted_messages),
     }
 
     field_pairs: tuple[tuple[str, str], ...] = (
@@ -311,12 +371,22 @@ def completion_kwargs(body: dict[str, Any], api_key: str | None = None) -> dict[
         kwargs["stop"] = body["stop_sequences"]
 
     if "tools" in body:
-        kwargs["tools"] = [convert_anthropic_tool(t) for t in body["tools"]]
+        tools = body["tools"]
+        kwargs["tools"] = cast(
+            "JsonValue",
+            [
+                convert_anthropic_tool(tool)
+                for tool in cast("JsonArray", tools)
+                if isinstance(tool, dict)
+            ]
+            if isinstance(tools, list)
+            else [],
+        )
     if "tool_choice" in body:
         kwargs["tool_choice"] = convert_tool_choice(body["tool_choice"])
 
     if "system" in body:
-        _insert_system_message(kwargs["messages"], body["system"])
+        _insert_system_message(converted_messages, body["system"])
 
     if api_key:
         kwargs["api_key"] = api_key

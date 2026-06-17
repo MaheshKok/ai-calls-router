@@ -18,10 +18,10 @@ import json
 import logging
 import os
 import threading
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 import httpx
 from starlette.applications import Starlette
@@ -40,6 +40,7 @@ from ai_calls_router.routing.adapters import adapter_for_path
 from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
 
 if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject, JsonValue
     from ai_calls_router.routing.adapters.base import ClientAdapter
 
 logger = logging.getLogger("acr.server")
@@ -53,20 +54,20 @@ class _RouteAttempt:
     tier: str = "premium"
     reason: str = "passthrough"
     model: str = ""
-    tool_names: list[str] = field(default_factory=list)
+    tool_names: list[str] = field(default_factory=lambda: [])
 
 
 @dataclass
 class _RoutesCache:
     signature: tuple[tuple[str, float], ...] | None = None
-    routes: dict[str, Any] | None = None
+    routes: JsonObject | None = None
 
 
 _ROUTES_CACHE_LOCK = threading.Lock()
 _ROUTES_CACHE = _RoutesCache()
 
 
-def _request_summary(body: dict[str, Any]) -> str:
+def _request_summary(body: JsonObject) -> str:
     messages = body.get("messages")
     msg_count = len(messages) if isinstance(messages, list) else 0
     model = body.get("model")
@@ -93,8 +94,8 @@ def _assembled_routes_signature() -> tuple[tuple[str, float], ...]:
 
 
 def _assemble_routes_fail_open(
-    base: dict[str, Any], provider_files: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
+    base: JsonObject, provider_files: dict[str, JsonObject]
+) -> JsonObject:
     """Assemble routes, dropping invalid provider payloads one at a time."""
     remaining = dict(provider_files)
     while True:
@@ -116,7 +117,7 @@ def _assemble_routes_fail_open(
                 return provider_config.assemble_routes(base, provider_files={})
 
 
-def _load_assembled_routes() -> dict[str, Any]:
+def _load_assembled_routes() -> JsonObject:
     """Load the canonical routes dict assembled from global and provider YAML."""
     signature = _assembled_routes_signature()
     with _ROUTES_CACHE_LOCK:
@@ -224,7 +225,7 @@ def _user_agent(request: Request) -> str:
 
 def _premium_usage_callback(
     *,
-    m: metrics._Metrics,
+    m: metrics.Metrics,
     request_id: str,
 ) -> Callable[[int, dict[str, int], float], None]:
     """Build a callback that updates metrics after premium passthrough completes."""
@@ -258,7 +259,7 @@ def _resolve_tier_config(
     names: list[str],
     *,
     group: str,
-) -> tuple[str, dict[str, Any] | None, str | None, dict[str, Any]]:
+) -> tuple[str, JsonObject | None, str | None, JsonObject]:
     """Resolve the tier, its config, and API key from loaded routes.
 
     Returns (tier_name, tier_cfg, api_key, raw_routes). When tier_cfg or
@@ -268,10 +269,12 @@ def _resolve_tier_config(
     tier = routing.tier_for_tools(names, routes, group=group)
     if tier == "premium":
         return "premium", None, None, routes
-    tier_cfg = (routes.get("tiers") or {}).get(tier)
+    tiers = routes.get("tiers")
+    tier_cfg = tiers.get(tier) if isinstance(tiers, dict) else None
     if not isinstance(tier_cfg, dict):
         return tier, None, None, routes
-    settings_cfg = routes.get("settings") or {}
+    settings_value = routes.get("settings")
+    settings_cfg = settings_value if isinstance(settings_value, dict) else {}
     api_key = routing.resolve_api_key(tier_cfg, settings_cfg)
     if not api_key:
         logger.info("acr: tier=%s has no API key; passing through", tier)
@@ -361,7 +364,7 @@ async def _try_route(
         A route attempt carrying either the routed response or the passthrough reason.
     """
     try:
-        body = json.loads(body_bytes)
+        body = cast("JsonValue", json.loads(body_bytes))
         if not isinstance(body, dict):
             return _RouteAttempt(reason="non_object_body")
         anthropic_body = adapter.to_anthropic_request(body)
@@ -384,7 +387,8 @@ async def _try_route(
                 reason="tier_unavailable", requested_model=requested_model, names=names, tier=tier
             )
         savings.register_tier_prices(routes)
-        settings_cfg = routes.get("settings") or {}
+        settings_value = routes.get("settings")
+        settings_cfg = settings_value if isinstance(settings_value, dict) else {}
         premium_tools = routing.agent_premium_tools(routes, group)
         response_guard_tools: list[str] = []
 
@@ -436,7 +440,7 @@ async def _try_route(
         return _RouteAttempt(reason="routing_error")
 
 
-def _wants_stream(client_body: dict[str, Any], anthropic_body: dict[str, Any]) -> bool:
+def _wants_stream(client_body: JsonObject, anthropic_body: JsonObject) -> bool:
     """Return whether the client requested a streaming response."""
     stream = client_body.get("stream")
     if isinstance(stream, bool):
@@ -491,8 +495,8 @@ async def _handle_routed_request(request: Request) -> Response:
     body_bytes = await request.body()
     agent = metrics.identify_agent(_user_agent(request))
     try:
-        payload: Any = json.loads(body_bytes)
-        body_dict: Any = payload if isinstance(payload, dict) else None
+        payload = cast("JsonValue", json.loads(body_bytes))
+        body_dict = payload if isinstance(payload, dict) else None
     except Exception:
         body_dict = None
     session = metrics.session_fingerprint(
@@ -598,7 +602,7 @@ async def proxy(request: Request) -> Response:
 @contextlib.asynccontextmanager
 async def _lifespan(
     app: Starlette, transport: httpx.AsyncBaseTransport | None = None
-) -> AsyncIterator[None]:
+) -> AsyncGenerator[None, None]:
     """Own the shared upstream HTTP client for the app's lifetime.
 
     Args:
@@ -638,7 +642,7 @@ def create_app(transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
         Path.cwd(),
         config.log_path(),
     )
-    lifespan: Any = functools.partial(_lifespan, transport=transport)
+    lifespan = functools.partial(_lifespan, transport=transport)
     return Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),

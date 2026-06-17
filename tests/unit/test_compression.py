@@ -13,14 +13,13 @@ list with path "compress". The tests inject a fake compressor through the
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import pytest
 
 from ai_calls_router.routing import compression
 
 
-def _openai_messages(tool_content: str) -> list[dict[str, Any]]:
+def _openai_messages(tool_content: str) -> list[dict[str, object]]:
     """Build a minimal OpenAI-shaped conversation with one tool result.
 
     Args:
@@ -42,14 +41,14 @@ def _openai_messages(tool_content: str) -> list[dict[str, Any]]:
     ]
 
 
-def _shrink_tool_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _shrink_tool_content(messages: list[dict[str, object]]) -> list[dict[str, object]]:
     """Return a new message list with role=tool content halved.
 
     Mirrors what a real compressor does to the converted messages: it shrinks
     string content in place of a message, producing a new list (the input is
     never mutated, matching the wrapper's no-mutation contract).
     """
-    out: list[dict[str, Any]] = []
+    out: list[dict[str, object]] = []
     for message in messages:
         content = message.get("content")
         if message.get("role") == "tool" and isinstance(content, str):
@@ -62,16 +61,16 @@ def _shrink_tool_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]
 class _FakeCompressor:
     """Records calls and returns a CompressResult-shaped object."""
 
-    def __init__(self, transform: Any) -> None:
+    def __init__(self, transform: object) -> None:
         """Store the transform applied to the messages on each call.
 
         Args:
             transform: Callable mapping the input messages to compressed output.
         """
-        self.calls: list[dict[str, Any]] = []
+        self.calls: list[dict[str, object]] = []
         self._transform = transform
 
-    def __call__(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
+    def __call__(self, messages: list[dict[str, object]], **kwargs: object) -> object:
         """Record kwargs and return an object exposing ``.messages``."""
         self.calls.append({"messages": messages, **kwargs})
         from types import SimpleNamespace
@@ -80,7 +79,7 @@ class _FakeCompressor:
 
 
 @pytest.fixture(autouse=True)
-def _clear_compressor_cache() -> Any:
+def _clear_compressor_cache() -> object:
     """Reset the lru_cache around _load_compressor between tests."""
     compression._load_compressor.cache_clear()
     yield
@@ -168,7 +167,7 @@ class TestCompressLitellmMessages:
         # Compression is best-effort: a compress() that raises must not propagate.
         # The wrapper returns the input unchanged, reports "none", and logs the
         # failure with context (never silently swallowed).
-        def _boom(messages: list[dict[str, Any]], **_: Any) -> Any:
+        def _boom(messages: list[dict[str, object]], **_: object) -> object:
             raise RuntimeError("tokenizer exploded")
 
         monkeypatch.setattr(compression, "_load_compressor", lambda: _boom)
@@ -241,7 +240,7 @@ class TestLoadCompressor:
 
         real_import = builtins.__import__
 
-        def _no_headroom(name: str, *args: Any, **kwargs: Any) -> Any:
+        def _no_headroom(name: str, *args: object, **kwargs: object) -> object:
             if name == "headroom":
                 raise ImportError("no headroom")
             return real_import(name, *args, **kwargs)

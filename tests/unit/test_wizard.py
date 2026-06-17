@@ -13,7 +13,6 @@ router block in config.yaml and materializes per-provider agent YAML files.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml
@@ -45,7 +44,7 @@ def acr_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _written_config(path: Path) -> dict[str, Any]:
+def _written_config(path: Path) -> dict[str, object]:
     """Parse the YAML the wizard wrote."""
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 

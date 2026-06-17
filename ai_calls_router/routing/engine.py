@@ -19,13 +19,16 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
+
 from ai_calls_router._lib.conversion import (
     BackendResponse,
+    LiteLLMResponse,
     completion_kwargs,
     to_anthropic_response,
 )
@@ -38,31 +41,38 @@ from ai_calls_router.routing.compression import compress_litellm_messages
 logger = logging.getLogger("acr.routed_call")
 
 
-def _strip_thinking_from_messages(body: dict[str, Any], routed: dict[str, Any]) -> None:
+class _LiteLLMCompletion(Protocol):
+    """LiteLLM async completion surface used by the routed engine."""
+
+    async def acompletion(self, **kwargs: JsonValue) -> LiteLLMResponse: ...
+
+
+def _strip_thinking_from_messages(body: JsonObject, routed: JsonObject) -> None:
     """Strip thinking blocks from messages, dropping emptied assistant messages."""
     messages = body.get("messages")
     if not isinstance(messages, list):
         return
-    cleaned: list[Any] = []
-    for msg in messages:
-        content = msg.get("content") if isinstance(msg, dict) else None
+    cleaned: JsonArray = []
+    for msg in cast("JsonArray", messages):
+        if not isinstance(msg, dict):
+            cleaned.append(msg)
+            continue
+        content = msg.get("content")
         if not isinstance(content, list):
             cleaned.append(msg)
             continue
         blocks = [
             b
-            for b in content
+            for b in cast("JsonArray", content)
             if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
         ]
         if not blocks and msg.get("role") == "assistant":
             continue
-        cleaned.append({**msg, "content": blocks})
+        cleaned.append(cast("JsonObject", {**msg, "content": blocks}))
     routed["messages"] = cleaned
 
 
-def _clamp_max_tokens(
-    body: dict[str, Any], tier_cfg: dict[str, Any], routed: dict[str, Any]
-) -> None:
+def _clamp_max_tokens(body: JsonObject, tier_cfg: JsonObject, routed: JsonObject) -> None:
     """Clamp max_tokens to the tier limit when needed."""
     tier_max = tier_cfg.get("max_tokens")
     if isinstance(tier_max, int) and not isinstance(tier_max, bool) and tier_max > 0:
@@ -71,7 +81,7 @@ def _clamp_max_tokens(
             routed["max_tokens"] = tier_max
 
 
-def _prepare_routed_body(body: dict[str, Any], tier_cfg: dict[str, Any]) -> dict[str, Any]:
+def _prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
     """Rewrite a client request body for the tier model.
 
     Swaps in the tier model, removes the stream flag (routed calls are
@@ -95,17 +105,24 @@ def _prepare_routed_body(body: dict[str, Any], tier_cfg: dict[str, Any]) -> dict
     return routed
 
 
-def _usage_int(usage: dict[str, Any], key: str) -> int:
+def _usage_int(usage: JsonObject, key: str) -> int:
     """Return a non-negative integer usage counter from a response body."""
-    value = usage.get(key, 0)
-    try:
-        count = int(value)
-    except (TypeError, ValueError):
+    return _json_int(usage.get(key, 0))
+
+
+def _json_int(value: JsonValue) -> int:
+    """Coerce a JSON usage value to non-negative int."""
+    if isinstance(value, bool):
         return 0
-    return max(count, 0)
+    if isinstance(value, int | float | str):
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
 
 
-def _usage_summary(response_body: dict[str, Any]) -> str:
+def _usage_summary(response_body: JsonObject) -> str:
     """Return a compact token/cache summary for routing logs."""
     raw_usage = response_body.get("usage")
     usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -128,8 +145,8 @@ def _shrink_summary(stats: shrink_stats.ShrinkStats) -> str:
 
 
 def escalates(
-    response_body: dict[str, Any],
-    settings: dict[str, Any],
+    response_body: JsonObject,
+    settings: JsonObject,
     *,
     premium_tools: list[str] | None = None,
 ) -> bool:
@@ -150,16 +167,19 @@ def escalates(
 
 
 def _premium_tool_names(
-    response_body: dict[str, Any],
-    settings: dict[str, Any],
+    response_body: JsonObject,
+    settings: JsonObject,
     *,
     premium_tools: list[str] | None = None,
 ) -> list[str]:
     """Return premium tool names invoked by a routed response."""
     if not settings.get("escalate_on_premium_tools", True):
         return []
-    guard_tools = set(
-        premium_tools if premium_tools is not None else settings.get("premium_tools") or []
+    raw_tools = premium_tools if premium_tools is not None else settings.get("premium_tools")
+    guard_tools: set[str] = (
+        {tool for tool in raw_tools if isinstance(tool, str)}
+        if isinstance(raw_tools, list)
+        else set()
     )
     if not guard_tools:
         return []
@@ -167,8 +187,8 @@ def _premium_tool_names(
     if not isinstance(content, list):
         return []
     return [
-        block["name"]
-        for block in content
+        str(block["name"])
+        for block in cast("JsonArray", content)
         if isinstance(block, dict)
         and block.get("type") == "tool_use"
         and block.get("name") in guard_tools
@@ -178,11 +198,11 @@ def _premium_tool_names(
 
 async def _serve_via_litellm(
     *,
-    body: dict[str, Any],
-    tier_cfg: dict[str, Any],
+    body: JsonObject,
+    tier_cfg: JsonObject,
     api_key: str,
     compress: bool,
-) -> tuple[dict[str, Any], shrink_stats.ShrinkStats]:
+) -> tuple[JsonObject, shrink_stats.ShrinkStats]:
     """Serve a turn through LiteLLM, optionally compressing the routed messages.
 
     Rewrites the body for the tier model, converts it to OpenAI format, calls
@@ -210,22 +230,28 @@ async def _serve_via_litellm(
     routed_body = _prepare_routed_body(body, tier_cfg)
     kwargs = completion_kwargs(routed_body, api_key)
     if compress:
-        kwargs["messages"], stats = compress_litellm_messages(
-            kwargs["messages"], model=tier_cfg["model"]
-        )
+        messages = kwargs.get("messages")
+        model = tier_cfg.get("model")
+        if not isinstance(messages, list) or not isinstance(model, str):
+            stats = shrink_stats.compute_shrink(path="none", before=body, after=body)
+        else:
+            kwargs["messages"], stats = compress_litellm_messages(
+                cast("JsonArray", messages), model=model
+            )
     else:
         stats = shrink_stats.compute_shrink(path="none", before=body, after=body)
-    litellm = load_litellm()
+    litellm = cast("_LiteLLMCompletion", load_litellm())
     raw = await litellm.acompletion(**kwargs)
-    return to_anthropic_response(raw, tier_cfg["model"]), stats
+    model = tier_cfg.get("model")
+    return to_anthropic_response(raw, model if isinstance(model, str) else ""), stats
 
 
 async def _serve_via_direct(
     *,
-    body: dict[str, Any],
-    tier_cfg: dict[str, Any],
+    body: JsonObject,
+    tier_cfg: JsonObject,
     api_key: str,
-) -> tuple[dict[str, Any] | None, shrink_stats.ShrinkStats]:
+) -> tuple[JsonObject | None, shrink_stats.ShrinkStats]:
     """Serve a turn directly on the provider's native Anthropic endpoint.
 
     Skips LiteLLM conversion and sends the body unmodified so consecutive
@@ -253,17 +279,18 @@ async def _serve_via_direct(
     return response, stats
 
 
-def _token_fields(body: dict[str, Any]) -> dict[str, int]:
+def _token_fields(body: JsonObject) -> dict[str, int]:
     """Extract token counts from an Anthropic usage block.
 
     Returns a dict with keys: input, output, cache_read, cache_creation.
     """
-    usage = body.get("usage") or {}
+    usage_value = body.get("usage")
+    usage = usage_value if isinstance(usage_value, dict) else {}
     return {
-        "input": int(usage.get("input_tokens", 0) or 0),
-        "output": int(usage.get("output_tokens", 0) or 0),
-        "cache_read": int(usage.get("cache_read_input_tokens", 0) or 0),
-        "cache_creation": int(usage.get("cache_creation_input_tokens", 0) or 0),
+        "input": _json_int(usage.get("input_tokens", 0)),
+        "output": _json_int(usage.get("output_tokens", 0)),
+        "cache_read": _json_int(usage.get("cache_read_input_tokens", 0)),
+        "cache_creation": _json_int(usage.get("cache_creation_input_tokens", 0)),
     }
 
 
@@ -276,7 +303,7 @@ def _record_metrics(
     direct: bool,
     tool_names: list[str],
     user_agent: str,
-    anthropic_body: dict[str, Any],
+    anthropic_body: JsonObject,
     elapsed: float,
     shrink: shrink_stats.ShrinkStats,
     agent: str = "",
@@ -317,11 +344,11 @@ def _record_metrics(
 
 async def routed_call(
     *,
-    body: dict[str, Any],
+    body: JsonObject,
     tier_name: str,
-    tier_cfg: dict[str, Any],
+    tier_cfg: JsonObject,
     api_key: str,
-    settings: dict[str, Any],
+    settings: JsonObject,
     tool_names: list[str] | None = None,
     premium_tools: list[str] | None = None,
     request_path: str = "/v1/messages",
@@ -362,7 +389,8 @@ async def routed_call(
         A BackendResponse with the masked Anthropic body, or None when the
         caller must replay the turn on premium passthrough.
     """
-    premium_model = body.get("model")
+    premium_model_value = body.get("model")
+    premium_model = premium_model_value if isinstance(premium_model_value, str) else None
     model = tier_cfg.get("model")
     direct = anthropic_direct.direct_endpoint(model) is not None
     _tool_names = tool_names or []

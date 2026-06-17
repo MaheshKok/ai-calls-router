@@ -122,7 +122,7 @@ ignore = [
     "PLR0913",  # too many arguments — already enforced by keyword-only rule
     "PLR2004",  # magic value comparisons in tests
 ]
-#extend-select = ["ANN401"]
+extend-select = ["ANN401"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15
@@ -190,8 +190,17 @@ venvPath = "."
 venv = ".venv"
 include = ["ai_calls_router"]
 exclude = ["tests", "build", "dist", ".venv"]
-typeCheckingMode = "standard"
-reportMissingTypeStubs = false
+typeCheckingMode = "strict"
+reportAny = "error"
+reportUnknownVariableType = "error"
+reportUnknownArgumentType = "error"
+reportUnknownMemberType = "error"
+reportUnknownLambdaType = "error"
+reportUnknownParameterType = "error"
+reportMissingTypeArgument = "error"
+reportMissingTypeStubs = "error"
+reportMissingParameterType = "error"
+reportMissingReturnType = "error"
 
 
 [tool.coverage.run]

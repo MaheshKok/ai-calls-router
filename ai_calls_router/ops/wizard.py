@@ -14,12 +14,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 import yaml
 
 from ai_calls_router._lib import config
 from ai_calls_router.ops import bootstrap
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject
 
 DEFAULT_PROVIDER = "deepseek"
 
@@ -94,7 +97,7 @@ TIER_MAX_TOKENS: dict[str, int] = {"fast": 8192, "structured": 8192, "code": 819
 AskFn = Callable[[str], str]
 
 
-def _router_config() -> dict[str, Any]:
+def _router_config() -> JsonObject:
     """Return the default Phase 7 identity routing block for config.yaml."""
     return {
         "endpoint_defaults": {
@@ -172,9 +175,7 @@ def _default_key_env(provider: str, models: dict[str, str]) -> str:
     return f"{prefix.upper().replace('-', '_')}_API_KEY"
 
 
-def _build_config(
-    *, port: int, models: dict[str, str], key_env: str, provider: str
-) -> dict[str, Any]:
+def _build_config(*, port: int, models: dict[str, str], key_env: str, provider: str) -> JsonObject:
     """Assemble the full config.yaml mapping.
 
     Args:
@@ -199,20 +200,23 @@ def _build_config(
         }
         for tier in TIER_MAX_TOKENS
     }
-    return {
-        "server": {
-            "host": config.DEFAULT_HOST,
-            "port": port,
-            "upstream": config.DEFAULT_UPSTREAM,
+    return cast(
+        "JsonObject",
+        {
+            "server": {
+                "host": config.DEFAULT_HOST,
+                "port": port,
+                "upstream": config.DEFAULT_UPSTREAM,
+            },
+            "premium": {"provider": "anthropic"},
+            "router": _router_config(),
+            "settings": {
+                "tier_precedence": ["premium", "structured", "code", "fast", "crud"],
+                "escalate_on_premium_tools": True,
+            },
+            "tiers": tiers,
         },
-        "premium": {"provider": "anthropic"},
-        "router": _router_config(),
-        "settings": {
-            "tier_precedence": ["premium", "structured", "code", "fast", "crud"],
-            "escalate_on_premium_tools": True,
-        },
-        "tiers": tiers,
-    }
+    )
 
 
 def run_wizard(ask: AskFn = input) -> Path:

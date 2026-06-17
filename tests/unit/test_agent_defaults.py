@@ -8,7 +8,6 @@ entry, so a missing group or invalid premium mapping fails loudly.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -18,7 +17,7 @@ from ai_calls_router.routing.agent_defaults import (
 )
 
 
-def _example_config() -> dict[str, Any]:
+def _example_config() -> dict[str, object]:
     """Load the shipped example config."""
     path = Path(__file__).resolve().parents[2] / "config.example.yaml"
     return yaml.safe_load(path.read_text(encoding="utf-8"))

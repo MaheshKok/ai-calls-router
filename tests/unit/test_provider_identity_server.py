@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -63,7 +62,7 @@ tiers:
 """
 
 
-def _provider_payload(group: str, *, upstream: str) -> dict[str, Any]:
+def _provider_payload(group: str, *, upstream: str) -> dict[str, object]:
     """Return a valid provider payload with a distinct upstream."""
     wires = {
         "claude_code": "anthropic_messages",
@@ -105,10 +104,10 @@ class _FakeProviderAssembler:
 
     def __call__(
         self,
-        base: dict[str, Any],
+        base: dict[str, object],
         *,
-        provider_files: dict[str, dict[str, Any]],
-    ) -> dict[str, Any]:
+        provider_files: dict[str, dict[str, object]],
+    ) -> dict[str, object]:
         """Record provider groups and fail once while files are present."""
         del base
         self.calls.append(set(provider_files))
@@ -153,7 +152,7 @@ def client(
     upstream: Upstream,
 ) -> Iterator[TestClient]:
     """Create an app with Phase 7 router and provider YAML files."""
-    metrics_mod._METRICS = None
+    metrics_mod._metrics_singleton = None
     monkeypatch.setenv("ACR_HOME", str(tmp_path))
     monkeypatch.setenv("ACR_CONFIG", str(tmp_path / "config.yaml"))
     monkeypatch.setenv("ACR_TEST_KEY", "tier-key")
@@ -162,20 +161,20 @@ def client(
     app = create_app(transport=httpx.MockTransport(upstream.handler))
     with TestClient(app) as test_client:
         yield test_client
-    metrics_mod._METRICS = None
+    metrics_mod._metrics_singleton = None
 
 
-def _responses_opener() -> dict[str, Any]:
+def _responses_opener() -> dict[str, object]:
     """Return a Responses opener that has no pending tool result."""
     return {"model": "gpt-5-codex", "input": "hello", "stream": True}
 
 
-def _chat_opener() -> dict[str, Any]:
+def _chat_opener() -> dict[str, object]:
     """Return a Chat opener that has no pending tool result."""
     return {"model": "gpt-hermes", "messages": [{"role": "user", "content": "hello"}]}
 
 
-def _premium_responses_turn() -> dict[str, Any]:
+def _premium_responses_turn() -> dict[str, object]:
     """Return a Codex turn whose pending tool maps to premium."""
     return {
         "model": "gpt-5-codex",

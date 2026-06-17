@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Any
 
 import pytest
 
@@ -215,13 +214,13 @@ def test_malformed_item_raises_for_fail_open_path() -> None:
         ([{"type": "function_call_output", "call_id": "c"}], "tool output requires"),
     ],
 )
-def test_input_malformed_branches_raise(*, input_items: Any, match: str) -> None:
+def test_input_malformed_branches_raise(*, input_items: object, match: str) -> None:
     with pytest.raises(ValueError, match=match):
         responses_input_to_anthropic_messages(input_items)
 
 
 def test_request_conversion_is_deterministic_and_immutable() -> None:
-    body: dict[str, Any] = {
+    body: dict[str, object] = {
         "model": "gpt-5-codex",
         "instructions": "rules",
         "input": [

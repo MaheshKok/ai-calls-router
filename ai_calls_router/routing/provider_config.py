@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 import yaml
 
@@ -30,6 +30,8 @@ from ai_calls_router.routing.decide import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
+
 logger = logging.getLogger("acr.provider_config")
 
 
@@ -47,19 +49,19 @@ class ProviderConfigError(ValueError):
         self.group = group
 
 
-def load_provider_files() -> dict[str, dict[str, Any]]:
+def load_provider_files() -> dict[str, JsonObject]:
     """Load present per-provider YAML files.
 
     Missing files are absent from the returned mapping. Malformed files are
     skipped with a warning so serving can keep using the global config.
     """
-    loaded: dict[str, dict[str, Any]] = {}
+    loaded: dict[str, JsonObject] = {}
     for group in sorted(KNOWN_GROUPS):
         path = config.provider_config_path(group)
         if not path.exists():
             continue
         try:
-            parsed = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            parsed = cast("JsonValue", yaml.safe_load(path.read_text(encoding="utf-8")) or {})
         except Exception as exc:
             logger.warning("acr: provider config %s failed to load (%s); skipping", path, exc)
             continue
@@ -70,13 +72,13 @@ def load_provider_files() -> dict[str, dict[str, Any]]:
     return loaded
 
 
-def router_map(routes: dict[str, Any]) -> dict[str, Any] | None:
+def router_map(routes: JsonObject) -> JsonObject | None:
     """Return the configured router block, if present."""
     router = routes.get("router")
     return router if isinstance(router, dict) else None
 
 
-def _contains_forbidden_key_env(value: Any, path: tuple[str, ...] = ()) -> bool:
+def _contains_forbidden_key_env(value: JsonValue, path: tuple[str, ...] = ()) -> bool:
     """Return whether a payload contains a non-auth key_env field."""
     if isinstance(value, dict):
         for key, child in value.items():
@@ -90,7 +92,7 @@ def _contains_forbidden_key_env(value: Any, path: tuple[str, ...] = ()) -> bool:
     return False
 
 
-def _validate_provider_payload(group: str, payload: dict[str, Any]) -> None:
+def _validate_provider_payload(group: str, payload: JsonObject) -> None:
     """Validate one provider file payload."""
     declared = payload.get("group")
     if declared != group or declared not in KNOWN_GROUPS:
@@ -108,32 +110,31 @@ def _validate_provider_payload(group: str, payload: dict[str, Any]) -> None:
         raise ProviderConfigError("provider config must not carry cheap key_env", group=group)
 
 
-def _fallback_agent_config(routes: dict[str, Any], group: str) -> dict[str, Any]:
+def _fallback_agent_config(routes: JsonObject, group: str) -> JsonObject:
     """Build an agent config from canonical defaults for a missing provider file."""
-    return {
-        "tools": agent_tools(routes, group),
-        "premium_tools": agent_premium_tools(routes, group),
-        "upstream": agent_upstream(routes, group),
-        "premium": {"provider": "anthropic"},
-    }
+    return cast(
+        "JsonObject",
+        {
+            "tools": agent_tools(routes, group),
+            "premium_tools": agent_premium_tools(routes, group),
+            "upstream": agent_upstream(routes, group),
+            "premium": {"provider": "anthropic"},
+        },
+    )
 
 
-def _provider_agent_config(
-    routes: dict[str, Any], group: str, payload: dict[str, Any]
-) -> dict[str, Any]:
+def _provider_agent_config(routes: JsonObject, group: str, payload: JsonObject) -> JsonObject:
     """Build canonical agents[group] config from one provider payload."""
     _validate_provider_payload(group, payload)
     agent_cfg = {key: copy.deepcopy(value) for key, value in payload.items() if key != "group"}
     if "tools" not in agent_cfg:
-        agent_cfg["tools"] = agent_tools(routes, group)
+        agent_cfg["tools"] = cast("JsonValue", agent_tools(routes, group))
     if "premium_tools" not in agent_cfg:
-        agent_cfg["premium_tools"] = agent_premium_tools(routes, group)
+        agent_cfg["premium_tools"] = cast("JsonValue", agent_premium_tools(routes, group))
     return agent_cfg
 
 
-def assemble_routes(
-    base: dict[str, Any], *, provider_files: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
+def assemble_routes(base: JsonObject, *, provider_files: dict[str, JsonObject]) -> JsonObject:
     """Merge provider-file payloads into a new canonical routes dict.
 
     Args:
@@ -165,7 +166,7 @@ def assemble_routes(
     return result
 
 
-def _known(candidate: Any) -> str | None:
+def _known(candidate: JsonValue) -> str | None:
     """Return a valid group name, or None."""
     return candidate if isinstance(candidate, str) and candidate in KNOWN_GROUPS else None
 
@@ -178,13 +179,13 @@ def _header_value(headers: Mapping[str, str], name: str) -> str:
     return ""
 
 
-def _user_agent_match(router: dict[str, Any], user_agent: str) -> str | None:
+def _user_agent_match(router: JsonObject, user_agent: str) -> str | None:
     """Resolve group from router.user_agent_map."""
     mappings = router.get("user_agent_map")
     if not isinstance(mappings, list):
         return None
     normalized_ua = user_agent.lower()
-    for item in mappings:
+    for item in cast("JsonArray", mappings):
         if not isinstance(item, dict):
             continue
         contains = item.get("contains")
@@ -194,7 +195,7 @@ def _user_agent_match(router: dict[str, Any], user_agent: str) -> str | None:
     return None
 
 
-def _endpoint_default(router: dict[str, Any], path: str) -> str | None:
+def _endpoint_default(router: JsonObject, path: str) -> str | None:
     """Resolve group from router.endpoint_defaults."""
     endpoint_defaults = router.get("endpoint_defaults")
     if isinstance(endpoint_defaults, dict):
@@ -202,7 +203,7 @@ def _endpoint_default(router: dict[str, Any], path: str) -> str | None:
     return None
 
 
-def _fallback_group(router: dict[str, Any], adapter_default: str) -> str | None:
+def _fallback_group(router: JsonObject, adapter_default: str) -> str | None:
     """Resolve the configured fallback group or adapter default."""
     if "fallback" not in router:
         return _known(adapter_default)
@@ -216,7 +217,7 @@ def resolve_agent_group(
     *,
     path: str,
     headers: Mapping[str, str],
-    routes: dict[str, Any],
+    routes: JsonObject,
     adapter_default: str,
 ) -> str | None:
     """Resolve an agent group by Phase 7 identity precedence."""

@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 _lock = threading.Lock()
-_litellm: Any = None
+_litellm: ModuleType | None = None
 
 
-def load_litellm() -> Any:
+def load_litellm() -> ModuleType:
     """Import litellm with the dotenv-leak guard and cache the module.
 
     Returns:

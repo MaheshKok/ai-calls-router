@@ -13,9 +13,12 @@ returns None so routing falls back to passthrough and never breaks a turn.
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import TYPE_CHECKING, cast
 
 import httpx
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject, JsonValue
 
 logger = logging.getLogger("acr.anthropic_direct")
 
@@ -34,7 +37,7 @@ ANTHROPIC_VERSION = "2023-06-01"
 DIRECT_CALL_TIMEOUT_SECONDS = 120.0
 
 
-def provider_prefix(model: Any) -> str | None:
+def provider_prefix(model: JsonValue) -> str | None:
     """Return the provider segment of a ``provider/model`` id, else None.
 
     Args:
@@ -49,7 +52,7 @@ def provider_prefix(model: Any) -> str | None:
     return model.split("/", 1)[0]
 
 
-def direct_endpoint(model: Any) -> str | None:
+def direct_endpoint(model: JsonValue) -> str | None:
     """Return the direct Anthropic base URL for a tier model, if one applies.
 
     This is the detection gate routed_call branches on: a non-None result means
@@ -86,12 +89,12 @@ def native_model_id(model: str) -> str:
 
 async def direct_call(
     *,
-    body: dict[str, Any],
-    tier_cfg: dict[str, Any],
+    body: JsonObject,
+    tier_cfg: JsonObject,
     api_key: str,
     client: httpx.AsyncClient | None = None,
     timeout: float = DIRECT_CALL_TIMEOUT_SECONDS,
-) -> dict[str, Any] | None:
+) -> JsonObject | None:
     """POST a prepared Anthropic-format body straight to the tier provider.
 
     The body is sent verbatim except for two required edits: the model id is
@@ -121,11 +124,14 @@ async def direct_call(
         return None
 
     url = base_url.rstrip("/") + "/v1/messages"
-    payload: dict[str, Any] = {
-        **body,
-        "model": native_model_id(cast("str", model)),
-        "thinking": {"type": "disabled"},
-    }
+    payload = cast(
+        "JsonObject",
+        {
+            **body,
+            "model": native_model_id(cast("str", model)),
+            "thinking": {"type": "disabled"},
+        },
+    )
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -143,7 +149,7 @@ async def direct_call(
                 response.status_code,
             )
             return None
-        return response.json()
+        return cast("JsonObject", response.json())
     except Exception as exc:
         logger.warning("direct call to %s failed (%s); passing through", url, exc, exc_info=True)
         return None

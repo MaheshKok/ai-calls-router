@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml
@@ -20,9 +19,9 @@ from ai_calls_router.routing import provider_config
 from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
 
 
-def _base_routes(*, router: dict[str, Any] | None = None) -> dict[str, Any]:
+def _base_routes(*, router: dict[str, object] | None = None) -> dict[str, object]:
     """Return a minimal global config for provider assembly tests."""
-    base: dict[str, Any] = {
+    base: dict[str, object] = {
         "server": {"upstream": "https://premium.default.example/"},
         "settings": {"tier_precedence": ["premium", "fast", "crud"]},
         "tiers": {"fast": {"model": "deepseek/x", "key_env": "CHEAP_KEY"}},
@@ -32,7 +31,7 @@ def _base_routes(*, router: dict[str, Any] | None = None) -> dict[str, Any]:
     return base
 
 
-def _router() -> dict[str, Any]:
+def _router() -> dict[str, object]:
     """Return a strict router block used by Phase 7 configs."""
     return {
         "endpoint_defaults": {
@@ -49,7 +48,7 @@ def _router() -> dict[str, Any]:
     }
 
 
-def _provider_payload(group: str, *, upstream: str | None = None) -> dict[str, Any]:
+def _provider_payload(group: str, *, upstream: str | None = None) -> dict[str, object]:
     """Return one valid provider YAML payload."""
     wires = {
         "claude_code": "anthropic_messages",
@@ -155,7 +154,7 @@ def test_load_provider_files_skips_non_mapping_yaml(
     ],
 )
 def test_provider_payload_required_fields_are_validated(
-    updates: dict[str, Any],
+    updates: dict[str, object],
     message: str,
 ) -> None:
     payload = _provider_payload("codex")

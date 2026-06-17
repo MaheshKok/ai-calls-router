@@ -15,20 +15,34 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Protocol, cast
 
 from ai_calls_router.accounting.shrink_stats import ShrinkStats
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from ai_calls_router._lib.types import JsonArray
 
 logger = logging.getLogger("acr.compression")
 
 DEFAULT_MODEL_LIMIT = 200_000
 
 
+class _CompressResult(Protocol):
+    """Headroom result shape used by this module."""
+
+    messages: JsonArray
+
+
+class _Compressor(Protocol):
+    """Headroom compression callable shape used by this module."""
+
+    def __call__(
+        self, messages: JsonArray, *, model: str, model_limit: int, optimize: bool
+    ) -> _CompressResult: ...
+
+
 @functools.lru_cache(maxsize=1)
-def _load_compressor() -> Callable[..., Any] | None:
+def _load_compressor() -> _Compressor | None:
     """Return ``headroom.compress`` when importable, else ``None``.
 
     Cached so the optional import is attempted once per process and the
@@ -48,10 +62,10 @@ def _load_compressor() -> Callable[..., Any] | None:
         )
         return None
     else:
-        return headroom.compress
+        return cast("_Compressor", headroom.compress)
 
 
-def _messages_chars(messages: list[dict[str, Any]]) -> int:
+def _messages_chars(messages: JsonArray) -> int:
     """Sum the character length of string message content.
 
     Only string ``content`` values are counted (the OpenAI ``role="tool"`` and
@@ -64,12 +78,19 @@ def _messages_chars(messages: list[dict[str, Any]]) -> int:
     Returns:
         Total characters across string ``content`` fields.
     """
-    return sum(len(m["content"]) for m in messages if isinstance(m.get("content"), str))
+    total = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+    return total
 
 
 def compress_litellm_messages(
-    messages: list[dict[str, Any]], *, model: str, model_limit: int = DEFAULT_MODEL_LIMIT
-) -> tuple[list[dict[str, Any]], ShrinkStats]:
+    messages: JsonArray, *, model: str, model_limit: int = DEFAULT_MODEL_LIMIT
+) -> tuple[JsonArray, ShrinkStats]:
     """Compress OpenAI-format messages with headroom's default policy.
 
     Runs on the messages after the Anthropic-to-OpenAI conversion, where

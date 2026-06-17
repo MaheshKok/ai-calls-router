@@ -11,8 +11,6 @@ including when the client disconnects mid-stream.
 
 from __future__ import annotations
 
-from typing import Any
-
 import httpx
 from starlette.responses import Response
 
@@ -273,7 +271,7 @@ class _FakeUpstreamResponse:
         self.headers: dict[str, str] = {}
         self.closed = False
 
-    async def aiter_raw(self) -> Any:
+    async def aiter_raw(self) -> object:
         for chunk in self._chunks:
             yield chunk
 

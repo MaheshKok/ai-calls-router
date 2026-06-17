@@ -12,17 +12,19 @@ import hashlib
 import json
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 from ai_calls_router.accounting.shrink_stats import ShrinkStats
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
+
 # ── singleton ──────────────────────────────────────────────────────────────
 
 
-def _parse_tool_names(value: Any) -> list[str]:
+def _parse_tool_names(value: JsonValue) -> list[str]:
     """Normalize persisted tool-name metadata from the savings ledger."""
     if isinstance(value, list):
         return [str(item) for item in value if str(item)]
@@ -31,10 +33,34 @@ def _parse_tool_names(value: Any) -> list[str]:
     return []
 
 
-def _parse_savings_line(line: str) -> dict[str, Any] | None:
+def _json_int(value: JsonValue, default: int = 0) -> int:
+    """Coerce persisted JSON values to int for dashboard totals."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int | float | str):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    return default
+
+
+def _json_float(value: JsonValue, default: float = 0.0) -> float:
+    """Coerce persisted JSON values to float for dashboard totals."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int | float | str):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+    return default
+
+
+def _parse_savings_line(line: str) -> JsonObject | None:
     """Parse one JSONL line into a valid savings record, or None on error."""
     try:
-        rec = json.loads(line)
+        rec = cast("JsonValue", json.loads(line))
     except json.JSONDecodeError:
         return None
     if not isinstance(rec, dict):
@@ -76,7 +102,7 @@ class _Metrics:
         self._shrink_chars_before = 0
         self._shrink_chars_after = 0
         # Latest per-request metadata for the recent-activity table
-        self._last_requests: list[dict[str, Any]] = []
+        self._last_requests: list[JsonObject] = []
 
     # ── counters ──────────────────────────────────────────────────────
 
@@ -185,31 +211,34 @@ class _Metrics:
         shrink_chars_before: int = 0,
         shrink_chars_after: int = 0,
     ) -> None:
-        entry: dict[str, Any] = {
-            "ts": int(time.time()),
-            "request_id": request_id,
-            "method": method,
-            "path": path,
-            "status": status,
-            "tier": tier,
-            "route": route,
-            "model": model,
-            "premium_model": premium_model,
-            "provider": provider or identify_provider(model),
-            "user_agent": user_agent[:200] if user_agent else "",
-            "agent": agent,
-            "session_id": session_id,
-            "decision_reason": decision_reason,
-            "client_ip": client_ip,
-            "tool_names": tool_names,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_tokens": cache_read,
-            "cache_creation_tokens": cache_creation,
-            "duration_ms": int(duration * 1000),
-            "shrink_chars_before": max(int(shrink_chars_before), 0),
-            "shrink_chars_after": max(int(shrink_chars_after), 0),
-        }
+        entry = cast(
+            "JsonObject",
+            {
+                "ts": int(time.time()),
+                "request_id": request_id,
+                "method": method,
+                "path": path,
+                "status": status,
+                "tier": tier,
+                "route": route,
+                "model": model,
+                "premium_model": premium_model,
+                "provider": provider or identify_provider(model),
+                "user_agent": user_agent[:200] if user_agent else "",
+                "agent": agent,
+                "session_id": session_id,
+                "decision_reason": decision_reason,
+                "client_ip": client_ip,
+                "tool_names": tool_names,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read,
+                "cache_creation_tokens": cache_creation,
+                "duration_ms": int(duration * 1000),
+                "shrink_chars_before": max(int(shrink_chars_before), 0),
+                "shrink_chars_after": max(int(shrink_chars_after), 0),
+            },
+        )
         with self._lock:
             self._last_requests.insert(0, entry)
             if len(self._last_requests) > 100:
@@ -255,26 +284,26 @@ class _Metrics:
             self.saved_usd = 0.0
             self.shrink_chars_before = 0
             self.shrink_chars_after = 0
-            self.recent: list[dict[str, Any]] = []
+            self.recent: list[JsonObject] = []
 
-        def process_one(self, rec: dict[str, Any]) -> None:
+        def process_one(self, rec: JsonObject) -> None:
             self.routed_count += 1
             routed_model = str(rec.get("routed_model") or "")
             premium_model = str(rec.get("premium_model") or "")
-            input_tokens = int(rec.get("input_tokens") or 0)
-            output_tokens = int(rec.get("output_tokens") or 0)
-            cache_read = int(rec.get("cache_read_input_tokens") or 0)
-            cache_creation = int(rec.get("cache_creation_input_tokens") or 0)
+            input_tokens = _json_int(rec.get("input_tokens", 0))
+            output_tokens = _json_int(rec.get("output_tokens", 0))
+            cache_read = _json_int(rec.get("cache_read_input_tokens", 0))
+            cache_creation = _json_int(rec.get("cache_creation_input_tokens", 0))
 
             self.routed_input += input_tokens
             self.routed_output += output_tokens
             self.routed_cache_read += cache_read
             self.routed_cache_creation += cache_creation
-            self.routed_usd += float(rec.get("routed_usd") or 0.0)
-            self.premium_usd += float(rec.get("premium_usd") or 0.0)
-            self.saved_usd += float(rec.get("saved_usd") or 0.0)
-            self.shrink_chars_before += max(int(rec.get("shrink_chars_before") or 0), 0)
-            self.shrink_chars_after += max(int(rec.get("shrink_chars_after") or 0), 0)
+            self.routed_usd += _json_float(rec.get("routed_usd", 0.0))
+            self.premium_usd += _json_float(rec.get("premium_usd", 0.0))
+            self.saved_usd += _json_float(rec.get("saved_usd", 0.0))
+            self.shrink_chars_before += max(_json_int(rec.get("shrink_chars_before", 0)), 0)
+            self.shrink_chars_after += max(_json_int(rec.get("shrink_chars_after", 0)), 0)
 
             self.recent.append(
                 self._build_recent_entry(
@@ -290,7 +319,7 @@ class _Metrics:
 
         @staticmethod
         def _build_recent_entry(
-            rec: dict[str, Any],
+            rec: JsonObject,
             *,
             routed_model: str,
             premium_model: str,
@@ -298,7 +327,7 @@ class _Metrics:
             output_tokens: int,
             cache_read: int,
             cache_creation: int,
-        ) -> dict[str, Any]:
+        ) -> JsonObject:
             """Build one dashboard recent-request row from a ledger record.
 
             Args:
@@ -313,30 +342,33 @@ class _Metrics:
             Returns:
                 A recent-request dict matching the live dashboard row shape.
             """
-            return {
-                "ts": int(rec.get("ts") or 0),
-                "method": "POST",
-                "path": "/v1/messages",
-                "status": 200,
-                "tier": str(rec.get("tier_name") or ""),
-                "route": "routed",
-                "model": routed_model,
-                "premium_model": premium_model,
-                "provider": str(rec.get("provider") or identify_provider(routed_model)),
-                "user_agent": str(rec.get("user_agent") or "")[:200],
-                "agent": str(rec.get("agent") or ""),
-                "session_id": str(rec.get("session_id") or ""),
-                "decision_reason": str(rec.get("decision_reason") or "routed"),
-                "client_ip": "",
-                "tool_names": _parse_tool_names(rec.get("tool_names")),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_tokens": cache_read,
-                "cache_creation_tokens": cache_creation,
-                "duration_ms": 0,
-                "shrink_chars_before": max(int(rec.get("shrink_chars_before") or 0), 0),
-                "shrink_chars_after": max(int(rec.get("shrink_chars_after") or 0), 0),
-            }
+            return cast(
+                "JsonObject",
+                {
+                    "ts": _json_int(rec.get("ts", 0)),
+                    "method": "POST",
+                    "path": "/v1/messages",
+                    "status": 200,
+                    "tier": str(rec.get("tier_name") or ""),
+                    "route": "routed",
+                    "model": routed_model,
+                    "premium_model": premium_model,
+                    "provider": str(rec.get("provider") or identify_provider(routed_model)),
+                    "user_agent": str(rec.get("user_agent") or "")[:200],
+                    "agent": str(rec.get("agent") or ""),
+                    "session_id": str(rec.get("session_id") or ""),
+                    "decision_reason": str(rec.get("decision_reason") or "routed"),
+                    "client_ip": "",
+                    "tool_names": _parse_tool_names(rec.get("tool_names", "")),
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_read_tokens": cache_read,
+                    "cache_creation_tokens": cache_creation,
+                    "duration_ms": 0,
+                    "shrink_chars_before": max(_json_int(rec.get("shrink_chars_before", 0)), 0),
+                    "shrink_chars_after": max(_json_int(rec.get("shrink_chars_after", 0)), 0),
+                },
+            )
 
     def bootstrap(self, *, ledger_path: Path | None, max_recent: int = 100) -> None:
         """Restore historical routed metrics from a savings JSONL ledger.
@@ -358,7 +390,7 @@ class _Metrics:
                     acc.process_one(rec)
         except OSError:
             return
-        acc.recent.sort(key=lambda item: int(item.get("ts") or 0), reverse=True)
+        acc.recent.sort(key=lambda item: _json_int(item.get("ts", 0)), reverse=True)
         with self._lock:
             self._routed_requests += acc.routed_count
             self._routed_input_tokens += acc.routed_input
@@ -375,53 +407,58 @@ class _Metrics:
 
     # ── snapshot ───────────────────────────────────────────────────────
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self) -> JsonObject:
         with self._lock:
             compression = ShrinkStats(
                 path="cumulative",
                 chars_before=self._shrink_chars_before,
                 chars_after=self._shrink_chars_after,
             )
-            return {
-                "uptime_seconds": round(time.time() - self._started_at, 1),
-                "requests": {
-                    "total": self._routed_requests + self._passthrough_requests,
-                    "routed": self._routed_requests,
-                    "passthrough": self._passthrough_requests,
-                    "errors": self._error_requests,
-                    "escalated": self._escalated_requests,
-                    "fallback": self._fallback_requests,
+            return cast(
+                "JsonObject",
+                {
+                    "uptime_seconds": round(time.time() - self._started_at, 1),
+                    "requests": {
+                        "total": self._routed_requests + self._passthrough_requests,
+                        "routed": self._routed_requests,
+                        "passthrough": self._passthrough_requests,
+                        "errors": self._error_requests,
+                        "escalated": self._escalated_requests,
+                        "fallback": self._fallback_requests,
+                    },
+                    "routed_tokens": {
+                        "input": self._routed_input_tokens,
+                        "output": self._routed_output_tokens,
+                        "cache_read": self._routed_cache_read_tokens,
+                        "cache_creation": self._routed_cache_creation_tokens,
+                    },
+                    "premium_tokens": {
+                        "input": self._premium_input_tokens,
+                        "output": self._premium_output_tokens,
+                        "cache_read": self._premium_cache_read_tokens,
+                        "cache_creation": self._premium_cache_creation_tokens,
+                    },
+                    "costs": {
+                        "routed_usd": round(self._routed_usd, 8),
+                        "premium_usd": round(self._premium_usd, 8),
+                        "saved_usd": round(self._saved_usd, 8),
+                    },
+                    "compression": {
+                        "chars_before": compression.chars_before,
+                        "chars_after": compression.chars_after,
+                        "chars_saved": compression.chars_saved,
+                        "ratio": round(compression.ratio, 4),
+                        "est_tokens_saved": compression.est_tokens_saved(),
+                    },
+                    "last_requests": self._last_requests[:50],
                 },
-                "routed_tokens": {
-                    "input": self._routed_input_tokens,
-                    "output": self._routed_output_tokens,
-                    "cache_read": self._routed_cache_read_tokens,
-                    "cache_creation": self._routed_cache_creation_tokens,
-                },
-                "premium_tokens": {
-                    "input": self._premium_input_tokens,
-                    "output": self._premium_output_tokens,
-                    "cache_read": self._premium_cache_read_tokens,
-                    "cache_creation": self._premium_cache_creation_tokens,
-                },
-                "costs": {
-                    "routed_usd": round(self._routed_usd, 8),
-                    "premium_usd": round(self._premium_usd, 8),
-                    "saved_usd": round(self._saved_usd, 8),
-                },
-                "compression": {
-                    "chars_before": compression.chars_before,
-                    "chars_after": compression.chars_after,
-                    "chars_saved": compression.chars_saved,
-                    "ratio": round(compression.ratio, 4),
-                    "est_tokens_saved": compression.est_tokens_saved(),
-                },
-                "last_requests": self._last_requests[:50],
-            }
+            )
 
 
-_METRICS: _Metrics | None = None
-_METRICS_INIT_LOCK = threading.Lock()
+Metrics = _Metrics
+
+_metrics_singleton: _Metrics | None = None
+_metrics_init_lock = threading.Lock()
 
 # ── agent/session helpers (module-level) ──────────────────────────────────
 
@@ -499,7 +536,7 @@ def identify_provider(model: str | None) -> str:
     )
 
 
-def _looks_like_session_opener(messages: list[Any]) -> bool:
+def _looks_like_session_opener(messages: JsonArray) -> bool:
     first = messages[0]
     if not isinstance(first, dict):
         return False
@@ -508,14 +545,14 @@ def _looks_like_session_opener(messages: list[Any]) -> bool:
     return not _message_has_tool_result(first)
 
 
-def _message_has_tool_result(message: dict[str, Any]) -> bool:
+def _message_has_tool_result(message: JsonObject) -> bool:
     content = message.get("content")
     if not isinstance(content, list):
         return False
     return any(isinstance(part, dict) and part.get("type") == "tool_result" for part in content)
 
 
-def _stable_message_projection(message: dict[str, Any]) -> dict[str, Any]:
+def _stable_message_projection(message: JsonObject) -> JsonObject:
     content = message.get("content")
     if isinstance(content, list):
         projected = [_stable_content_part(part) for part in content]
@@ -524,7 +561,7 @@ def _stable_message_projection(message: dict[str, Any]) -> dict[str, Any]:
     return {"role": message.get("role"), "content": projected}
 
 
-def _stable_content_part(part: Any) -> Any:
+def _stable_content_part(part: JsonValue) -> JsonValue:
     if not isinstance(part, dict):
         return part
     if part.get("type") == "text":
@@ -532,7 +569,7 @@ def _stable_content_part(part: Any) -> Any:
     return {"type": part.get("type")}
 
 
-def session_fingerprint(messages: Any) -> str | None:
+def session_fingerprint(messages: JsonValue) -> str | None:
     """Return a stable session fingerprint for opener-style message payloads.
 
     Claude clients do not currently send a documented session-id header to the
@@ -544,16 +581,16 @@ def session_fingerprint(messages: Any) -> str | None:
         return None
     if not _looks_like_session_opener(messages):
         return None
-    first = messages[0]
+    first = cast("JsonObject", messages[0])
     material = repr(_stable_message_projection(first))
     return hashlib.blake2s(material.encode("utf-8"), digest_size=8).hexdigest()
 
 
 def get_metrics() -> _Metrics:
     """Return the singleton (created on first call)."""
-    global _METRICS  # noqa: PLW0603
-    if _METRICS is None:
-        with _METRICS_INIT_LOCK:
-            if _METRICS is None:
-                _METRICS = _Metrics()
-    return _METRICS
+    global _metrics_singleton  # noqa: PLW0603
+    if _metrics_singleton is None:
+        with _metrics_init_lock:
+            if _metrics_singleton is None:
+                _metrics_singleton = _Metrics()
+    return _metrics_singleton

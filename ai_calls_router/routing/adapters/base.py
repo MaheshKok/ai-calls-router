@@ -7,10 +7,12 @@ non-Anthropic client formats.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from ai_calls_router._lib.types import JsonObject
 
 KNOWN_GROUPS: frozenset[str] = frozenset({"claude_code", "codex", "hermes"})
 
@@ -36,10 +38,10 @@ class ClientAdapter(Protocol):
 
     default_agent_group: str
 
-    def extract_pending_tools(self, body: dict[str, Any]) -> list[str]: ...
+    def extract_pending_tools(self, body: JsonObject) -> list[str]: ...
 
-    def to_anthropic_request(self, body: dict[str, Any]) -> dict[str, Any]: ...
+    def to_anthropic_request(self, body: JsonObject) -> JsonObject: ...
 
-    def to_client_response(self, anthropic_response: dict[str, Any]) -> dict[str, Any]: ...
+    def to_client_response(self, anthropic_response: JsonObject) -> JsonObject: ...
 
-    def to_client_sse(self, anthropic_response: dict[str, Any]) -> Iterator[bytes]: ...
+    def to_client_sse(self, anthropic_response: JsonObject) -> Iterator[bytes]: ...

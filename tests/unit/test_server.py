@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
 from starlette.testclient import TestClient
 
 from ai_calls_router._lib.conversion import BackendResponse
+from ai_calls_router._lib.types import JsonObject
 from ai_calls_router.accounting import metrics as metrics_mod
 from ai_calls_router.proxy.server import create_app
 from ai_calls_router.routing import decide as routing
@@ -42,7 +42,7 @@ tools:
   Edit: premium
 """
 
-ROUTED_BODY: dict[str, Any] = {
+ROUTED_BODY: JsonObject = {
     "id": "msg_routed",
     "type": "message",
     "role": "assistant",
@@ -78,14 +78,16 @@ class _FakeRoutedCall:
     def __init__(
         self, result: BackendResponse | None, *, guard_tools: list[str] | None = None
     ) -> None:
-        self.calls: list[tuple[Any, ...]] = []
+        self.calls: list[dict[str, object]] = []
         self._result = result
         self._guard_tools = guard_tools or []
 
-    async def __call__(self, **kwargs: Any) -> BackendResponse | None:
+    async def __call__(self, **kwargs: object) -> BackendResponse | None:
         self.calls.append(kwargs)
         if self._guard_tools:
-            kwargs["on_premium_guard"](self._guard_tools)
+            guard = kwargs.get("on_premium_guard")
+            if callable(guard):
+                guard(self._guard_tools)
         return self._result
 
 
@@ -95,8 +97,8 @@ def upstream() -> _Upstream:
 
 
 @pytest.fixture
-def client(*, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: _Upstream) -> Any:
-    metrics_mod._METRICS = None
+def client(*, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: _Upstream) -> TestClient:
+    metrics_mod._metrics_singleton = None
     config_file = tmp_path / "config.yaml"
     config_file.write_text(CONFIG_YAML, encoding="utf-8")
     monkeypatch.setenv("ACR_HOME", str(tmp_path))
@@ -106,12 +108,12 @@ def client(*, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: _Upstre
     app = create_app(transport=httpx.MockTransport(upstream.handler))
     with TestClient(app) as test_client:
         yield test_client
-    metrics_mod._METRICS = None
+    metrics_mod._metrics_singleton = None
 
 
-def _tool_result_body(tool_name: str = "Bash", stream: bool = False) -> dict[str, Any]:
+def _tool_result_body(tool_name: str = "Bash", stream: bool = False) -> JsonObject:
     """Build a request body processing one pending tool result."""
-    body: dict[str, Any] = {
+    body: JsonObject = {
         "model": "claude-fable-5",
         "max_tokens": 1000,
         "messages": [
@@ -130,7 +132,7 @@ def _tool_result_body(tool_name: str = "Bash", stream: bool = False) -> dict[str
     return body
 
 
-def _opener_body() -> dict[str, Any]:
+def _opener_body() -> JsonObject:
     """Build a turn-opener request body (no pending tool results)."""
     return {
         "model": "claude-fable-5",
@@ -140,7 +142,7 @@ def _opener_body() -> dict[str, Any]:
 
 
 class TestHealth:
-    def test_health_answers_locally(self, client: Any, upstream: _Upstream) -> None:
+    def test_health_answers_locally(self, client: TestClient, upstream: _Upstream) -> None:
         response = client.get("/health")
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
@@ -148,13 +150,17 @@ class TestHealth:
 
 
 class TestMessagesPassthrough:
-    def test_opener_passes_through_to_upstream(self, client: Any, upstream: _Upstream) -> None:
+    def test_opener_passes_through_to_upstream(
+        self, client: TestClient, upstream: _Upstream
+    ) -> None:
         response = client.post("/v1/messages", json=_opener_body())
         assert response.json() == {"marker": "upstream"}
         assert upstream.requests[0].url.path == "/v1/messages"
         assert json.loads(upstream.requests[0].content) == _opener_body()
 
-    def test_client_auth_headers_reach_upstream(self, client: Any, upstream: _Upstream) -> None:
+    def test_client_auth_headers_reach_upstream(
+        self, client: TestClient, upstream: _Upstream
+    ) -> None:
         client.post(
             "/v1/messages",
             json=_opener_body(),
@@ -164,7 +170,9 @@ class TestMessagesPassthrough:
         assert request.headers["authorization"] == "Bearer oauth"
         assert request.headers["anthropic-version"] == "2023-06-01"
 
-    def test_premium_tool_result_passes_through(self, client: Any, upstream: _Upstream) -> None:
+    def test_premium_tool_result_passes_through(
+        self, client: TestClient, upstream: _Upstream
+    ) -> None:
         response = client.post("/v1/messages", json=_tool_result_body("Edit"))
         assert response.json() == {"marker": "upstream"}
         assert len(upstream.requests) == 1
@@ -176,12 +184,16 @@ class TestMessagesPassthrough:
         assert latest["tool_names"] == ["Edit"]
         assert latest["decision_reason"] == "request_premium_guard"
 
-    def test_unmapped_tool_result_passes_through(self, client: Any, upstream: _Upstream) -> None:
+    def test_unmapped_tool_result_passes_through(
+        self, client: TestClient, upstream: _Upstream
+    ) -> None:
         response = client.post("/v1/messages", json=_tool_result_body("Mystery"))
         assert response.json() == {"marker": "upstream"}
         assert len(upstream.requests) == 1
 
-    def test_invalid_json_passes_through_verbatim(self, client: Any, upstream: _Upstream) -> None:
+    def test_invalid_json_passes_through_verbatim(
+        self, client: TestClient, upstream: _Upstream
+    ) -> None:
         response = client.post(
             "/v1/messages",
             content=b"not json at all",
@@ -191,7 +203,7 @@ class TestMessagesPassthrough:
         assert upstream.requests[0].content == b"not json at all"
 
     def test_passthrough_usage_updates_recent_request(
-        self, client: Any, upstream: _Upstream
+        self, client: TestClient, upstream: _Upstream
     ) -> None:
         upstream.headers = {"content-type": "text/event-stream"}
         upstream.content = (
@@ -219,7 +231,7 @@ class TestMessagesPassthrough:
     def test_missing_api_key_passes_through_without_routing(
         self,
         *,
-        client: Any,
+        client: TestClient,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -233,11 +245,11 @@ class TestMessagesPassthrough:
     def test_routing_decision_error_passes_through(
         self,
         *,
-        client: Any,
+        client: TestClient,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        def _boom(body: dict[str, Any]) -> list[str]:
+        def _boom(body: JsonObject) -> list[str]:
             raise RuntimeError("decision exploded")
 
         monkeypatch.setattr(routing, "pending_tool_names", _boom)
@@ -250,7 +262,7 @@ class TestMessagesRouted:
     def test_cheap_tool_result_served_by_routed_call(
         self,
         *,
-        client: Any,
+        client: TestClient,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -264,7 +276,7 @@ class TestMessagesRouted:
     def test_routed_call_receives_tier_and_key(
         self,
         *,
-        client: Any,
+        client: TestClient,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -281,7 +293,7 @@ class TestMessagesRouted:
     def test_streaming_request_served_as_sse(
         self,
         *,
-        client: Any,
+        client: TestClient,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -299,7 +311,7 @@ class TestMessagesRouted:
     def test_routed_call_none_falls_back_to_passthrough(
         self,
         *,
-        client: Any,
+        client: TestClient,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -313,7 +325,7 @@ class TestMessagesRouted:
     def test_routed_premium_guard_records_escalation_reason(
         self,
         *,
-        client: Any,
+        client: TestClient,
         upstream: _Upstream,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -334,18 +346,18 @@ class TestMessagesRouted:
 
 
 class TestCatchAll:
-    def test_other_post_paths_proxied(self, client: Any, upstream: _Upstream) -> None:
+    def test_other_post_paths_proxied(self, client: TestClient, upstream: _Upstream) -> None:
         response = client.post("/v1/messages/count_tokens", json={"model": "m"})
         assert response.json() == {"marker": "upstream"}
         assert upstream.requests[0].url.path == "/v1/messages/count_tokens"
 
-    def test_get_requests_proxied(self, client: Any, upstream: _Upstream) -> None:
+    def test_get_requests_proxied(self, client: TestClient, upstream: _Upstream) -> None:
         response = client.get("/v1/models")
         assert response.json() == {"marker": "upstream"}
         request = upstream.requests[0]
         assert request.method == "GET"
         assert request.url.path == "/v1/models"
 
-    def test_query_string_preserved(self, client: Any, upstream: _Upstream) -> None:
+    def test_query_string_preserved(self, client: TestClient, upstream: _Upstream) -> None:
         client.get("/v1/models?limit=5")
         assert upstream.requests[0].url.query == b"limit=5"

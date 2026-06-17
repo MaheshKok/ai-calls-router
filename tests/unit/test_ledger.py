@@ -10,16 +10,15 @@ human-readable summary for the acr savings command.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from ai_calls_router.accounting import ledger
 
 
-def _entry(**overrides: Any) -> dict[str, Any]:
+def _entry(**overrides: object) -> dict[str, object]:
     """Build a complete ledger entry with overridable fields."""
-    base: dict[str, Any] = {
+    base: dict[str, object] = {
         "ts": 1_770_000_000,
         "premium_model": "claude-fable-5",
         "routed_model": "deepseek/deepseek-v4-flash",

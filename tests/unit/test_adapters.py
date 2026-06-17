@@ -6,8 +6,6 @@ remains byte-stable. These tests pin the path resolver and the one-chunk SSE wra
 
 from __future__ import annotations
 
-from typing import Any
-
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import synthesis
 from ai_calls_router.routing.adapters import adapter_for_path
@@ -15,7 +13,7 @@ from ai_calls_router.routing.adapters.anthropic_messages import AnthropicMessage
 from ai_calls_router.routing.adapters.openai_responses import OpenAIResponsesAdapter
 
 
-def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, Any]:
+def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, object]:
     """Build a minimal Anthropic request with pending tool results.
 
     Args:
@@ -70,7 +68,7 @@ class TestAnthropicMessagesAdapter:
     def test_extract_pending_tools_matches_existing_routing_logic(self) -> None:
         """Delegate pending-tool extraction to the existing routing function."""
         adapter = AnthropicMessagesAdapter()
-        empty_body: dict[str, Any] = {}
+        empty_body: dict[str, object] = {}
         tool_body = _body_with_tool_results(("t1", "Read"), ("t2", "Bash"))
 
         assert adapter.extract_pending_tools(empty_body) == routing.pending_tool_names(empty_body)

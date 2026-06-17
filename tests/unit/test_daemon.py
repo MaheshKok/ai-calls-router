@@ -14,7 +14,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -42,7 +41,7 @@ def acr_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 class _FakePopen:
     """subprocess.Popen stand-in recording the spawn call."""
 
-    def __init__(self, cmd: list[str], **kwargs: Any) -> None:
+    def __init__(self, cmd: list[str], **kwargs: object) -> None:
         self.cmd = cmd
         self.kwargs = kwargs
         self.pid = 54321
@@ -123,7 +122,7 @@ class TestStart:
         config.pid_path().write_text(str(os.getpid()), encoding="utf-8")
         spawned: list[_FakePopen] = []
 
-        def _spawn(cmd: list[str], **kwargs: Any) -> _FakePopen:
+        def _spawn(cmd: list[str], **kwargs: object) -> _FakePopen:
             popen = _FakePopen(cmd, **kwargs)
             spawned.append(popen)
             return popen
@@ -137,7 +136,7 @@ class TestStart:
     ) -> None:
         spawned: list[_FakePopen] = []
 
-        def _spawn(cmd: list[str], **kwargs: Any) -> _FakePopen:
+        def _spawn(cmd: list[str], **kwargs: object) -> _FakePopen:
             popen = _FakePopen(cmd, **kwargs)
             spawned.append(popen)
             return popen
@@ -175,7 +174,7 @@ class TestStart:
     ) -> None:
         spawned: list[_FakePopen] = []
 
-        def _spawn(cmd: list[str], **kwargs: Any) -> _FakePopen:
+        def _spawn(cmd: list[str], **kwargs: object) -> _FakePopen:
             popen = _FakePopen(cmd, **kwargs)
             spawned.append(popen)
             return popen

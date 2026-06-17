@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -40,7 +39,7 @@ agents:
       patch: premium
 """
 
-ROUTED_TEXT_BODY: dict[str, Any] = {
+ROUTED_TEXT_BODY: dict[str, object] = {
     "id": "msg_chat",
     "type": "message",
     "role": "assistant",
@@ -50,7 +49,7 @@ ROUTED_TEXT_BODY: dict[str, Any] = {
     "usage": {"input_tokens": 10, "output_tokens": 5},
 }
 
-ROUTED_PATCH_BODY: dict[str, Any] = {
+ROUTED_PATCH_BODY: dict[str, object] = {
     **ROUTED_TEXT_BODY,
     "content": [{"type": "tool_use", "id": "call_patch", "name": "patch", "input": {}}],
     "stop_reason": "tool_use",
@@ -76,17 +75,17 @@ class _Upstream:
 class _FakeDirectCall:
     """direct_call stand-in recording invocations."""
 
-    def __init__(self, response: dict[str, Any] | None) -> None:
+    def __init__(self, response: dict[str, object] | None) -> None:
         self.response = response
-        self.calls: list[dict[str, Any]] = []
+        self.calls: list[dict[str, object]] = []
 
     async def __call__(
         self,
         *,
-        body: dict[str, Any],
-        tier_cfg: dict[str, Any],
+        body: dict[str, object],
+        tier_cfg: dict[str, object],
         api_key: str,
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, object] | None:
         """Record the direct call and return the canned response."""
         self.calls.append({"body": body, "tier_cfg": tier_cfg, "api_key": api_key})
         return self.response
@@ -104,7 +103,7 @@ def client(
     monkeypatch: pytest.MonkeyPatch,
     upstream: _Upstream,
 ) -> TestClient:
-    metrics_mod._METRICS = None
+    metrics_mod._metrics_singleton = None
     config_file = tmp_path / "config.yaml"
     config_file.write_text(CONFIG_YAML, encoding="utf-8")
     monkeypatch.setenv("ACR_HOME", str(tmp_path))
@@ -114,12 +113,12 @@ def client(
     app = create_app(transport=httpx.MockTransport(upstream.handler))
     with TestClient(app) as test_client:
         yield test_client
-    metrics_mod._METRICS = None
+    metrics_mod._metrics_singleton = None
 
 
-def _chat_tool_result_body(*, stream: bool = False) -> dict[str, Any]:
+def _chat_tool_result_body(*, stream: bool = False) -> dict[str, object]:
     """Build a Chat request processing one Hermes terminal result."""
-    body: dict[str, Any] = {
+    body: dict[str, object] = {
         "model": "openai/gpt-premium",
         "messages": [
             {

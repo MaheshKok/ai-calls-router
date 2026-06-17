@@ -14,7 +14,10 @@ never mutates it, and treats any non-tool_result content as zero.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject, JsonValue
 
 # Average characters per token. A coarse, model-agnostic divisor used only to
 # turn a measured character delta into an order-of-magnitude token estimate; the
@@ -22,7 +25,7 @@ from typing import Any
 DEFAULT_CHARS_PER_TOKEN = 3.5
 
 
-def _content_chars(content: Any) -> int:
+def _content_chars(content: JsonValue) -> int:
     """Count characters in one tool_result content value.
 
     Args:
@@ -37,7 +40,7 @@ def _content_chars(content: Any) -> int:
         return len(content)
     if isinstance(content, list):
         return sum(
-            len(block["text"])
+            len(cast("str", block["text"]))
             for block in content
             if isinstance(block, dict)
             and block.get("type") == "text"
@@ -46,7 +49,7 @@ def _content_chars(content: Any) -> int:
     return 0
 
 
-def _message_tool_result_chars(message: Any) -> int:
+def _message_tool_result_chars(message: JsonValue) -> int:
     """Count tool_result characters in one message.
 
     Args:
@@ -68,7 +71,7 @@ def _message_tool_result_chars(message: Any) -> int:
     )
 
 
-def tool_result_chars(body: dict[str, Any]) -> int:
+def tool_result_chars(body: JsonObject) -> int:
     """Sum the character length of every tool_result text in a request body.
 
     Walks all messages and counts only tool_result content -- the bytes the
@@ -144,7 +147,7 @@ class ShrinkStats:
         return int(self.chars_saved / chars_per_token)
 
 
-def compute_shrink(*, path: str, before: dict[str, Any], after: dict[str, Any]) -> ShrinkStats:
+def compute_shrink(*, path: str, before: JsonObject, after: JsonObject) -> ShrinkStats:
     """Measure the tool_result shrink between a body and its shrunk form.
 
     Args:

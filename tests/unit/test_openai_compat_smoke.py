@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -31,7 +30,7 @@ from tests.acr_testkit import Upstream
 _ORIGINAL_ASYNC_CLIENT = httpx.AsyncClient
 _ROUTED_MODEL = "deepseek/deepseek-v4-pro"
 _CLIENT_AUTH = "Bearer client-token-for-test"
-_ROUTED_TEXT_BODY: dict[str, Any] = {
+_ROUTED_TEXT_BODY: dict[str, object] = {
     "id": "msg_smoke",
     "type": "message",
     "role": "assistant",
@@ -62,7 +61,7 @@ class _DirectProvider:
             headers={"content-type": "application/json"},
         )
 
-    def client(self, *args: Any, **kwargs: Any) -> httpx.AsyncClient:
+    def client(self, *args: object, **kwargs: object) -> httpx.AsyncClient:
         """Return an AsyncClient wired to this mock provider transport."""
         return _ORIGINAL_ASYNC_CLIENT(
             *args,
@@ -85,7 +84,7 @@ def client(
     upstream: Upstream,
 ) -> Iterator[TestClient]:
     """Create a proxy app with global router config and provider YAML files."""
-    metrics_mod._METRICS = None
+    metrics_mod._metrics_singleton = None
     monkeypatch.setenv("ACR_HOME", str(tmp_path))
     monkeypatch.setenv("ACR_CONFIG", str(tmp_path / "config.yaml"))
     monkeypatch.setenv("ACR_TEST_KEY", "tier-key")
@@ -95,7 +94,7 @@ def client(
     app = create_app(transport=httpx.MockTransport(upstream.handler))
     with TestClient(app) as test_client:
         yield test_client
-    metrics_mod._METRICS = None
+    metrics_mod._metrics_singleton = None
 
 
 def _write_global_config(tmp_path: Path) -> None:
@@ -147,7 +146,7 @@ def _write_provider_configs() -> None:
         )
 
 
-def _claude_tool_result_body() -> dict[str, Any]:
+def _claude_tool_result_body() -> dict[str, object]:
     """Return a Claude Code turn processing a Bash tool result."""
     return {
         "model": "claude-fable-5",
@@ -165,7 +164,7 @@ def _claude_tool_result_body() -> dict[str, Any]:
     }
 
 
-def _claude_premium_body() -> dict[str, Any]:
+def _claude_premium_body() -> dict[str, object]:
     """Return a Claude Code decision turn with no pending tool result."""
     return {
         "model": "claude-fable-5",
@@ -174,7 +173,7 @@ def _claude_premium_body() -> dict[str, Any]:
     }
 
 
-def _codex_tool_result_body() -> dict[str, Any]:
+def _codex_tool_result_body() -> dict[str, object]:
     """Return a Codex Responses turn processing an exec_command result."""
     return {
         "model": "gpt-5-codex",
@@ -191,12 +190,12 @@ def _codex_tool_result_body() -> dict[str, Any]:
     }
 
 
-def _codex_premium_body() -> dict[str, Any]:
+def _codex_premium_body() -> dict[str, object]:
     """Return a Codex decision turn with no pending tool result."""
     return {"model": "gpt-5-codex", "stream": True, "input": "decide"}
 
 
-def _hermes_tool_result_body() -> dict[str, Any]:
+def _hermes_tool_result_body() -> dict[str, object]:
     """Return a Hermes Chat turn processing a terminal result."""
     return {
         "model": "gpt-hermes",
@@ -217,7 +216,7 @@ def _hermes_tool_result_body() -> dict[str, Any]:
     }
 
 
-def _hermes_premium_body() -> dict[str, Any]:
+def _hermes_premium_body() -> dict[str, object]:
     """Return a Hermes Chat decision turn with no pending tool result."""
     return {"model": "gpt-hermes", "messages": [{"role": "user", "content": "decide"}]}
 
@@ -226,7 +225,7 @@ def _post_json_bytes(
     *,
     client: TestClient,
     path: str,
-    body: dict[str, Any],
+    body: dict[str, object],
 ) -> httpx.Response:
     """Post byte-stable JSON through the TestClient."""
     raw = json.dumps(body, separators=(",", ":")).encode()
@@ -270,7 +269,7 @@ def _assert_premium_passthrough(
     *,
     upstream: Upstream,
     host: str,
-    body: dict[str, Any],
+    body: dict[str, object],
 ) -> None:
     """Assert a premium turn stayed byte-identical and used client credentials."""
     request = upstream.requests[-1]
@@ -289,8 +288,8 @@ def _exercise_group(
     monkeypatch: pytest.MonkeyPatch,
     path: str,
     tool_name: str,
-    cheap_body: dict[str, Any],
-    premium_body: dict[str, Any],
+    cheap_body: dict[str, object],
+    premium_body: dict[str, object],
     premium_host: str,
 ) -> None:
     """Drive one group through routed direct and premium passthrough paths."""

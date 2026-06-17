@@ -7,7 +7,7 @@ hooks as future adapters so the server can route through one seam.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import synthesis
@@ -15,13 +15,15 @@ from ai_calls_router.routing import synthesis
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from ai_calls_router._lib.types import JsonObject
+
 
 class AnthropicMessagesAdapter:
     """Bridge Anthropic Messages clients to the existing routing engine unchanged."""
 
     default_agent_group = "claude_code"
 
-    def extract_pending_tools(self, body: dict[str, Any]) -> list[str]:
+    def extract_pending_tools(self, body: JsonObject) -> list[str]:
         """Return pending tool names using the existing Anthropic request parser.
 
         Args:
@@ -32,7 +34,7 @@ class AnthropicMessagesAdapter:
         """
         return routing.pending_tool_names(body)
 
-    def to_anthropic_request(self, body: dict[str, Any]) -> dict[str, Any]:
+    def to_anthropic_request(self, body: JsonObject) -> JsonObject:
         """Return the Anthropic request body by identity.
 
         Args:
@@ -43,7 +45,7 @@ class AnthropicMessagesAdapter:
         """
         return body
 
-    def to_client_response(self, anthropic_response: dict[str, Any]) -> dict[str, Any]:
+    def to_client_response(self, anthropic_response: JsonObject) -> JsonObject:
         """Return the Anthropic response body by identity.
 
         Args:
@@ -54,7 +56,7 @@ class AnthropicMessagesAdapter:
         """
         return anthropic_response
 
-    def to_client_sse(self, anthropic_response: dict[str, Any]) -> Iterator[bytes]:
+    def to_client_sse(self, anthropic_response: JsonObject) -> Iterator[bytes]:
         """Yield the existing Anthropic SSE synthesis as a single byte chunk.
 
         Args:

@@ -11,7 +11,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8747
@@ -106,7 +109,7 @@ def ledger_path() -> Path:
     return home_dir() / "savings.jsonl"
 
 
-def server_settings(routes: dict[str, Any]) -> ServerSettings:
+def server_settings(routes: JsonObject) -> ServerSettings:
     """Resolve the server: block, failing open to safe defaults.
 
     Args:
@@ -135,7 +138,7 @@ def server_settings(routes: dict[str, Any]) -> ServerSettings:
     return ServerSettings(host=host, port=port, upstream=upstream.rstrip("/"))
 
 
-def validate_premium(routes: dict[str, Any]) -> None:
+def validate_premium(routes: JsonObject) -> None:
     """Validate the premium: block against v1 capabilities.
 
     v1 only supports the Anthropic passthrough; the block exists so future

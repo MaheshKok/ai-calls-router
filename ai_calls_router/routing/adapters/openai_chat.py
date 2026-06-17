@@ -7,7 +7,7 @@ edge conversion to pure helpers and exposes the shared ClientAdapter methods.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 from ai_calls_router._lib.openai_inbound import (
     anthropic_to_chat_response,
@@ -18,22 +18,25 @@ from ai_calls_router.routing.synthesis_openai import synthesize_chat_sse
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
 
-def _last_tool_run_start(messages: list[Any]) -> int | None:
+
+def _has_role(value: JsonValue, role: str) -> bool:
+    """Return whether a JSON message has the requested role."""
+    return isinstance(value, dict) and value.get("role") == role
+
+
+def _last_tool_run_start(messages: JsonArray) -> int | None:
     """Return the start index of the final role=tool run, if present."""
     index = len(messages) - 1
-    if index < 0 or not isinstance(messages[index], dict) or messages[index].get("role") != "tool":
+    if index < 0 or not _has_role(messages[index], "tool"):
         return None
-    while (
-        index > 0
-        and isinstance(messages[index - 1], dict)
-        and messages[index - 1].get("role") == "tool"
-    ):
+    while index > 0 and _has_role(messages[index - 1], "tool"):
         index -= 1
     return index
 
 
-def _assistant_tool_id_map(messages: list[Any], stop: int) -> dict[str, str]:
+def _assistant_tool_id_map(messages: JsonArray, stop: int) -> dict[str, str]:
     """Build a tool_call id to function-name map before ``stop``."""
     id_to_name: dict[str, str] = {}
     for message in messages[:stop]:
@@ -50,7 +53,7 @@ def _assistant_tool_id_map(messages: list[Any], stop: int) -> dict[str, str]:
     return id_to_name
 
 
-def _tool_call_id_and_name(tool_call: Any) -> tuple[str, str] | None:
+def _tool_call_id_and_name(tool_call: JsonValue) -> tuple[str, str] | None:
     """Return a tool call id/name pair when both are present."""
     if not isinstance(tool_call, dict):
         return None
@@ -69,7 +72,7 @@ class OpenAIChatAdapter:
 
     default_agent_group = "hermes"
 
-    def extract_pending_tools(self, body: dict[str, Any]) -> list[str]:
+    def extract_pending_tools(self, body: JsonObject) -> list[str]:
         """Return pending tool names from the final Chat tool-result run.
 
         Args:
@@ -82,13 +85,14 @@ class OpenAIChatAdapter:
         messages = body.get("messages")
         if not isinstance(messages, list):
             return []
-        start = _last_tool_run_start(messages)
+        message_items = cast("JsonArray", messages)
+        start = _last_tool_run_start(message_items)
         if start is None:
             return []
 
-        id_to_name = _assistant_tool_id_map(messages, start)
+        id_to_name = _assistant_tool_id_map(message_items, start)
         names: list[str] = []
-        for message in messages[start:]:
+        for message in message_items[start:]:
             if not isinstance(message, dict):
                 continue
             tool_call_id = message.get("tool_call_id")
@@ -99,7 +103,7 @@ class OpenAIChatAdapter:
                 names.append(name)
         return names
 
-    def to_anthropic_request(self, body: dict[str, Any]) -> dict[str, Any]:
+    def to_anthropic_request(self, body: JsonObject) -> JsonObject:
         """Convert a Chat request to the Anthropic canonical format.
 
         Args:
@@ -110,7 +114,7 @@ class OpenAIChatAdapter:
         """
         return chat_request_to_anthropic(body)
 
-    def to_client_response(self, anthropic_response: dict[str, Any]) -> dict[str, Any]:
+    def to_client_response(self, anthropic_response: JsonObject) -> JsonObject:
         """Convert an Anthropic response to a Chat response.
 
         Args:
@@ -121,7 +125,7 @@ class OpenAIChatAdapter:
         """
         return anthropic_to_chat_response(anthropic_response)
 
-    def to_client_sse(self, anthropic_response: dict[str, Any]) -> Iterator[bytes]:
+    def to_client_sse(self, anthropic_response: JsonObject) -> Iterator[bytes]:
         """Yield OpenAI Chat Completions SSE chunks.
 
         Args:

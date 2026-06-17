@@ -7,7 +7,7 @@ files are never overwritten.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 import yaml
 
@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from ai_calls_router._lib.types import JsonObject
+
 _UPSTREAM_BY_GROUP: dict[str, str] = {
     "claude_code": config.DEFAULT_UPSTREAM,
     "codex": "https://api.openai.com",
@@ -39,21 +41,24 @@ _TEMPLATE_HEADER = """# Runtime fields: upstream, tools, premium_tools.
 """
 
 
-def _provider_template(group: str) -> dict[str, Any]:
+def _provider_template(group: str) -> JsonObject:
     """Build one provider YAML template from built-in defaults."""
-    return {
-        "group": group,
-        "upstream": _UPSTREAM_BY_GROUP[group],
-        "auth": {"mode": "oauth_passthrough"},
-        "wire": AGENT_GROUP_WIRES[group],
-        "endpoints": list(AGENT_GROUP_ENDPOINTS[group]),
-        "model_defaults": {},
-        "tool_choice": "passthrough",
-        "reasoning": "strip",
-        "tools": dict(AGENT_DEFAULT_TOOLS[group]),
-        "premium_tools": list(AGENT_DEFAULT_PREMIUM_TOOLS[group]),
-        "fallback": "passthrough",
-    }
+    return cast(
+        "JsonObject",
+        {
+            "group": group,
+            "upstream": _UPSTREAM_BY_GROUP[group],
+            "auth": {"mode": "oauth_passthrough"},
+            "wire": AGENT_GROUP_WIRES[group],
+            "endpoints": list(AGENT_GROUP_ENDPOINTS[group]),
+            "model_defaults": {},
+            "tool_choice": "passthrough",
+            "reasoning": "strip",
+            "tools": dict(AGENT_DEFAULT_TOOLS[group]),
+            "premium_tools": list(AGENT_DEFAULT_PREMIUM_TOOLS[group]),
+            "fallback": "passthrough",
+        },
+    )
 
 
 def ensure_provider_configs(*, ask: Callable[[str], str] | None = None) -> list[Path]:

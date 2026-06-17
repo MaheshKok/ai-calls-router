@@ -20,21 +20,38 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 import yaml
 
 from ai_calls_router._lib import config
 from ai_calls_router.routing.agent_defaults import AGENT_DEFAULT_PREMIUM_TOOLS, AGENT_DEFAULT_TOOLS
 
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
+
 logger = logging.getLogger("acr.routing")
 
 _cache_lock = threading.Lock()
-_cache: dict[Path, tuple[float, dict[str, Any]]] = {}
+_cache: dict[Path, tuple[float, JsonObject]] = {}
 _DEFAULT_AGENT_GROUP = "claude_code"
 
 
-def load_routes(path: Path | None = None) -> dict[str, Any]:
+def _json_mapping(value: JsonValue) -> JsonObject:
+    """Return a JSON object when value is mapping-shaped, else an empty mapping."""
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _json_array(value: JsonValue) -> JsonArray:
+    """Return a JSON array when value is list-shaped, else an empty list."""
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def load_routes(path: Path | None = None) -> JsonObject:
     """Load config.yaml with a per-path mtime cache.
 
     Args:
@@ -53,7 +70,7 @@ def load_routes(path: Path | None = None) -> dict[str, Any]:
             if cached is not None and cached[0] == mtime:
                 return cached[1]
         with path.open(encoding="utf-8") as fh:
-            parsed = yaml.safe_load(fh) or {}
+            parsed = cast("JsonValue", yaml.safe_load(fh) or {})
         if not isinstance(parsed, dict):
             return {}
         with _cache_lock:
@@ -64,7 +81,7 @@ def load_routes(path: Path | None = None) -> dict[str, Any]:
         return {}
 
 
-def with_agent_compat(routes: dict[str, Any]) -> dict[str, Any]:
+def with_agent_compat(routes: JsonObject) -> JsonObject:
     """Return routes with a legacy flat config exposed as agents.claude_code.
 
     Args:
@@ -76,31 +93,32 @@ def with_agent_compat(routes: dict[str, Any]) -> dict[str, Any]:
     """
     if "agents" in routes:
         return routes
-    settings = routes.get("settings")
-    settings_cfg = settings if isinstance(settings, dict) else {}
-    server = routes.get("server")
-    server_cfg = server if isinstance(server, dict) else {}
-    premium = routes.get("premium")
-    premium_cfg = premium if isinstance(premium, dict) else {"provider": "anthropic"}
-    tools = routes.get("tools")
-    tools_cfg = tools if isinstance(tools, dict) else AGENT_DEFAULT_TOOLS[_DEFAULT_AGENT_GROUP]
+    settings_cfg = _json_mapping(routes.get("settings", None))
+    server_cfg = _json_mapping(routes.get("server", None))
+    premium_cfg = _json_mapping(routes.get("premium", {"provider": "anthropic"}))
+    tools_cfg = _json_mapping(routes.get("tools", None)) or cast(
+        "JsonObject", dict(AGENT_DEFAULT_TOOLS[_DEFAULT_AGENT_GROUP])
+    )
     premium_tools = settings_cfg.get("premium_tools")
     premium_tool_cfg = (
         premium_tools
-        if isinstance(premium_tools, list)
+        if isinstance(premium_tools, list) and all(isinstance(tool, str) for tool in premium_tools)
         else AGENT_DEFAULT_PREMIUM_TOOLS[_DEFAULT_AGENT_GROUP]
     )
-    return {
-        **routes,
-        "agents": {
-            _DEFAULT_AGENT_GROUP: {
-                "tools": dict(tools_cfg),
-                "premium_tools": list(premium_tool_cfg),
-                "upstream": server_cfg.get("upstream", config.DEFAULT_UPSTREAM),
-                "premium": dict(premium_cfg),
-            }
+    return cast(
+        "JsonObject",
+        {
+            **routes,
+            "agents": {
+                _DEFAULT_AGENT_GROUP: {
+                    "tools": dict(tools_cfg),
+                    "premium_tools": list(premium_tool_cfg),
+                    "upstream": server_cfg.get("upstream", config.DEFAULT_UPSTREAM),
+                    "premium": dict(premium_cfg),
+                }
+            },
         },
-    }
+    )
 
 
 def _default_agent_group(group: str) -> str:
@@ -110,7 +128,7 @@ def _default_agent_group(group: str) -> str:
     return _DEFAULT_AGENT_GROUP
 
 
-def _agent_config(routes: dict[str, Any], group: str) -> dict[str, Any]:
+def _agent_config(routes: JsonObject, group: str) -> JsonObject:
     """Return the agent config mapping for group, or an empty mapping."""
     compat_routes = with_agent_compat(routes)
     agents = compat_routes.get("agents")
@@ -122,7 +140,7 @@ def _agent_config(routes: dict[str, Any], group: str) -> dict[str, Any]:
     return {}
 
 
-def agent_tools(routes: dict[str, Any], group: str) -> dict[str, str]:
+def agent_tools(routes: JsonObject, group: str) -> dict[str, str]:
     """Resolve the tool map for one agent group, falling back to defaults.
 
     Args:
@@ -135,16 +153,14 @@ def agent_tools(routes: dict[str, Any], group: str) -> dict[str, str]:
     """
     try:
         tools = _agent_config(routes, group).get("tools")
-        if isinstance(tools, dict) and all(
-            isinstance(name, str) and isinstance(tier, str) for name, tier in tools.items()
-        ):
-            return dict(tools)
+        if isinstance(tools, dict) and all(isinstance(tier, str) for tier in tools.values()):
+            return {name: tier for name, tier in tools.items() if isinstance(tier, str)}
     except Exception as exc:
         logger.warning("acr: agent tools lookup failed (%s); using defaults", exc, exc_info=True)
     return dict(AGENT_DEFAULT_TOOLS[_default_agent_group(group)])
 
 
-def agent_premium_tools(routes: dict[str, Any], group: str) -> list[str]:
+def agent_premium_tools(routes: JsonObject, group: str) -> list[str]:
     """Resolve the premium response-guard tools for one agent group.
 
     Args:
@@ -158,7 +174,7 @@ def agent_premium_tools(routes: dict[str, Any], group: str) -> list[str]:
     try:
         tools = _agent_config(routes, group).get("premium_tools")
         if isinstance(tools, list) and all(isinstance(tool, str) for tool in tools):
-            return list(tools)
+            return [tool for tool in tools if isinstance(tool, str)]
     except Exception as exc:
         logger.warning(
             "acr: agent premium tools lookup failed (%s); using defaults", exc, exc_info=True
@@ -166,7 +182,7 @@ def agent_premium_tools(routes: dict[str, Any], group: str) -> list[str]:
     return list(AGENT_DEFAULT_PREMIUM_TOOLS[_default_agent_group(group)])
 
 
-def agent_upstream(routes: dict[str, Any], group: str) -> str:
+def agent_upstream(routes: JsonObject, group: str) -> str:
     """Resolve the passthrough upstream for one agent group.
 
     Args:
@@ -195,7 +211,7 @@ def agent_upstream(routes: dict[str, Any], group: str) -> str:
     return config.server_settings(routes).upstream
 
 
-def _premium_aliases(settings: dict[str, Any]) -> dict[str, str]:
+def _premium_aliases(settings: JsonObject) -> dict[str, str]:
     """Derive accepted aliases from the configured premium tool list.
 
     The configured ``premium_tools`` list is the single source of truth: each
@@ -225,7 +241,7 @@ def _premium_aliases(settings: dict[str, Any]) -> dict[str, str]:
     return aliases
 
 
-def _canonical_tool_name(name: str, settings: dict[str, Any]) -> str:
+def _canonical_tool_name(name: str, settings: JsonObject) -> str:
     """Resolve a Claude Code tool name to the configured premium literal.
 
     Args:
@@ -240,7 +256,7 @@ def _canonical_tool_name(name: str, settings: dict[str, Any]) -> str:
     return _premium_aliases(settings).get(normalized.lower(), normalized)
 
 
-def _tool_id_to_name_map(messages: list[Any], settings: dict[str, Any]) -> dict[str, str]:
+def _tool_id_to_name_map(messages: JsonArray, settings: JsonObject) -> dict[str, str]:
     """Build a mapping from tool_use ids to canonicalized tool names.
 
     Args:
@@ -268,7 +284,7 @@ def _tool_id_to_name_map(messages: list[Any], settings: dict[str, Any]) -> dict[
     return id_to_name
 
 
-def pending_tool_names(body: dict[str, Any], settings: dict[str, Any] | None = None) -> list[str]:
+def pending_tool_names(body: JsonObject, settings: JsonObject | None = None) -> list[str]:
     """Extract the tool names whose results this request is processing.
 
     In the Anthropic Messages format, pending tool results are tool_result
@@ -292,8 +308,9 @@ def pending_tool_names(body: dict[str, Any], settings: dict[str, Any] | None = N
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         return []
+    message_items = cast("JsonArray", messages)
 
-    last = messages[-1]
+    last = message_items[-1]
     if not isinstance(last, dict) or last.get("role") != "user":
         return []
     content = last.get("content")
@@ -302,7 +319,7 @@ def pending_tool_names(body: dict[str, Any], settings: dict[str, Any] | None = N
 
     result_ids = [
         block.get("tool_use_id")
-        for block in content
+        for block in cast("JsonArray", content)
         if isinstance(block, dict)
         and block.get("type") == "tool_result"
         and block.get("tool_use_id")
@@ -310,7 +327,7 @@ def pending_tool_names(body: dict[str, Any], settings: dict[str, Any] | None = N
     if not result_ids:
         return []
 
-    id_to_name = _tool_id_to_name_map(messages, settings)
+    id_to_name = _tool_id_to_name_map(message_items, settings)
     names: list[str] = []
     for rid in result_ids:
         name = id_to_name.get(str(rid))
@@ -324,7 +341,7 @@ def pending_tool_names(body: dict[str, Any], settings: dict[str, Any] | None = N
 
 
 def lookup_tool(
-    name: str, tools_map: dict[str, str], settings: dict[str, Any] | None = None
+    name: str, tools_map: dict[str, str], settings: JsonObject | None = None
 ) -> str | None:
     """Resolve a tool name to a tier, exact match first then trailing-* glob.
 
@@ -346,7 +363,7 @@ def lookup_tool(
     return None
 
 
-def tier_for_tools(names: list[str], routes: dict[str, Any], *, group: str) -> str:
+def tier_for_tools(names: list[str], routes: JsonObject, *, group: str) -> str:
     """Pick the serving tier for a batch of pending tools.
 
     Unknown tools resolve to premium; mixed batches resolve to the highest
@@ -361,10 +378,15 @@ def tier_for_tools(names: list[str], routes: dict[str, Any], *, group: str) -> s
         Tier name ("premium" means passthrough).
     """
     tools_map = agent_tools(routes, group)
-    settings = routes.get("settings") or {}
-    precedence = settings.get("tier_precedence", ["premium", "structured", "code", "fast", "crud"])
+    settings = _json_mapping(routes.get("settings", None))
+    precedence_value = settings.get(
+        "tier_precedence", ["premium", "structured", "code", "fast", "crud"]
+    )
+    precedence = [
+        str(tier) for tier in _json_array(precedence_value) if isinstance(tier, str) and tier
+    ] or ["premium", "structured", "code", "fast", "crud"]
 
-    tiers = set()
+    tiers: set[str] = set()
     for name in names:
         tier = lookup_tool(name, tools_map, settings)
         if tier is None or tier == "premium":
@@ -392,7 +414,7 @@ def _search_env_file(env_path: Path, key_env: str) -> str | None:
     return None
 
 
-def resolve_api_key(tier_cfg: dict[str, Any], settings: dict[str, Any]) -> str | None:
+def resolve_api_key(tier_cfg: JsonObject, settings: JsonObject) -> str | None:
     """Resolve the provider API key for a tier.
 
     Looks up the env var named by key_env in the process environment first,
@@ -407,14 +429,14 @@ def resolve_api_key(tier_cfg: dict[str, Any], settings: dict[str, Any]) -> str |
         The key, or None when unavailable (callers must fail open).
     """
     key_env = tier_cfg.get("key_env")
-    if not key_env:
+    if not isinstance(key_env, str) or not key_env:
         return None
     value = os.environ.get(key_env)
     if value:
         return value
 
     env_file = settings.get("env_file")
-    if not env_file:
+    if not isinstance(env_file, str) or not env_file:
         return None
     try:
         env_path = Path(env_file).expanduser()

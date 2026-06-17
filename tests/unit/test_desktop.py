@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -15,7 +14,7 @@ ALT_PROXY_URL = "http://127.0.0.1:9999"
 OLD_PROXY_URL = "http://127.0.0.1:8787"
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

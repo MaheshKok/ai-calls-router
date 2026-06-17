@@ -10,7 +10,7 @@ of the five carried-over invariants:
 1. The served body claims the client-requested model, not the routed model.
 2. The client's auth credential never reaches the routed provider; only the
    tier key does.
-3. Any routed-call failure falls back to premium passthrough.
+3. object routed-call failure falls back to premium passthrough.
 4. The savings ledger records the true routed model (and prices it from the
    config-declared tier prices the server registers at serve time).
 5. An unpriced routed model still serves the turn but writes no ledger entry
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -85,7 +84,7 @@ tools:
 """
 
 
-def _fake_response(text: str = "routed reply") -> Any:
+def _fake_response(text: str = "routed reply") -> object:
     """Build a routed ModelResponse stand-in with 1M-in / 500k-out usage.
 
     The integration savings assertions are pinned to these large, round token
@@ -102,9 +101,9 @@ def _fake_response(text: str = "routed reply") -> Any:
     return make_response(text=text, prompt_tokens=1_000_000, completion_tokens=500_000)
 
 
-def _bash_tool_result_body(stream: bool = False) -> dict[str, Any]:
+def _bash_tool_result_body(stream: bool = False) -> dict[str, object]:
     """Build a request processing one pending Bash tool result."""
-    body: dict[str, Any] = {
+    body: dict[str, object] = {
         "model": PREMIUM_MODEL,
         "max_tokens": 1000,
         "messages": [

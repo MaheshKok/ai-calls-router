@@ -8,7 +8,6 @@ of cheap-tier credentials.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -22,7 +21,7 @@ from ai_calls_router.routing.adapters.base import (
 )
 
 
-def _base_routes() -> dict[str, Any]:
+def _base_routes() -> dict[str, object]:
     """Return a global router config that consumes provider files."""
     return {
         "server": {"upstream": "https://premium.default.example"},
@@ -39,7 +38,7 @@ def _base_routes() -> dict[str, Any]:
     }
 
 
-def _has_forbidden_key_env(value: Any, path: tuple[str, ...] = ()) -> bool:
+def _has_forbidden_key_env(value: object, path: tuple[str, ...] = ()) -> bool:
     """Return whether generated provider YAML carries a non-auth key_env."""
     if isinstance(value, dict):
         for key, child in value.items():

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -66,7 +65,7 @@ def client(
         yield test_client
 
 
-def _messages_opener() -> dict[str, Any]:
+def _messages_opener() -> dict[str, object]:
     """Return a Claude Code opener with no pending tool results."""
     return {
         "model": "claude-fable-5",
@@ -75,12 +74,12 @@ def _messages_opener() -> dict[str, Any]:
     }
 
 
-def _responses_opener() -> dict[str, Any]:
+def _responses_opener() -> dict[str, object]:
     """Return a Responses opener with no pending tool results."""
     return {"model": "gpt-5-codex", "input": "hello", "stream": True}
 
 
-def _chat_opener() -> dict[str, Any]:
+def _chat_opener() -> dict[str, object]:
     """Return a Chat Completions opener with no pending tool results."""
     return {"model": "gpt-hermes", "messages": [{"role": "user", "content": "hello"}]}
 

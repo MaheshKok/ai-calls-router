@@ -7,7 +7,7 @@ format work to pure conversion and synthesis helpers.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 from ai_calls_router._lib.responses_inbound import (
     anthropic_to_responses,
@@ -18,19 +18,21 @@ from ai_calls_router.routing.synthesis_responses import synthesize_responses_sse
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
+
 _OUTPUT_ITEM_TYPES: frozenset[str] = frozenset({"function_call_output", "custom_tool_call_output"})
 _CALL_ITEM_TYPES: frozenset[str] = frozenset({"function_call", "custom_tool_call"})
 
 
-def _responses_input_items(body: dict[str, Any]) -> list[Any]:
+def _responses_input_items(body: JsonObject) -> JsonArray:
     """Return Responses input as a list for pending-tool extraction."""
     input_items = body.get("input")
     if isinstance(input_items, list):
-        return input_items
+        return cast("JsonArray", input_items)
     return []
 
 
-def _last_output_run_start(items: list[Any]) -> int | None:
+def _last_output_run_start(items: JsonArray) -> int | None:
     """Return the start index of the final tool-output run."""
     index = len(items) - 1
     if index < 0 or not _is_tool_output_item(items[index]):
@@ -40,12 +42,12 @@ def _last_output_run_start(items: list[Any]) -> int | None:
     return index
 
 
-def _is_tool_output_item(item: Any) -> bool:
+def _is_tool_output_item(item: JsonValue) -> bool:
     """Return whether an item is a routable tool output."""
     return isinstance(item, dict) and item.get("type") in _OUTPUT_ITEM_TYPES
 
 
-def _call_id_to_name(items: list[Any], stop: int) -> dict[str, str]:
+def _call_id_to_name(items: JsonArray, stop: int) -> dict[str, str]:
     """Build call_id to tool-name map before ``stop``."""
     mapping: dict[str, str] = {}
     for item in items[:stop]:
@@ -63,7 +65,7 @@ class OpenAIResponsesAdapter:
 
     default_agent_group = "codex"
 
-    def extract_pending_tools(self, body: dict[str, Any]) -> list[str]:
+    def extract_pending_tools(self, body: JsonObject) -> list[str]:
         """Return pending tool names from the final Responses output run."""
         items = _responses_input_items(body)
         start = _last_output_run_start(items)
@@ -81,15 +83,15 @@ class OpenAIResponsesAdapter:
                 names.append(name)
         return names
 
-    def to_anthropic_request(self, body: dict[str, Any]) -> dict[str, Any]:
+    def to_anthropic_request(self, body: JsonObject) -> JsonObject:
         """Convert a Responses request to the Anthropic canonical format."""
         return responses_request_to_anthropic(body)
 
-    def to_client_response(self, anthropic_response: dict[str, Any]) -> dict[str, Any]:
+    def to_client_response(self, anthropic_response: JsonObject) -> JsonObject:
         """Convert an Anthropic response to a Responses response."""
         return anthropic_to_responses(anthropic_response, str(anthropic_response.get("model", "")))
 
-    def to_client_sse(self, anthropic_response: dict[str, Any]) -> Iterator[bytes]:
+    def to_client_sse(self, anthropic_response: JsonObject) -> Iterator[bytes]:
         """Yield OpenAI Responses SSE chunks."""
         yield from synthesize_responses_sse(
             anthropic_response,

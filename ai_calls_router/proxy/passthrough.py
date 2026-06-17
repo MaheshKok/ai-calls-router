@@ -14,16 +14,15 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 import httpx
 from starlette.responses import Response, StreamingResponse
 
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject, JsonValue
+
 logger = logging.getLogger("acr.passthrough")
-
-
-def _response_summary(status_code: int, content_type: str | None, length: int | None) -> str:
-    return f"status={status_code} content_type={content_type!r} length={length!r}"
 
 
 # Client-supplied values that must not be forwarded: httpx computes correct
@@ -79,11 +78,16 @@ def filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def _usage_int(usage: Mapping[str, Any], key: str) -> int:
-    try:
-        return max(int(usage.get(key, 0) or 0), 0)
-    except (TypeError, ValueError):
+def _usage_int(usage: JsonObject, key: str) -> int:
+    value = usage.get(key, 0)
+    if isinstance(value, bool):
         return 0
+    if isinstance(value, int | float | str):
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
 
 
 class _UsageCapture:
@@ -135,19 +139,19 @@ class _UsageCapture:
         if not data_text or data_text == "[DONE]":
             return
         try:
-            payload = json.loads(data_text)
+            payload = cast("JsonValue", json.loads(data_text))
         except json.JSONDecodeError:
             return
         self._apply_usage_payload(payload)
 
     def _parse_json_payload(self, body: bytes) -> None:
         try:
-            payload = json.loads(body)
+            payload = cast("JsonValue", json.loads(body))
         except json.JSONDecodeError:
             return
         self._apply_usage_payload(payload)
 
-    def _apply_usage_payload(self, payload: Any) -> None:
+    def _apply_usage_payload(self, payload: JsonValue) -> None:
         if not isinstance(payload, dict):
             return
         usage = payload.get("usage")
@@ -159,7 +163,7 @@ class _UsageCapture:
             if isinstance(message_usage, dict):
                 self._apply_usage(message_usage)
 
-    def _apply_usage(self, usage: Mapping[str, Any]) -> None:
+    def _apply_usage(self, usage: JsonObject) -> None:
         for key in _USAGE_KEYS:
             if key in usage:
                 self._usage[key] = _usage_int(usage, key)
@@ -167,7 +171,7 @@ class _UsageCapture:
 
 def _finish_capture(
     *,
-    upstream_response: Any,
+    upstream_response: httpx.Response,
     capture: _UsageCapture,
     started: float,
     on_complete: ResponseComplete | None,
@@ -185,7 +189,7 @@ def _finish_capture(
 
 
 async def _relay(
-    upstream_response: Any,
+    upstream_response: httpx.Response,
     *,
     on_complete: ResponseComplete | None = None,
 ) -> AsyncIterator[bytes]:
