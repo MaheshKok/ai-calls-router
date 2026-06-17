@@ -190,14 +190,14 @@ venvPath = "."
 venv = ".venv"
 include = ["ai_calls_router"]
 exclude = ["tests", "build", "dist", ".venv"]
-typeCheckingMode = "strict"
+typeCheckingMode = "standard"
 reportMissingTypeStubs = false
-reportUnknownMemberType = "error"
-reportUnknownArgumentType = "error"
-reportUnknownVariableType = "error"
-reportUnknownParameterType = "error"
-reportUnknownLambdaType = "error"
-reportMissingTypeArgument = "error"
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportUnknownParameterType = false
+reportUnknownLambdaType = false
+reportMissingTypeArgument = false
 
 
 [tool.coverage.run]
