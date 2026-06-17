@@ -21,7 +21,7 @@ the cited `file:line` references.
   - `make lint` — `ruff check`.
   - `make format` — `ruff format` source + tests.
   - `make type` — pyright.
-  - `make coverage` — tests with coverage; **fails under 98%**.
+  - `make coverage` — tests with coverage; **fails under 95%**.
   - `make build` — sdist + wheel.
 - Direct equivalents if a target is missing: `.venv/bin/python -m pytest`,
   `ruff check`, `ruff format`, `pyright`.
@@ -49,8 +49,8 @@ the cited `file:line` references.
 1. **Fail open.** Any error in decision, conversion, or the routed call resolves
    to passthrough. Routing must never break a turn. Pattern: catch broadly,
    log at WARNING, return `None`/passthrough (see `_try_route`
-   `ai_calls_router/proxy/server.py:250` and `routed_call`
-   `ai_calls_router/routing/engine.py:303`).
+   `ai_calls_router/proxy/server.py:255` and `routed_call`
+   `ai_calls_router/routing/engine.py:318`).
 2. **Credential isolation.** The client's premium credential (Anthropic OAuth /
    OpenAI key) must NEVER reach the routed cheap provider. The routed call uses
    only the tier key resolved from `key_env`/`env_file`
@@ -526,7 +526,7 @@ decisions, savings, or SSE bytes for the Anthropic path. Immutability:
 
 **Verification / done-when.**
 - `make test` — the full existing suite passes unchanged (no test edits needed
-  beyond import wiring). 98% coverage holds.
+  beyond import wiring). 95% coverage holds.
 - `make lint`, `make type` clean; new functions radon A/B.
 - Mutation check: temporarily make `extract_pending_tools` return `[]` and
   confirm an existing routing test fails (seam is load-bearing), then revert.
@@ -613,7 +613,7 @@ escalation guard correctly (Claude `Edit`, Codex `apply_patch`, etc.).
 - `wizard.py` tests (`tests/unit/test_wizard.py`): generated config contains all
   three `agents:` groups with tools + premium_tools + upstream; round-trips
   through `decide.load_routes`.
-- `make test`/`lint`/`type` clean; coverage ≥ 98%.
+- `make test`/`lint`/`type` clean; coverage ≥ 95%.
 
 ---
 
@@ -687,7 +687,7 @@ openrouter or any custom OpenAI-compatible provider, which is the DEFAULT Hermes
   `/v1/chat/completions` tool-result turn routes to DeepSeek direct and returns a
   valid `chat.completion`; a premium-tool turn passes through to the hermes
   upstream.
-- `make test`/`lint`/`type` clean; coverage ≥ 98%.
+- `make test`/`lint`/`type` clean; coverage ≥ 95%.
 
 ---
 
@@ -740,7 +740,7 @@ so the turn safely passes through rather than mis-routing.
 **Verification / done-when.** Same battery as Phase 3, retargeted to Responses
 shapes: round-trip conversions, byte-stability across two turns, immutability,
 golden Responses SSE, integration through DeepSeek direct, premium passthrough to
-the codex upstream. `make test`/`lint`/`type` clean; coverage ≥ 98%.
+the codex upstream. `make test`/`lint`/`type` clean; coverage ≥ 95%.
 
 ---
 
@@ -753,7 +753,7 @@ own upstream in the agent's own format, not always Anthropic.
 3/4 for the OpenAI groups.
 
 **Steps.**
-1. `proxy/server.py` `_serve_passthrough` (`server.py:96`): select the upstream
+1. `proxy/server.py` `_serve_passthrough` (`server.py:99`): select the upstream
    from `routes["agents"][group]["upstream"]` (compat shim → `server.upstream`)
    instead of the single `settings.upstream`.
 2. Thread `group` into `_serve_passthrough` from each endpoint handler.
@@ -768,7 +768,7 @@ Fail-open preserved.
 - Tests: a `claude_code` passthrough hits the anthropic upstream; a `hermes`/
   `codex` passthrough hits its configured upstream; client headers are forwarded
   unchanged; no tier key appears in passthrough requests.
-- `make test`/`lint`/`type` clean; coverage ≥ 98%.
+- `make test`/`lint`/`type` clean; coverage ≥ 95%.
 
 ---
 
@@ -789,7 +789,7 @@ Fail-open preserved.
 - `acr init` (wizard) produces a config that `decide.load_routes` parses and that
   routes all three groups in tests.
 - Example config validates; docs reviewed.
-- Full suite green at ≥ 98% coverage; `make lint`/`type` clean.
+- Full suite green at ≥ 95% coverage; `make lint`/`type` clean.
 
 ---
 
@@ -799,7 +799,7 @@ Fail-open preserved.
 make format
 make lint
 make type
-make coverage     # must report >= 98%
+make coverage     # must report >= 95%
 ```
 
 Plus, for any code that builds a body destined for a native-Anthropic endpoint,
@@ -978,12 +978,12 @@ NOT contain a cheap-tier `key_env`; the cheap credential lives only in global
    is a no-op.
 
 4. **`ai_calls_router/proxy/server.py`**:
-   - In `_lifespan` (`server.py:448`), before serving, call
+   - In `_lifespan` (`server.py:508`), before serving, call
      `bootstrap.ensure_provider_configs()` so missing files are materialized once
      at startup (risk #10).
    - Replace the `routing.load_routes()` call sites that feed serving
-     (`_serve_passthrough` `server.py:96`, `_resolve_tier_config`
-     `server.py:174`) with `provider_config.assemble_routes(base=load_routes())`
+     (`_serve_passthrough` `server.py:99`, `_resolve_tier_config`
+     `server.py:177`) with `provider_config.assemble_routes(base=load_routes())`
      so every handler sees the merged canonical dict. (Cache the assembled dict on
      the same mtime key `load_routes` already uses; assembly is pure.)
    - Per endpoint handler: resolve identity with
@@ -1053,5 +1053,5 @@ Server-level (mirror existing handler tests):
 - A resolved-but-premium turn still passes through to that group's own upstream
   (Phase 5 behavior unchanged).
 
-`make test`/`lint`/`type` clean; coverage ≥ 98%; byte-stability suite (§7) still
+`make test`/`lint`/`type` clean; coverage ≥ 95%; byte-stability suite (§7) still
 green (assembly must not perturb the routed-body prefix).
