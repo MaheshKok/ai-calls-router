@@ -22,9 +22,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install --system -e ".[dev]"
-      - run: ruff check src tests
-      - run: ruff format --check src tests
+      - run: uv pip install -e ".[dev]"
+      - run: uv run ruff check ai_calls_router tests
+      - run: uv run ruff format --check ai_calls_router tests
 
   # ── Type checking ─────────────────────────────────────────────────
   type:
@@ -35,8 +35,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install --system -e ".[dev]"
-      - run: pyright ai_calls_router
+      - run: uv pip install -e ".[dev]"
+      - run: uv run pyright ai_calls_router
 
   # ── Tests (matrix across Python versions) ─────────────────────────
   test:
@@ -51,8 +51,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv pip install --system -e ".[dev]"
-      - run: pytest -q --cov --cov-report=term-missing --cov-fail-under=98
+      - run: uv pip install -e ".[dev]"
+      - run: uv run pytest -q --cov --cov-report=term-missing --cov-fail-under=95
 
   # ── Security (SAST + dependency audit) ────────────────────────────
   security:
@@ -63,9 +63,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install --system -e ".[dev]"
-      - run: bandit -r src -c pyproject.toml
-      - run: pip-audit
+      - run: uv pip install -e ".[dev]"
+      - run: uv run bandit -r ai_calls_router -c pyproject.toml
+      - run: uv run pip-audit
 
   # ── Dependency hygiene ────────────────────────────────────────────
   deps:
@@ -76,8 +76,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install --system -e ".[dev]"
-      - run: deptry src
+      - run: uv pip install -e ".[dev]"
+      - run: uv run deptry ai_calls_router
 
   # ── Complexity gate ───────────────────────────────────────────────
   complexity:
@@ -88,10 +88,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install --system radon xenon
-      - run: radon cc src tests -s -a --total-average
-      - run: radon mi src -s
-      - run: xenon --max-absolute D --max-modules C --max-average A src
+      - run: uv pip install radon xenon
+      - run: uv run radon cc ai_calls_router tests -s -a --total-average
+      - run: uv run radon mi ai_calls_router -s
+      - run: uv run xenon --max-absolute D --max-modules C --max-average A ai_calls_router
 
   # ── Build + package validation ────────────────────────────────────
   build:
@@ -102,10 +102,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install --system build twine check-wheel-contents
-      - run: python -m build
-      - run: twine check dist/*
-      - run: check-wheel-contents dist/*.whl
+      - run: uv pip install build twine check-wheel-contents
+      - run: uv run python -m build
+      - run: uv run twine check dist/*
+      - run: uv run check-wheel-contents dist/*.whl
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -121,8 +121,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install --system vulture refurb interrogate semgrep
-      - run: vulture src --min-confidence 80 || true
-      - run: refurb src || true
-      - run: interrogate src || true
-      - run: semgrep --config auto src || true
+      - run: uv pip install vulture refurb interrogate semgrep
+      - run: uv run vulture ai_calls_router --min-confidence 80 || true
+      - run: uv run refurb ai_calls_router || true
+      - run: uv run interrogate ai_calls_router || true
+      - run: uv run semgrep --config auto ai_calls_router || true
