@@ -269,6 +269,44 @@ class TestTierForTools:
         assert routing.agent_premium_tools(routes, "codex") == AGENT_DEFAULT_PREMIUM_TOOLS["codex"]
 
 
+class TestAgentUpstream:
+    def test_explicit_agent_upstream_is_returned_without_trailing_slash(self) -> None:
+        routes = {
+            "server": {"upstream": "https://premium.example"},
+            "agents": {"codex": {"upstream": "https://api.openai.com/"}},
+        }
+        assert routing.agent_upstream(routes, "codex") == "https://api.openai.com"
+
+    def test_missing_agent_upstream_uses_premium_default(self) -> None:
+        routes = {
+            "server": {"upstream": "https://premium.example/"},
+            "agents": {"codex": {"tools": {}}},
+        }
+        assert routing.agent_upstream(routes, "codex") == "https://premium.example"
+
+    def test_malformed_agent_upstream_warns_and_uses_premium_default(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        routes = {
+            "server": {"upstream": "https://premium.example"},
+            "agents": {"codex": {"upstream": 7}},
+        }
+        with caplog.at_level("WARNING", logger="acr.routing"):
+            assert routing.agent_upstream(routes, "codex") == "https://premium.example"
+        assert "malformed agent upstream" in caplog.text
+
+    def test_legacy_flat_config_resolves_claude_code_to_server_upstream(self) -> None:
+        routes = {"server": {"upstream": "https://legacy.example/"}}
+        assert routing.agent_upstream(routes, "claude_code") == "https://legacy.example"
+
+    def test_unknown_group_uses_premium_default(self) -> None:
+        routes = {
+            "server": {"upstream": "https://premium.example"},
+            "agents": {"codex": {"upstream": "https://api.openai.com"}},
+        }
+        assert routing.agent_upstream(routes, "unknown") == "https://premium.example"
+
+
 class TestResolveApiKey:
     def test_process_env_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ACR_TEST_KEY", "from-env")

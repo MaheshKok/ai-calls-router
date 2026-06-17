@@ -100,13 +100,19 @@ async def _serve_passthrough(
     request: Request,
     body_bytes: bytes,
     *,
+    group: str | None = None,
     on_complete: passthrough.ResponseComplete | None = None,
 ) -> Response:
-    """Relay a request to the premium upstream unchanged.
+    """Relay a request to an upstream unchanged.
+
+    When an agent group is available, passthrough targets that group's own
+    upstream. Without a group, it uses the premium default. Body bytes and
+    client headers are relayed without conversion or injected tier keys.
 
     Args:
         request: Incoming client request.
         body_bytes: Raw request body, already read.
+        group: Optional agent group for per-agent upstream selection.
         on_complete: Optional callback invoked after the premium response is
             fully relayed.
 
@@ -114,10 +120,14 @@ async def _serve_passthrough(
         The streamed upstream response.
     """
     routes = routing.load_routes()
-    settings = config.server_settings(routes)
+    upstream = (
+        routing.agent_upstream(routes, group)
+        if group is not None
+        else config.server_settings(routes).upstream
+    )
     return await passthrough.forward(
         client=request.app.state.client,
-        upstream=settings.upstream,
+        upstream=upstream,
         method=request.method,
         path=request.url.path,
         headers=request.headers,
@@ -428,6 +438,7 @@ async def _handle_routed_request(request: Request) -> Response:
 
     adapter = adapter_for_path(path)
     if adapter is None:
+        # No adapter means no trusted agent group; keep the premium default.
         return await _serve_passthrough(request, body_bytes)
     group = resolve_agent_group(adapter.default_agent_group, request.headers)
     attempt = await _try_route(
@@ -484,6 +495,7 @@ async def _handle_routed_request(request: Request) -> Response:
     return await _serve_passthrough(
         request,
         body_bytes,
+        group=group,
         on_complete=_premium_usage_callback(
             m=m,
             request_id=logging_setup.current_request_id(),
@@ -501,6 +513,7 @@ async def proxy(request: Request) -> Response:
         The streamed upstream response.
     """
     body_bytes = await request.body()
+    # Catch-all paths have no adapter-derived agent group; keep the premium default.
     return await _serve_passthrough(request, body_bytes)
 
 

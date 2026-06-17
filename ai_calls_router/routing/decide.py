@@ -166,6 +166,35 @@ def agent_premium_tools(routes: dict[str, Any], group: str) -> list[str]:
     return list(AGENT_DEFAULT_PREMIUM_TOOLS[_default_agent_group(group)])
 
 
+def agent_upstream(routes: dict[str, Any], group: str) -> str:
+    """Resolve the passthrough upstream for one agent group.
+
+    Args:
+        routes: Parsed config.yaml mapping.
+        group: Agent group name.
+
+    Returns:
+        The agent upstream without a trailing slash, or the premium default
+        when the group config is missing, malformed, or cannot be read.
+    """
+    try:
+        agent_cfg = _agent_config(routes, group)
+        upstream = agent_cfg.get("upstream")
+        if isinstance(upstream, str) and upstream:
+            return upstream.rstrip("/")
+        if "upstream" in agent_cfg:
+            logger.warning(
+                "acr: malformed agent upstream for group=%s; using premium default", group
+            )
+    except Exception as exc:
+        logger.warning(
+            "acr: agent upstream lookup failed (%s); using premium default",
+            exc,
+            exc_info=True,
+        )
+    return config.server_settings(routes).upstream
+
+
 def _premium_aliases(settings: dict[str, Any]) -> dict[str, str]:
     """Derive accepted aliases from the configured premium tool list.
 
