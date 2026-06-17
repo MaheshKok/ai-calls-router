@@ -57,6 +57,23 @@ def config_path() -> Path:
     return home_dir() / "config.yaml"
 
 
+def provider_config_dir() -> Path:
+    """Return the directory holding per-provider YAML files."""
+    return home_dir() / "config"
+
+
+def provider_config_path(group: str) -> Path:
+    """Return the per-provider YAML path for an agent group.
+
+    Args:
+        group: Agent group name, for example ``claude_code``.
+
+    Returns:
+        Path to the group's YAML file under ``provider_config_dir()``.
+    """
+    return provider_config_dir() / f"{group.replace('_', '-')}.yaml"
+
+
 def pid_path() -> Path:
     """Return the daemon pidfile location."""
     return home_dir() / "acr.pid"

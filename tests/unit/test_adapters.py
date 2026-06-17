@@ -1,8 +1,7 @@
 """Spec-derived tests for client-adapter routing seams.
 
 The Phase 1 Anthropic adapter is intentionally identity-preserving so Claude Code traffic
-remains byte-stable. These tests pin the path resolver, the small agent-group precedence
-rule, and the one-chunk SSE wrapper.
+remains byte-stable. These tests pin the path resolver and the one-chunk SSE wrapper.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ from typing import Any
 
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import synthesis
-from ai_calls_router.routing.adapters import adapter_for_path, resolve_agent_group
+from ai_calls_router.routing.adapters import adapter_for_path
 from ai_calls_router.routing.adapters.anthropic_messages import AnthropicMessagesAdapter
 from ai_calls_router.routing.adapters.openai_responses import OpenAIResponsesAdapter
 
@@ -52,22 +51,6 @@ class TestAdapterForPath:
     def test_responses_path_returns_openai_responses_adapter(self) -> None:
         """Return the Responses adapter for the OpenAI Responses endpoint."""
         assert isinstance(adapter_for_path("/v1/responses"), OpenAIResponsesAdapter)
-
-
-class TestResolveAgentGroup:
-    """Verify the simplified Phase 1 agent-group precedence."""
-
-    def test_known_header_wins_over_default(self) -> None:
-        """Honor a trusted x-acr-agent header value."""
-        assert resolve_agent_group("claude_code", {"x-acr-agent": "codex"}) == "codex"
-
-    def test_absent_header_uses_default(self) -> None:
-        """Use the adapter default when no override is present."""
-        assert resolve_agent_group("claude_code", {}) == "claude_code"
-
-    def test_unknown_header_uses_default(self) -> None:
-        """Reject unknown group names without raising or passing them through."""
-        assert resolve_agent_group("claude_code", {"x-acr-agent": "unknown"}) == "claude_code"
 
 
 class TestAnthropicMessagesAdapter:

@@ -88,72 +88,33 @@ tiers:
     input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
     output_cost_per_1m: 0.28           # placeholder, verify
 
-# Per-agent tool -> tier mapping. Exact names match first, then trailing-`*`
-# globs. Any tool not listed here (and any unresolvable tool) routes to premium.
-agents:
-  claude_code:
-    upstream: https://api.anthropic.com
-    premium:
-      provider: anthropic
-    premium_tools: [Edit, Write, MultiEdit, NotebookEdit, Task, ExitPlanMode, AskUserQuestion]
-    tools:
-      Bash: fast
-      BashOutput: fast
-      KillShell: fast
-      WebFetch: fast
-      WebSearch: fast
-      Read: code
-      Grep: code
-      Glob: code
-      LSP: code
-      TodoWrite: crud
-      TaskList: crud
-      TaskGet: crud
-      Edit: premium
-      Write: premium
-      MultiEdit: premium
-      NotebookEdit: premium
-      Task: premium
-      ExitPlanMode: premium
-      AskUserQuestion: premium
-  hermes:
-    upstream: https://api.anthropic.com
-    premium:
-      provider: anthropic
-    premium_tools: [patch, clarify, delegate_task]
-    tools:
-      terminal: fast
-      process: fast
-      read_file: code
-      search_files: code
-      execute_code: code
-      skill_view: code
-      todo: crud
-      memory: crud
-      session_search: crud
-      skills_list: crud
-      write_file: structured
-      skill_manage: structured
-      cronjob: structured
-      patch: premium
-      clarify: premium
-      delegate_task: premium
-      browser_vision: premium
-      browser_*: premium
-  codex:
-    upstream: https://api.anthropic.com
-    premium:
-      provider: anthropic
-    premium_tools: [apply_patch, spawn_agent, request_user_input, request_plugin_install]
-    tools:
-      exec_command: fast
-      local_shell: fast
-      shell: fast
-      shell_command: fast
-      write_stdin: fast
-      update_plan: crud
-      get_context_remaining: crud
-      apply_patch: premium
-      spawn_agent: premium
-      request_user_input: premium
-      request_plugin_install: premium
+# Agent identity routing. `x-acr-agent` wins, then user-agent contains rules,
+# then endpoint defaults, then fallback. `fallback: null` deliberately fails
+# closed with 400 when identity cannot be resolved.
+router:
+  endpoint_defaults:
+    /v1/messages: claude_code
+    /v1/chat/completions: hermes
+    /v1/responses: codex
+  user_agent_map:
+    - contains: claude
+      group: claude_code
+    - contains: hermes
+      group: hermes
+    - contains: codex
+      group: codex
+  fallback: null
+
+# Per-provider config now lives in separate files under
+# ~/.ai-calls-router/config/{claude-code,codex,hermes}.yaml. `acr init` and
+# server startup create missing files without overwriting edits.
+#
+# Runtime-consumed provider fields:
+#   upstream       Passthrough target for that agent group's non-routed turns.
+#   tools          Tool -> tier map.
+#   premium_tools  Tools that force passthrough after response synthesis.
+#
+# Reserved/validated provider fields:
+#   auth, wire, endpoints, model_defaults, tool_choice, reasoning, fallback.
+#   The router validates wire/endpoints but still selects adapters from the
+#   request path and identity rules above.

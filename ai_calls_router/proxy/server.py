@@ -17,6 +17,7 @@ import importlib.resources
 import json
 import logging
 import os
+import threading
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,10 +31,13 @@ from starlette.routing import Route
 
 from ai_calls_router._lib import config, logging_setup
 from ai_calls_router.accounting import metrics, savings
+from ai_calls_router.ops import bootstrap
 from ai_calls_router.proxy import passthrough
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
-from ai_calls_router.routing.adapters import adapter_for_path, resolve_agent_group
+from ai_calls_router.routing import provider_config
+from ai_calls_router.routing.adapters import adapter_for_path
+from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
 
 if TYPE_CHECKING:
     from ai_calls_router.routing.adapters.base import ClientAdapter
@@ -52,6 +56,16 @@ class _RouteAttempt:
     tool_names: list[str] = field(default_factory=list)
 
 
+@dataclass
+class _RoutesCache:
+    signature: tuple[tuple[str, float], ...] | None = None
+    routes: dict[str, Any] | None = None
+
+
+_ROUTES_CACHE_LOCK = threading.Lock()
+_ROUTES_CACHE = _RoutesCache()
+
+
 def _request_summary(body: dict[str, Any]) -> str:
     messages = body.get("messages")
     msg_count = len(messages) if isinstance(messages, list) else 0
@@ -61,6 +75,62 @@ def _request_summary(body: dict[str, Any]) -> str:
 
 
 PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
+
+
+def _mtime_or_zero(path: Path) -> float:
+    """Return a config file mtime, treating missing files as absent."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _assembled_routes_signature() -> tuple[tuple[str, float], ...]:
+    """Build the mtime signature for the global and provider config files."""
+    paths = [config.config_path()]
+    paths.extend(config.provider_config_path(group) for group in sorted(KNOWN_GROUPS))
+    return tuple((str(path), _mtime_or_zero(path)) for path in paths)
+
+
+def _assemble_routes_fail_open(
+    base: dict[str, Any], provider_files: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Assemble routes, dropping invalid provider payloads one at a time."""
+    remaining = dict(provider_files)
+    while True:
+        try:
+            return provider_config.assemble_routes(base, provider_files=remaining)
+        except provider_config.ProviderConfigError as exc:
+            logger.warning(
+                "acr: provider config assembly failed (%s); skipping provider file",
+                exc,
+                exc_info=True,
+            )
+            if exc.group is not None and exc.group in remaining:
+                remaining = {
+                    group: payload for group, payload in remaining.items() if group != exc.group
+                }
+            elif remaining:
+                remaining = {}
+            else:
+                return provider_config.assemble_routes(base, provider_files={})
+
+
+def _load_assembled_routes() -> dict[str, Any]:
+    """Load the canonical routes dict assembled from global and provider YAML."""
+    signature = _assembled_routes_signature()
+    with _ROUTES_CACHE_LOCK:
+        if _ROUTES_CACHE.signature == signature and _ROUTES_CACHE.routes is not None:
+            return _ROUTES_CACHE.routes
+
+    assembled = _assemble_routes_fail_open(
+        routing.load_routes(),
+        provider_config.load_provider_files(),
+    )
+    with _ROUTES_CACHE_LOCK:
+        _ROUTES_CACHE.signature = signature
+        _ROUTES_CACHE.routes = assembled
+    return assembled
 
 
 async def health(request: Request) -> JSONResponse:
@@ -119,7 +189,7 @@ async def _serve_passthrough(
     Returns:
         The streamed upstream response.
     """
-    routes = routing.load_routes()
+    routes = _load_assembled_routes()
     upstream = (
         routing.agent_upstream(routes, group)
         if group is not None
@@ -194,7 +264,7 @@ def _resolve_tier_config(
     Returns (tier_name, tier_cfg, api_key, raw_routes). When tier_cfg or
     api_key is None the caller must pass through to premium.
     """
-    routes = routing.load_routes()
+    routes = _load_assembled_routes()
     tier = routing.tier_for_tools(names, routes, group=group)
     if tier == "premium":
         return "premium", None, None, routes
@@ -440,7 +510,15 @@ async def _handle_routed_request(request: Request) -> Response:
     if adapter is None:
         # No adapter means no trusted agent group; keep the premium default.
         return await _serve_passthrough(request, body_bytes)
-    group = resolve_agent_group(adapter.default_agent_group, request.headers)
+    routes = _load_assembled_routes()
+    group = provider_config.resolve_agent_group(
+        path=path,
+        headers=request.headers,
+        routes=routes,
+        adapter_default=adapter.default_agent_group,
+    )
+    if group is None:
+        return JSONResponse({"error": "unresolved agent identity"}, status_code=400)
     attempt = await _try_route(
         body_bytes,
         adapter=adapter,
@@ -530,6 +608,10 @@ async def _lifespan(
     Yields:
         None while the application serves requests.
     """
+    try:
+        bootstrap.ensure_provider_configs()
+    except Exception as exc:
+        logger.warning("acr: provider config bootstrap failed (%s); continuing", exc, exc_info=True)
     mtr = metrics.get_metrics()
     mtr.bootstrap(ledger_path=config.ledger_path(), max_recent=100)
     app.state.client = httpx.AsyncClient(transport=transport, timeout=passthrough.UPSTREAM_TIMEOUT)

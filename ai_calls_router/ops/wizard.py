@@ -19,10 +19,7 @@ from typing import Any
 import yaml
 
 from ai_calls_router._lib import config
-from ai_calls_router.routing.agent_defaults import (
-    AGENT_DEFAULT_PREMIUM_TOOLS,
-    AGENT_DEFAULT_TOOLS,
-)
+from ai_calls_router.ops import bootstrap
 
 DEFAULT_PROVIDER = "deepseek"
 
@@ -95,6 +92,23 @@ PRESET_PRICES: dict[str, dict[str, dict[str, float]]] = {
 TIER_MAX_TOKENS: dict[str, int] = {"fast": 8192, "structured": 8192, "code": 8192, "crud": 4096}
 
 AskFn = Callable[[str], str]
+
+
+def _router_config() -> dict[str, Any]:
+    """Return the default Phase 7 identity routing block for config.yaml."""
+    return {
+        "endpoint_defaults": {
+            "/v1/messages": "claude_code",
+            "/v1/chat/completions": "hermes",
+            "/v1/responses": "codex",
+        },
+        "user_agent_map": [
+            {"contains": "claude", "group": "claude_code"},
+            {"contains": "hermes", "group": "hermes"},
+            {"contains": "codex", "group": "codex"},
+        ],
+        "fallback": None,
+    }
 
 
 def _ask_port(ask: AskFn) -> int:
@@ -192,20 +206,12 @@ def _build_config(
             "upstream": config.DEFAULT_UPSTREAM,
         },
         "premium": {"provider": "anthropic"},
+        "router": _router_config(),
         "settings": {
             "tier_precedence": ["premium", "structured", "code", "fast", "crud"],
             "escalate_on_premium_tools": True,
         },
         "tiers": tiers,
-        "agents": {
-            group: {
-                "tools": dict(tools),
-                "premium_tools": list(AGENT_DEFAULT_PREMIUM_TOOLS[group]),
-                "upstream": config.DEFAULT_UPSTREAM,
-                "premium": {"provider": "anthropic"},
-            }
-            for group, tools in AGENT_DEFAULT_TOOLS.items()
-        },
     }
 
 
@@ -244,4 +250,5 @@ def run_wizard(ask: AskFn = input) -> Path:
         ),
         encoding="utf-8",
     )
+    bootstrap.ensure_provider_configs()
     return path

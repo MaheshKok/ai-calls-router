@@ -6,7 +6,8 @@ overwrite confirmation when config.yaml already exists), and writes a valid
 config.yaml that the rest of the proxy can serve: the premium block passes
 v1 validation, tiers carry provider-prefixed models with a key_env, the
 default tool map routes cheap tools to tiers and editing tools to premium,
-and empty answers fall back to the documented defaults.
+and empty answers fall back to the documented defaults. Phase 7 keeps the
+router block in config.yaml and materializes per-provider agent YAML files.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import yaml
 
 from ai_calls_router._lib import config
 from ai_calls_router.ops import wizard
-from ai_calls_router.routing import decide
+from ai_calls_router.routing import decide, provider_config
 
 
 class _ScriptedAsk:
@@ -74,16 +75,20 @@ class TestDefaults:
 
     def test_generated_config_contains_all_agent_groups(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk([]))
-        agents = _written_config(path)["agents"]
-        assert set(agents) == {"claude_code", "hermes", "codex"}
-        for cfg in agents.values():
+        assert "agents" not in _written_config(path)
+        loaded = provider_config.load_provider_files()
+        assert set(loaded) == {"claude_code", "hermes", "codex"}
+        for cfg in loaded.values():
             assert cfg["tools"]
             assert cfg["premium_tools"]
-            assert cfg["upstream"] == config.DEFAULT_UPSTREAM
+            assert cfg["upstream"]
 
     def test_generated_config_round_trips_through_load_routes(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk([]))
-        routes = decide.load_routes(path)
+        routes = provider_config.assemble_routes(
+            decide.load_routes(path),
+            provider_files=provider_config.load_provider_files(),
+        )
         assert decide.tier_for_tools(["Bash"], routes, group="claude_code") == "fast"
         assert decide.tier_for_tools(["exec_command"], routes, group="codex") == "fast"
 
@@ -91,7 +96,10 @@ class TestDefaults:
         self, acr_home: Path
     ) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk([]))
-        tools = _written_config(path)["agents"]["claude_code"]["tools"]
+        assert path.exists()
+        tools = yaml.safe_load(
+            config.provider_config_path("claude_code").read_text(encoding="utf-8")
+        )["tools"]
         assert tools["Bash"] == "fast"
         assert tools["BashOutput"] == "fast"
         assert tools["KillShell"] == "fast"
@@ -105,7 +113,10 @@ class TestDefaults:
 
     def test_settings_block_carries_routing_defaults(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk([]))
-        settings = _written_config(path)["settings"]
+        written = _written_config(path)
+        settings = written["settings"]
+        assert written["router"]["endpoint_defaults"]["/v1/responses"] == "codex"
+        assert written["router"]["fallback"] is None
         assert settings["escalate_on_premium_tools"] is True
         assert settings["tier_precedence"][0] == "premium"
         assert "premium_tools" not in settings
@@ -213,7 +224,6 @@ class TestPresetPricing:
             )
         )
         written = _written_config(wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""])))
-        assert written["agents"] == example["agents"]
         price_keys = (
             "input_cost_per_1m",
             "input_cached_cost_per_1m",

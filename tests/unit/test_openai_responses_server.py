@@ -96,6 +96,7 @@ def client(
     metrics_mod._METRICS = None
     config_file = tmp_path / "config.yaml"
     config_file.write_text(CONFIG_YAML, encoding="utf-8")
+    monkeypatch.setenv("ACR_HOME", str(tmp_path))
     monkeypatch.setenv("ACR_CONFIG", str(config_file))
     monkeypatch.setenv("ACR_TEST_KEY", "tier-key")
     monkeypatch.setenv("ACR_SAVINGS_LEDGER", str(tmp_path / "savings.jsonl"))
