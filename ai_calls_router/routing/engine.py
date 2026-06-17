@@ -269,6 +269,7 @@ def _token_fields(body: dict[str, Any]) -> dict[str, int]:
 
 def _record_metrics(
     *,
+    request_path: str,
     tier_name: str,
     model: str,
     premium_model: str,
@@ -293,7 +294,7 @@ def _record_metrics(
     mtr.add_shrink(chars_before=shrink.chars_before, chars_after=shrink.chars_after)
     mtr.record_request(
         method="POST",
-        path="/v1/messages",
+        path=request_path,
         status=200,
         tier=tier_name,
         route="direct" if direct else "litellm",
@@ -323,6 +324,7 @@ async def routed_call(
     settings: dict[str, Any],
     tool_names: list[str] | None = None,
     premium_tools: list[str] | None = None,
+    request_path: str = "/v1/messages",
     user_agent: str = "",
     agent: str = "",
     session_id: str = "",
@@ -349,6 +351,7 @@ async def routed_call(
         tool_names: Tool names extracted from the request body.
         premium_tools: Agent-specific premium tool names for response-side
             escalation. When omitted, legacy settings.premium_tools is used.
+        request_path: Client-facing request path for metrics.
         user_agent: Raw User-Agent header from the client.
         agent: Identified agent label.
         session_id: Session fingerprint hex string.
@@ -433,6 +436,7 @@ async def routed_call(
     if isinstance(premium_model, str) and premium_model:
         anthropic_body = {**anthropic_body, "model": premium_model}
     _record_metrics(
+        request_path=request_path,
         tier_name=tier_name,
         model=cast("str", model),
         premium_model=str(premium_model) if premium_model else "",

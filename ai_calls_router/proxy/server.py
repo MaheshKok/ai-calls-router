@@ -257,6 +257,7 @@ async def _try_route(
     *,
     adapter: ClientAdapter,
     group: str,
+    request_path: str,
     user_agent: str = "",
     agent: str = "",
     session: str | None = None,
@@ -270,6 +271,7 @@ async def _try_route(
     Args:
         adapter: Client adapter for the request path.
         group: Agent group to use for routing.
+        request_path: Client-facing request path for logging and metrics.
         body_bytes: Raw request body bytes.
         user_agent: Raw User-Agent header from the client.
         agent: Identified agent label.
@@ -284,6 +286,7 @@ async def _try_route(
             return _RouteAttempt(reason="non_object_body")
         anthropic_body = adapter.to_anthropic_request(body)
         requested_model = str(anthropic_body.get("model") or "")
+        streaming = _wants_stream(body, anthropic_body)
         names = adapter.extract_pending_tools(body)
         if not names:
             logger.debug("no pending tool results; passing through")
@@ -316,6 +319,7 @@ async def _try_route(
             settings=settings_cfg,
             tool_names=names,
             premium_tools=premium_tools,
+            request_path=request_path,
             user_agent=user_agent,
             agent=group,
             session_id=session or "",
@@ -329,7 +333,7 @@ async def _try_route(
                 tier=tier,
             )
         client_body = adapter.to_client_response(result.body)
-        if anthropic_body.get("stream"):
+        if streaming:
             return _RouteAttempt(
                 response=Response(
                     b"".join(adapter.to_client_sse(result.body)),
@@ -352,6 +356,14 @@ async def _try_route(
         return _RouteAttempt(reason="routing_error")
 
 
+def _wants_stream(client_body: dict[str, Any], anthropic_body: dict[str, Any]) -> bool:
+    """Return whether the client requested a streaming response."""
+    stream = client_body.get("stream")
+    if isinstance(stream, bool):
+        return stream
+    return bool(anthropic_body.get("stream"))
+
+
 async def messages(request: Request) -> Response:
     """Decide and serve one /v1/messages request.
 
@@ -364,11 +376,25 @@ async def messages(request: Request) -> Response:
         The routed response or the streamed premium passthrough.
     """
     with logging_setup.request_context():
-        return await _handle_messages(request)
+        return await _handle_routed_request(request)
 
 
-async def _handle_messages(request: Request) -> Response:
-    """Serve one /v1/messages request inside an active request context."""
+async def chat_completions(request: Request) -> Response:
+    """Decide and serve one /v1/chat/completions request.
+
+    Args:
+        request: Incoming OpenAI Chat Completions request.
+
+    Returns:
+        The routed response or the streamed premium passthrough.
+    """
+    with logging_setup.request_context():
+        return await _handle_routed_request(request)
+
+
+async def _handle_routed_request(request: Request) -> Response:
+    """Serve one adapter-backed request inside an active request context."""
+    path = request.url.path
     body_bytes = await request.body()
     agent = metrics.identify_agent(_user_agent(request))
     try:
@@ -380,14 +406,14 @@ async def _handle_messages(request: Request) -> Response:
         body_dict.get("messages") if isinstance(body_dict, dict) else None
     )
     if isinstance(body_dict, dict):
-        logger.info("inbound /v1/messages %s agent=%s", _request_summary(body_dict), agent)
+        logger.info("inbound %s %s agent=%s", path, _request_summary(body_dict), agent)
     else:
-        logger.info("inbound /v1/messages unparsed-body bytes=%d agent=%s", len(body_bytes), agent)
+        logger.info("inbound %s unparsed-body bytes=%d agent=%s", path, len(body_bytes), agent)
 
     m = metrics.get_metrics()
     m.incr_total()
 
-    adapter = adapter_for_path(request.url.path)
+    adapter = adapter_for_path(path)
     if adapter is None:
         return await _serve_passthrough(request, body_bytes)
     group = resolve_agent_group(adapter.default_agent_group, request.headers)
@@ -395,13 +421,14 @@ async def _handle_messages(request: Request) -> Response:
         body_bytes,
         adapter=adapter,
         group=group,
+        request_path=path,
         user_agent=_user_agent(request),
         agent=agent,
         session=session,
     )
     if attempt.response is not None:
         m.incr_routed()
-        logger.info("outcome=routed /v1/messages agent=%s tier=%s", agent, attempt.tier)
+        logger.info("outcome=routed %s agent=%s tier=%s", path, agent, attempt.tier)
         return attempt.response
 
     m.incr_passthrough()
@@ -410,7 +437,8 @@ async def _handle_messages(request: Request) -> Response:
     elif attempt.reason in {"routing_error", "routed_fallback", "tier_unavailable"}:
         m.incr_fallback()
     logger.info(
-        "outcome=passthrough /v1/messages agent=%s reason=%s tier=%s model=%r tools=%s",
+        "outcome=passthrough %s agent=%s reason=%s tier=%s model=%r tools=%s",
+        path,
         agent,
         attempt.reason,
         attempt.tier,
@@ -419,7 +447,7 @@ async def _handle_messages(request: Request) -> Response:
     )
     m.record_request(
         method="POST",
-        path="/v1/messages",
+        path=path,
         status=0,
         tier=attempt.tier,
         route="premium_guard"
@@ -509,6 +537,7 @@ def create_app(transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
             Route("/metrics", metrics_endpoint, methods=["GET"]),
             Route("/dashboard", dashboard, methods=["GET"]),
             Route("/v1/messages", messages, methods=["POST"]),
+            Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/{path:path}", proxy, methods=PROXY_METHODS),
         ],
         lifespan=lifespan,
