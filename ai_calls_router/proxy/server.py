@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,7 +40,11 @@ from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
 from ai_calls_router.routing.adapters import adapter_for_path
 from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
-from ai_calls_router.routing.config_schema import ConfigSchemaError, is_codex_tier
+from ai_calls_router.routing.config_schema import (
+    ConfigSchemaError,
+    is_codex_tier,
+    parse_tier_config,
+)
 from ai_calls_router.routing.synthesis_responses import synthesize_response_object_sse
 
 if TYPE_CHECKING:
@@ -58,6 +63,11 @@ class _RouteAttempt:
     reason: str = "passthrough"
     model: str = ""
     tool_names: list[str] = field(default_factory=lambda: [])
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    duration: float = 0.0
 
 
 @dataclass
@@ -76,6 +86,35 @@ def _request_summary(body: JsonObject) -> str:
     model = body.get("model")
     stream = body.get("stream")
     return f"model={model!r} stream={stream!r} messages={msg_count}"
+
+
+def _usage_int(value: JsonValue) -> int:
+    """Coerce provider usage values to non-negative integers."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int | float | str):
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _codex_response_usage(response_body: JsonObject) -> tuple[int, int, int, int]:
+    """Return Responses usage as input, output, cache-read, cache-creation tokens."""
+    usage = response_body.get("usage")
+    if not isinstance(usage, dict):
+        return 0, 0, 0, 0
+    cache_read = 0
+    details = usage.get("input_tokens_details")
+    if isinstance(details, dict):
+        cache_read = _usage_int(details.get("cached_tokens"))
+    return (
+        _usage_int(usage.get("input_tokens")),
+        _usage_int(usage.get("output_tokens")),
+        cache_read,
+        0,
+    )
 
 
 PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
@@ -371,16 +410,19 @@ async def _try_codex_direct_route(
     if request_path != "/v1/responses":
         return None
     try:
+        tier_model = parse_tier_config(tier_cfg).model
         if not is_codex_tier(tier_cfg):
             return None
     except ConfigSchemaError:
         return None
+    started = time.monotonic()
     response_body = await codex_direct.responses_call(
         body=body,
         tier_cfg=tier_cfg,
         credential=credential,
         chatgpt_headers=websocket_passthrough.codex_chatgpt_headers(request_headers),
     )
+    duration = time.monotonic() - started
     if response_body is None:
         return _routed_fallback_attempt(
             response_guard_tools=[],
@@ -396,6 +438,9 @@ async def _try_codex_direct_route(
             names=names,
             tier=tier,
         )
+    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens = _codex_response_usage(
+        response_body
+    )
     client_body = {**response_body, "model": requested_model} if requested_model else response_body
     response = (
         Response(
@@ -409,8 +454,13 @@ async def _try_codex_direct_route(
         response=response,
         tier=tier,
         reason="routed",
-        model=requested_model,
+        model=tier_model,
         tool_names=names,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        duration=duration,
     )
 
 
@@ -576,11 +626,11 @@ def _record_ws_route_attempt(headers: Mapping[str, str], attempt: _RouteAttempt)
             user_agent=user_agent,
             client_ip="",
             tool_names=attempt.tool_names,
-            input_tokens=0,
-            output_tokens=0,
-            cache_read=0,
-            cache_creation=0,
-            duration=0,
+            input_tokens=attempt.input_tokens,
+            output_tokens=attempt.output_tokens,
+            cache_read=attempt.cache_read_tokens,
+            cache_creation=attempt.cache_creation_tokens,
+            duration=attempt.duration,
             premium_model="" if routed else attempt.model,
             agent=metrics.identify_agent(user_agent),
             session_id="",

@@ -115,6 +115,10 @@ def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) ->
             reason="routed",
             model="gpt-5",
             tool_names=["exec_command"],
+            input_tokens=11,
+            output_tokens=3,
+            cache_read_tokens=7,
+            duration=0.25,
         )
 
     def _connect(uri: str, **kwargs: object) -> _FakeConnect:
@@ -167,6 +171,10 @@ def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) ->
     assert latest["tier"] == "codex_fast"
     assert latest["model"] == "gpt-5"
     assert latest["tool_names"] == ["exec_command"]
+    assert latest["input_tokens"] == 11
+    assert latest["output_tokens"] == 3
+    assert latest["cache_read_tokens"] == 7
+    assert latest["duration_ms"] == 250
 
 
 def test_codex_websocket_routes_later_output_with_cached_call(monkeypatch) -> None:

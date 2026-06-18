@@ -11,6 +11,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from ai_calls_router.accounting import metrics as metrics_mod
+from ai_calls_router.proxy import server as server_mod
 from ai_calls_router.proxy.server import create_app
 from ai_calls_router.routing import engine as rc
 
@@ -143,7 +144,12 @@ class _FakeCodexResponsesCall:
                     "content": [{"type": "output_text", "text": "codex routed"}],
                 }
             ],
-            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 1},
+            },
         }
 
 
@@ -370,6 +376,34 @@ def test_codex_direct_route_uses_oauth_sentinel(
     assert headers["authorization"] == "Bearer chatgpt-oauth"
     assert headers["chatgpt-account-id"] == "acct_123"
     assert upstream.requests == []
+
+
+@pytest.mark.asyncio
+async def test_codex_direct_attempt_reports_yaml_model_and_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCodexResponsesCall()
+    monkeypatch.setattr("ai_calls_router.proxy.server.codex_direct.responses_call", fake)
+
+    attempt = await server_mod._try_codex_direct_route(
+        body=_responses_tool_result_body(stream=True),
+        tier="codex_code",
+        tier_cfg={"model": "codex/gpt-configured-from-yaml", "provider": "codex"},
+        credential="oauth",
+        request_headers={},
+        streaming=True,
+        requested_model="gpt-5.5",
+        names=["exec_command"],
+        premium_tools=[],
+        request_path="/v1/responses",
+    )
+
+    assert attempt is not None
+    assert attempt.model == "codex/gpt-configured-from-yaml"
+    assert attempt.input_tokens == 1
+    assert attempt.output_tokens == 2
+    assert attempt.cache_read_tokens == 1
+    assert b'"model": "gpt-5.5"' in bytes(attempt.response.body)
 
 
 def test_malformed_responses_body_passes_through(
