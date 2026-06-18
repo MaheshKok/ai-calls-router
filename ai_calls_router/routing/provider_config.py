@@ -106,30 +106,6 @@ def _validate_provider_payload(group: str, payload: JsonObject) -> None:
         raise ProviderConfigError("provider config endpoints mismatch", group=group)
 
 
-def _fallback_agent_config(routes: JsonObject, group: str) -> JsonObject:
-    """Build an agent config from canonical defaults for a missing provider file."""
-    return cast(
-        "JsonObject",
-        {
-            "tools": agent_tools(routes, group),
-            "premium_tools": agent_premium_tools(routes, group),
-            "upstream": agent_upstream(routes, group),
-            "premium": {"provider": "anthropic"},
-        },
-    )
-
-
-def _provider_agent_config(routes: JsonObject, group: str, payload: JsonObject) -> JsonObject:
-    """Build canonical agents[group] config from one provider payload."""
-    _validate_provider_payload(group, payload)
-    agent_cfg = {key: copy.deepcopy(value) for key, value in payload.items() if key != "group"}
-    if "tools" not in agent_cfg:
-        agent_cfg["tools"] = cast("JsonValue", agent_tools(routes, group))
-    if "premium_tools" not in agent_cfg:
-        agent_cfg["premium_tools"] = cast("JsonValue", agent_premium_tools(routes, group))
-    return agent_cfg
-
-
 def assemble_routes(base: JsonObject, *, provider_files: dict[str, JsonObject]) -> JsonObject:
     """Merge provider-file payloads into a new canonical routes dict.
 
@@ -155,9 +131,26 @@ def assemble_routes(base: JsonObject, *, provider_files: dict[str, JsonObject]) 
     for group in sorted(KNOWN_GROUPS):
         payload = provider_files.get(group)
         if payload is None:
-            agents.setdefault(group, _fallback_agent_config(compat, group))
+            agents.setdefault(
+                group,
+                cast(
+                    "JsonValue",
+                    {
+                        "tools": agent_tools(compat, group),
+                        "premium_tools": agent_premium_tools(compat, group),
+                        "upstream": agent_upstream(compat, group),
+                        "premium": {"provider": "anthropic"},
+                    },
+                ),
+            )
             continue
-        agents[group] = _provider_agent_config(compat, group, payload)
+        _validate_provider_payload(group, payload)
+        agent_cfg = {key: copy.deepcopy(value) for key, value in payload.items() if key != "group"}
+        if "tools" not in agent_cfg:
+            agent_cfg["tools"] = cast("JsonValue", agent_tools(compat, group))
+        if "premium_tools" not in agent_cfg:
+            agent_cfg["premium_tools"] = cast("JsonValue", agent_premium_tools(compat, group))
+        agents[group] = agent_cfg
     result["agents"] = agents
     return result
 
@@ -191,14 +184,6 @@ def _user_agent_match(router: JsonObject, user_agent: str) -> str | None:
     return None
 
 
-def _endpoint_default(router: JsonObject, path: str) -> str | None:
-    """Resolve group from router.endpoint_defaults."""
-    endpoint_defaults = router.get("endpoint_defaults")
-    if isinstance(endpoint_defaults, dict):
-        return _known(endpoint_defaults.get(path))
-    return None
-
-
 def _fallback_group(router: JsonObject, adapter_default: str) -> str | None:
     """Resolve the configured fallback group or adapter default."""
     if "fallback" not in router:
@@ -225,8 +210,12 @@ def resolve_agent_group(
     if router is None:
         return _known(adapter_default)
 
+    endpoint_defaults = router.get("endpoint_defaults")
+    endpoint_group = (
+        _known(endpoint_defaults.get(path)) if isinstance(endpoint_defaults, dict) else None
+    )
     return (
         _user_agent_match(router, _header_value(headers, "user-agent"))
-        or _endpoint_default(router, path)
+        or endpoint_group
         or _fallback_group(router, adapter_default)
     )

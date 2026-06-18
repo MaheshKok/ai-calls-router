@@ -114,20 +114,19 @@ def _request_summary(body: JsonObject) -> str:
 PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
 
 
-def _file_signature(path: Path) -> tuple[str, int, int, int]:
-    """Return a config file signature, treating missing files as absent."""
-    try:
-        stat = path.stat()
-    except OSError:
-        return str(path), 0, 0, 0
-    return str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino
-
-
 def _assembled_routes_signature() -> tuple[tuple[str, int, int, int], ...]:
     """Build the mtime signature for the global and provider config files."""
     paths = [config.config_path()]
     paths.extend(config.provider_config_path(group) for group in sorted(KNOWN_GROUPS))
-    return tuple(_file_signature(path) for path in paths)
+    signature: list[tuple[str, int, int, int]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            signature.append((str(path), 0, 0, 0))
+            continue
+        signature.append((str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino))
+    return tuple(signature)
 
 
 def _assemble_routes_fail_open(
@@ -135,7 +134,7 @@ def _assemble_routes_fail_open(
 ) -> JsonObject:
     """Assemble routes, dropping invalid provider payloads one at a time."""
     remaining = dict(provider_files)
-    while True:
+    while remaining:
         try:
             return provider_config.assemble_routes(base, provider_files=remaining)
         except provider_config.ProviderConfigError as exc:
@@ -145,13 +144,10 @@ def _assemble_routes_fail_open(
                 exc_info=True,
             )
             if exc.group is not None and exc.group in remaining:
-                remaining = {
-                    group: payload for group, payload in remaining.items() if group != exc.group
-                }
-            elif remaining:
-                remaining = {}
-            else:
-                return provider_config.assemble_routes(base, provider_files={})
+                remaining.pop(exc.group)
+                continue
+            remaining = {}
+    return provider_config.assemble_routes(base, provider_files={})
 
 
 def _load_assembled_routes() -> JsonObject:
