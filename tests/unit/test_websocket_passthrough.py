@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -17,7 +17,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ai_calls_router._lib.types import JsonObject
 from ai_calls_router.accounting import metrics
-from ai_calls_router.proxy import server, websocket_passthrough
+from ai_calls_router.proxy import route_dispatch, server, websocket_passthrough
 from ai_calls_router.routing.adapters.base import ClientAdapter
 
 if TYPE_CHECKING:
@@ -127,11 +127,13 @@ def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) ->
         user_agent: str = "",
         agent: str = "",
         session: str | None = None,
-    ) -> server._RouteAttempt:
+        routes_loader: Callable[[], JsonObject],
+    ) -> route_dispatch.RouteAttempt:
+        del routes_loader
         raw_captures.append(body_bytes)
         captures.append(json.loads(body_bytes))
         sse = b'event: response.completed\ndata: {"type":"response.completed"}\n\ndata: [DONE]\n\n'
-        return server._RouteAttempt(
+        return route_dispatch.RouteAttempt(
             response=Response(sse, media_type="text/event-stream"),
             tier="codex_fast",
             reason="routed",
@@ -147,8 +149,8 @@ def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) ->
         pytest.fail("routed response.create should not open upstream websocket")
 
     monkeypatch.setattr(server, "_load_assembled_routes", lambda: {})
-    monkeypatch.setattr(server, "_try_route", _fake_try_route)
-    monkeypatch.setattr(server.metrics, "get_metrics", lambda: m)
+    monkeypatch.setattr(route_dispatch, "try_route", _fake_try_route)
+    monkeypatch.setattr(route_dispatch.metrics, "get_metrics", lambda: m)
     monkeypatch.setattr(websocket_passthrough, "connect", _connect)
     app = Starlette(routes=[WebSocketRoute("/v1/responses", server.responses_ws)])
 
@@ -236,16 +238,18 @@ def test_codex_websocket_routes_later_output_with_cached_call(monkeypatch) -> No
         user_agent: str = "",
         agent: str = "",
         session: str | None = None,
-    ) -> server._RouteAttempt:
+        routes_loader: Callable[[], JsonObject],
+    ) -> route_dispatch.RouteAttempt:
+        del routes_loader
         captures.append(json.loads(body_bytes))
         sse = b'event: response.completed\ndata: {"type":"response.completed"}\n\ndata: [DONE]\n\n'
-        return server._RouteAttempt(response=Response(sse, media_type="text/event-stream"))
+        return route_dispatch.RouteAttempt(response=Response(sse, media_type="text/event-stream"))
 
     def _connect(uri: str, **kwargs: object) -> _FakeConnect:
         return _FakeConnect(upstream)
 
     monkeypatch.setattr(server, "_load_assembled_routes", lambda: {})
-    monkeypatch.setattr(server, "_try_route", _fake_try_route)
+    monkeypatch.setattr(route_dispatch, "try_route", _fake_try_route)
     monkeypatch.setattr(websocket_passthrough, "connect", _connect)
     app = Starlette(routes=[WebSocketRoute("/v1/responses", server.responses_ws)])
 
@@ -402,8 +406,10 @@ async def test_ws_route_returns_none_when_routed_core_declines(monkeypatch) -> N
         user_agent: str = "",
         agent: str = "",
         session: str | None = None,
-    ) -> server._RouteAttempt:
-        return server._RouteAttempt(
+        routes_loader: Callable[[], JsonObject],
+    ) -> route_dispatch.RouteAttempt:
+        del routes_loader
+        return route_dispatch.RouteAttempt(
             tier="codex_fast",
             reason="routed_fallback",
             model="gpt-5",
@@ -411,12 +417,13 @@ async def test_ws_route_returns_none_when_routed_core_declines(monkeypatch) -> N
         )
 
     monkeypatch.setattr(server, "_load_assembled_routes", lambda: {})
-    monkeypatch.setattr(server, "_try_route", _fake_try_route)
-    monkeypatch.setattr(server.metrics, "get_metrics", lambda: m)
+    monkeypatch.setattr(route_dispatch, "try_route", _fake_try_route)
+    monkeypatch.setattr(route_dispatch.metrics, "get_metrics", lambda: m)
 
-    result = await server._try_route_ws_response_create(
+    result = await route_dispatch.try_route_ws_response_create(
         json.dumps({"type": "response.create", "response": {"model": "gpt-5", "input": "hi"}}),
         {"chatgpt-account-id": "acct_123"},
+        routes_loader=lambda: {},
     )
 
     assert result is None
@@ -434,11 +441,10 @@ async def test_ws_route_errors_fail_open(monkeypatch) -> None:
     def _fail_load_routes() -> JsonObject:
         raise RuntimeError("broken config")
 
-    monkeypatch.setattr(server, "_load_assembled_routes", _fail_load_routes)
-
-    result = await server._try_route_ws_response_create(
+    result = await route_dispatch.try_route_ws_response_create(
         json.dumps({"type": "response.create", "response": {"model": "gpt-5", "input": "hi"}}),
         {"chatgpt-account-id": "acct_123"},
+        routes_loader=_fail_load_routes,
     )
 
     assert result is None

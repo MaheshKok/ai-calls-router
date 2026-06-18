@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import contextlib
 import functools
-import importlib.resources
 import ipaddress
 import json
 import logging
@@ -34,7 +33,7 @@ from starlette.websockets import WebSocket
 from ai_calls_router._lib import config, logging_setup
 from ai_calls_router.accounting import metrics
 from ai_calls_router.ops import bootstrap
-from ai_calls_router.proxy import passthrough, route_dispatch, websocket_passthrough
+from ai_calls_router.proxy import observability, passthrough, route_dispatch, websocket_passthrough
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import provider_config
 from ai_calls_router.routing.adapters import adapter_for_path
@@ -158,27 +157,6 @@ async def health(request: Request) -> JSONResponse:
         A local 200 status response.
     """
     return JSONResponse({"status": "ok"})
-
-
-async def metrics_endpoint(request: Request) -> JSONResponse:
-    """Return live in-memory counters for dashboard/API consumers."""
-    del request
-    return JSONResponse(metrics.get_metrics().snapshot())
-
-
-async def dashboard(request: Request) -> Response:
-    """Serve the live dashboard single-page app."""
-    del request
-    return _serve_dashboard()
-
-
-def _serve_dashboard() -> Response:
-    body = importlib.resources.read_text("ai_calls_router.proxy", "dashboard.html")
-    return Response(
-        body,
-        media_type="text/html; charset=utf-8",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
-    )
 
 
 async def _serve_passthrough(
@@ -312,54 +290,6 @@ async def _try_route(
     )
 
 
-def _record_ws_route_attempt(headers: Mapping[str, str], attempt: _RouteAttempt) -> None:
-    """Record one WebSocket response.create route attempt for dashboard visibility."""
-    try:
-        m = metrics.get_metrics()
-        user_agent = headers.get("user-agent", "")
-        routed = attempt.response is not None
-        m.incr_total()
-        if routed:
-            m.incr_routed()
-            route = "routed"
-            status = 101
-        else:
-            m.incr_passthrough()
-            if attempt.reason == "response_premium_guard":
-                m.incr_escalated()
-            elif attempt.reason in {"routing_error", "routed_fallback", "tier_unavailable"}:
-                m.incr_fallback()
-            route = (
-                "premium_guard"
-                if attempt.reason in {"request_premium_guard", "response_premium_guard"}
-                else "passthrough"
-            )
-            status = 0
-        m.record_request(
-            method="WS",
-            path="/v1/responses",
-            status=status,
-            tier=attempt.tier,
-            route=route,
-            model=attempt.model,
-            user_agent=user_agent,
-            client_ip="",
-            tool_names=attempt.tool_names,
-            input_tokens=attempt.input_tokens,
-            output_tokens=attempt.output_tokens,
-            cache_read=attempt.cache_read_tokens,
-            cache_creation=attempt.cache_creation_tokens,
-            duration=attempt.duration,
-            premium_model="" if routed else attempt.model,
-            agent=metrics.identify_agent(user_agent),
-            session_id="",
-            decision_reason=attempt.reason,
-            request_id=logging_setup.current_request_id(),
-        )
-    except Exception as exc:
-        logger.warning("acr: websocket metrics update failed (%s); continuing", exc, exc_info=True)
-
-
 async def messages(request: Request) -> Response:
     """Decide and serve one /v1/messages request.
 
@@ -403,8 +333,11 @@ async def responses(request: Request) -> Response:
 
 async def responses_ws(websocket: WebSocket) -> None:
     """Relay Codex ChatGPT-auth Responses WebSockets."""
+    route_first_frame = functools.partial(
+        route_dispatch.try_route_ws_response_create, routes_loader=_load_assembled_routes
+    )
     await websocket_passthrough.forward_codex_chatgpt(
-        websocket, route_first_frame=_try_route_ws_response_create
+        websocket, route_first_frame=route_first_frame
     )
 
 
@@ -412,52 +345,12 @@ async def responses_ws_sub(websocket: WebSocket) -> None:
     """Relay Codex ChatGPT-auth Responses WebSocket subpaths."""
     raw_sub_path = websocket.path_params.get("sub_path", "")
     sub_path = raw_sub_path if isinstance(raw_sub_path, str) else ""
-    await websocket_passthrough.forward_codex_chatgpt(
-        websocket, sub_path=sub_path, route_first_frame=_try_route_ws_response_create
+    route_first_frame = functools.partial(
+        route_dispatch.try_route_ws_response_create, routes_loader=_load_assembled_routes
     )
-
-
-async def _try_route_ws_response_create(
-    first_msg_raw: str, headers: Mapping[str, str]
-) -> list[str] | None:
-    """Try to serve one Codex WS `response.create` through the routed core."""
-    try:
-        body = websocket_passthrough.response_create_to_http_body(first_msg_raw)
-        if body is None:
-            return None
-        adapter = adapter_for_path("/v1/responses")
-        if adapter is None:
-            return None
-        routes = _load_assembled_routes()
-        group = provider_config.resolve_agent_group(
-            path="/v1/responses",
-            headers=headers,
-            routes=routes,
-            adapter_default=adapter.default_agent_group,
-        )
-        if group is None:
-            return None
-        body_bytes = json.dumps(
-            body, separators=(",", ":"), ensure_ascii=False, sort_keys=True
-        ).encode("utf-8")
-        user_agent = headers.get("user-agent", "")
-        attempt = await _try_route(
-            body_bytes,
-            adapter=adapter,
-            group=group,
-            request_path="/v1/responses",
-            request_headers=headers,
-            user_agent=user_agent,
-            agent=metrics.identify_agent(user_agent),
-            session=None,
-        )
-        _record_ws_route_attempt(headers, attempt)
-        if attempt.response is None:
-            return None
-        return websocket_passthrough.sse_to_ws_messages(bytes(attempt.response.body))
-    except Exception as exc:
-        logger.warning("acr: websocket routing decision failed (%s); passing through", exc)
-        return None
+    await websocket_passthrough.forward_codex_chatgpt(
+        websocket, sub_path=sub_path, route_first_frame=route_first_frame
+    )
 
 
 async def _handle_routed_request(request: Request) -> Response:
@@ -623,8 +516,8 @@ def create_app(transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
     return Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
-            Route("/metrics", metrics_endpoint, methods=["GET"]),
-            Route("/dashboard", dashboard, methods=["GET"]),
+            Route("/metrics", observability.metrics_endpoint, methods=["GET"]),
+            Route("/dashboard", observability.dashboard, methods=["GET"]),
             Route("/v1/messages", messages, methods=["POST"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1/responses", responses, methods=["POST"]),
