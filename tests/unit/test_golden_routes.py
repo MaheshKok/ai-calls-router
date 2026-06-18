@@ -1,0 +1,273 @@
+"""Golden routing decisions for representative OpenAI-compatible requests."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+import pytest
+
+from ai_calls_router._lib.types import JsonObject
+from ai_calls_router.proxy import route_dispatch
+from ai_calls_router.routing import provider_config
+from ai_calls_router.routing.adapters import adapter_for_path
+from ai_calls_router.routing.config_schema import is_codex_tier
+
+
+@dataclass(frozen=True)
+class GoldenRoute:
+    """One routing decision fixture and its expected outcome."""
+
+    name: str
+    path: str
+    headers: Mapping[str, str]
+    body: JsonObject
+    expected_group: str
+    expected_tools: list[str]
+    expected_tier: str
+    expected_model: str | None
+    expected_auth_mode: str | None
+    expected_codex_direct: bool
+
+
+def _routes() -> JsonObject:
+    """Return the fixed config used by the golden route table."""
+    return {
+        "settings": {
+            "tier_precedence": [
+                "premium",
+                "codex_fast",
+                "structured",
+                "code",
+                "fast",
+                "crud",
+                "no_key",
+            ]
+        },
+        "tiers": {
+            "fast": {"model": "deepseek/deepseek-chat", "key_env": "FAST_KEY"},
+            "code": {"model": "deepseek/deepseek-coder", "key_env": "CODE_KEY"},
+            "crud": {"model": "deepseek/deepseek-crud", "key_env": "CRUD_KEY"},
+            "structured": {
+                "model": "deepseek/deepseek-structured",
+                "key_env": "STRUCTURED_KEY",
+            },
+            "codex_fast": {
+                "provider": "openai-codex",
+                "model": "gpt-5.3-codex-spark",
+                "key_env": "oauth",
+            },
+            "no_key": {"model": "deepseek/no-key"},
+        },
+        "router": {
+            "endpoint_defaults": {
+                "/v1/messages": "claude_code",
+                "/v1/chat/completions": "hermes",
+                "/v1/responses": "codex",
+            },
+            "fallback": None,
+        },
+        "agents": {
+            "claude_code": {
+                "tools": {
+                    "Bash": "fast",
+                    "Read": "code",
+                    "TodoWrite": "crud",
+                    "NoKey": "no_key",
+                    "Edit": "premium",
+                },
+                "premium_tools": ["Edit"],
+                "upstream": "https://api.anthropic.com",
+            },
+            "hermes": {
+                "tools": {
+                    "read_file": "code",
+                    "write_file": "structured",
+                    "todo": "crud",
+                    "patch": "premium",
+                },
+                "premium_tools": ["patch"],
+                "upstream": "https://api.openai.com",
+            },
+            "codex": {
+                "tools": {
+                    "exec_command": "codex_fast",
+                    "update_plan": "crud",
+                    "apply_patch": "premium",
+                },
+                "premium_tools": ["apply_patch"],
+                "upstream": "https://api.openai.com",
+            },
+        },
+    }
+
+
+def _anthropic_tool_result(tool_name: str) -> JsonObject:
+    """Build a Claude-style completed tool-result turn."""
+    return {
+        "model": "claude-sonnet-4-6",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_1", "name": tool_name, "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+            },
+        ],
+    }
+
+
+def _chat_tool_result(tool_name: str) -> JsonObject:
+    """Build an OpenAI Chat Completions completed tool-result turn."""
+    return {
+        "model": "gpt-5",
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": tool_name, "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+        ],
+    }
+
+
+def _responses_tool_result(tool_name: str) -> JsonObject:
+    """Build an OpenAI Responses completed tool-result turn."""
+    return {
+        "model": "gpt-5",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": tool_name,
+                "arguments": "{}",
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        ],
+    }
+
+
+GOLDEN_ROUTES = [
+    GoldenRoute(
+        name="claude-fast",
+        path="/v1/messages",
+        headers={},
+        body=_anthropic_tool_result("Bash"),
+        expected_group="claude_code",
+        expected_tools=["Bash"],
+        expected_tier="fast",
+        expected_model="deepseek/deepseek-chat",
+        expected_auth_mode="api_key",
+        expected_codex_direct=False,
+    ),
+    GoldenRoute(
+        name="claude-code",
+        path="/v1/messages",
+        headers={},
+        body=_anthropic_tool_result("Read"),
+        expected_group="claude_code",
+        expected_tools=["Read"],
+        expected_tier="code",
+        expected_model="deepseek/deepseek-coder",
+        expected_auth_mode="api_key",
+        expected_codex_direct=False,
+    ),
+    GoldenRoute(
+        name="claude-crud",
+        path="/v1/messages",
+        headers={},
+        body=_anthropic_tool_result("TodoWrite"),
+        expected_group="claude_code",
+        expected_tools=["TodoWrite"],
+        expected_tier="crud",
+        expected_model="deepseek/deepseek-crud",
+        expected_auth_mode="api_key",
+        expected_codex_direct=False,
+    ),
+    GoldenRoute(
+        name="hermes-structured",
+        path="/v1/chat/completions",
+        headers={},
+        body=_chat_tool_result("write_file"),
+        expected_group="hermes",
+        expected_tools=["write_file"],
+        expected_tier="structured",
+        expected_model="deepseek/deepseek-structured",
+        expected_auth_mode="api_key",
+        expected_codex_direct=False,
+    ),
+    GoldenRoute(
+        name="claude-premium-guard",
+        path="/v1/messages",
+        headers={},
+        body=_anthropic_tool_result("Edit"),
+        expected_group="claude_code",
+        expected_tools=["Edit"],
+        expected_tier="premium",
+        expected_model=None,
+        expected_auth_mode=None,
+        expected_codex_direct=False,
+    ),
+    GoldenRoute(
+        name="claude-missing-credential-fallback",
+        path="/v1/messages",
+        headers={},
+        body=_anthropic_tool_result("NoKey"),
+        expected_group="claude_code",
+        expected_tools=["NoKey"],
+        expected_tier="no_key",
+        expected_model=None,
+        expected_auth_mode=None,
+        expected_codex_direct=False,
+    ),
+    GoldenRoute(
+        name="codex-direct-oauth",
+        path="/v1/responses",
+        headers={},
+        body=_responses_tool_result("exec_command"),
+        expected_group="codex",
+        expected_tools=["exec_command"],
+        expected_tier="codex_fast",
+        expected_model="gpt-5.3-codex-spark",
+        expected_auth_mode="oauth",
+        expected_codex_direct=True,
+    ),
+]
+
+
+@pytest.mark.parametrize("case", GOLDEN_ROUTES, ids=[case.name for case in GOLDEN_ROUTES])
+def test_golden_route_decisions(monkeypatch: pytest.MonkeyPatch, case: GoldenRoute) -> None:
+    routes = _routes()
+    for key in ("FAST_KEY", "CODE_KEY", "CRUD_KEY", "STRUCTURED_KEY"):
+        monkeypatch.setenv(key, f"value-for-{key}")
+    adapter = adapter_for_path(case.path)
+    assert adapter is not None
+    group = provider_config.resolve_agent_group(
+        path=case.path,
+        headers=case.headers,
+        routes=routes,
+        adapter_default=adapter.default_agent_group,
+    )
+    assert group == case.expected_group
+    names = adapter.extract_pending_tools(case.body)
+    tier, tier_cfg, credential, _ = route_dispatch.resolve_tier_config(
+        names,
+        group=group,
+        routes_loader=lambda: routes,
+    )
+
+    assert names == case.expected_tools
+    assert tier == case.expected_tier
+    assert (tier_cfg.get("model") if tier_cfg is not None else None) == case.expected_model
+    assert (credential.auth_mode if credential is not None else None) == case.expected_auth_mode
+    assert (
+        is_codex_tier(tier_cfg) if tier_cfg is not None else False
+    ) is case.expected_codex_direct
