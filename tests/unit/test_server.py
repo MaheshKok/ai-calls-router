@@ -217,6 +217,14 @@ class TestHealth:
         assert upstream.requests == []
 
 
+def test_dashboard_shows_date_time_column(client: TestClient) -> None:
+    response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "<th>date/time</th>" in response.text
+    assert "function requestTime(ts)" in response.text
+
+
 class TestMessagesPassthrough:
     def test_opener_passes_through_to_upstream(
         self, client: TestClient, upstream: _Upstream
