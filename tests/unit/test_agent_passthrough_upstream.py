@@ -21,6 +21,19 @@ tiers:
   fast:
     model: deepseek/deepseek-v4-pro
     key_env: ACR_TEST_KEY
+router:
+  endpoint_defaults:
+    /v1/messages: claude_code
+    /v1/chat/completions: hermes
+    /v1/responses: codex
+  user_agent_map:
+    - contains: claude
+      group: claude_code
+    - contains: hermes
+      group: hermes
+    - contains: codex
+      group: codex
+  fallback: null
 agents:
   claude_code:
     upstream: https://api.anthropic.com
@@ -56,6 +69,7 @@ def client(
     monkeypatch: pytest.MonkeyPatch,
     upstream: Upstream,
 ) -> Iterator[TestClient]:
+    monkeypatch.setattr(server_mod.bootstrap, "ensure_provider_configs", lambda: [])
     with make_client(
         config_yaml=CONFIG_YAML,
         tmp_path=tmp_path,
@@ -148,3 +162,11 @@ def test_adapter_none_and_proxy_catchall_use_premium_default(
         "premium.default.example",
         "premium.default.example",
     ]
+
+
+def test_codex_model_list_passthrough_targets_openai_upstream(
+    *, client: TestClient, upstream: Upstream
+) -> None:
+    response = client.get("/v1/models", headers={"user-agent": "codex-tui/0.140.0"})
+    assert response.json() == {"marker": "upstream"}
+    assert upstream.requests[0].url.host == "api.openai.com"

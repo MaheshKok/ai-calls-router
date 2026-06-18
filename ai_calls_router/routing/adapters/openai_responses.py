@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from ai_calls_router._lib.openai_schemas import validate_responses_request
 from ai_calls_router._lib.responses_inbound import (
     anthropic_to_responses,
     responses_request_to_anthropic,
@@ -85,6 +86,7 @@ class OpenAIResponsesAdapter:
 
     def to_anthropic_request(self, body: JsonObject) -> JsonObject:
         """Convert a Responses request to the Anthropic canonical format."""
+        validate_responses_request(body)
         return responses_request_to_anthropic(body)
 
     def to_client_response(self, anthropic_response: JsonObject) -> JsonObject:

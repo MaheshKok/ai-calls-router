@@ -226,6 +226,22 @@ def _user_agent(request: Request) -> str:
     return request.headers.get("user-agent", "")
 
 
+def _models_passthrough_group(request: Request) -> str | None:
+    """Resolve a per-agent upstream for model-list requests when identity is clear."""
+    if request.url.path != "/v1/models":
+        return None
+    try:
+        return provider_config.resolve_agent_group(
+            path=request.url.path,
+            headers=request.headers,
+            routes=_load_assembled_routes(),
+            adapter_default="",
+        )
+    except Exception as exc:
+        logger.warning("acr: model-list identity lookup failed (%s); using premium default", exc)
+        return None
+
+
 def _premium_usage_callback(
     *,
     m: metrics.Metrics,
@@ -527,6 +543,54 @@ def _wants_stream(client_body: JsonObject, anthropic_body: JsonObject) -> bool:
     return bool(anthropic_body.get("stream"))
 
 
+def _record_ws_route_attempt(headers: Mapping[str, str], attempt: _RouteAttempt) -> None:
+    """Record one WebSocket response.create route attempt for dashboard visibility."""
+    try:
+        m = metrics.get_metrics()
+        user_agent = headers.get("user-agent", "")
+        routed = attempt.response is not None
+        m.incr_total()
+        if routed:
+            m.incr_routed()
+            route = "routed"
+            status = 101
+        else:
+            m.incr_passthrough()
+            if attempt.reason == "response_premium_guard":
+                m.incr_escalated()
+            elif attempt.reason in {"routing_error", "routed_fallback", "tier_unavailable"}:
+                m.incr_fallback()
+            route = (
+                "premium_guard"
+                if attempt.reason in {"request_premium_guard", "response_premium_guard"}
+                else "passthrough"
+            )
+            status = 0
+        m.record_request(
+            method="WS",
+            path="/v1/responses",
+            status=status,
+            tier=attempt.tier,
+            route=route,
+            model=attempt.model,
+            user_agent=user_agent,
+            client_ip="",
+            tool_names=attempt.tool_names,
+            input_tokens=0,
+            output_tokens=0,
+            cache_read=0,
+            cache_creation=0,
+            duration=0,
+            premium_model="" if routed else attempt.model,
+            agent=metrics.identify_agent(user_agent),
+            session_id="",
+            decision_reason=attempt.reason,
+            request_id=logging_setup.current_request_id(),
+        )
+    except Exception as exc:
+        logger.warning("acr: websocket metrics update failed (%s); continuing", exc, exc_info=True)
+
+
 async def messages(request: Request) -> Response:
     """Decide and serve one /v1/messages request.
 
@@ -616,6 +680,7 @@ async def _try_route_ws_response_create(
             agent=metrics.identify_agent(user_agent),
             session=None,
         )
+        _record_ws_route_attempt(headers, attempt)
         if attempt.response is None:
             return None
         return websocket_passthrough.sse_to_ws_messages(bytes(attempt.response.body))
@@ -731,8 +796,8 @@ async def proxy(request: Request) -> Response:
         The streamed upstream response.
     """
     body_bytes = await request.body()
-    # Catch-all paths have no adapter-derived agent group; keep the premium default.
-    return await _serve_passthrough(request, body_bytes)
+    # Only /v1/models resolves identity here; other catch-all paths keep the premium default.
+    return await _serve_passthrough(request, body_bytes, group=_models_passthrough_group(request))
 
 
 @contextlib.asynccontextmanager

@@ -13,6 +13,7 @@ from ai_calls_router._lib.openai_inbound import (
     anthropic_to_chat_response,
     chat_request_to_anthropic,
 )
+from ai_calls_router._lib.openai_schemas import validate_chat_request
 from ai_calls_router.routing.synthesis_openai import synthesize_chat_sse
 
 if TYPE_CHECKING:
@@ -112,6 +113,7 @@ class OpenAIChatAdapter:
         Returns:
             New Anthropic-format request body.
         """
+        validate_chat_request(body)
         return chat_request_to_anthropic(body)
 
     def to_client_response(self, anthropic_response: JsonObject) -> JsonObject:

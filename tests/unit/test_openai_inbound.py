@@ -340,3 +340,10 @@ def test_extract_pending_tools_skips_malformed_prior_tool_calls() -> None:
         ]
     }
     assert OpenAIChatAdapter().extract_pending_tools(body) == ["<unknown>"]
+
+
+def test_chat_adapter_validates_request_body_before_conversion() -> None:
+    adapter = OpenAIChatAdapter()
+
+    with pytest.raises(ValueError, match="Field required"):
+        adapter.to_anthropic_request({"messages": [{"role": "user", "content": "hello"}]})

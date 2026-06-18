@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from ai_calls_router.routing.adapters.openai_responses import OpenAIResponsesAdapter
 
 
@@ -71,3 +73,10 @@ def test_extract_pending_tools_resolves_custom_tool_output() -> None:
         ]
     }
     assert OpenAIResponsesAdapter().extract_pending_tools(body) == ["apply_patch"]
+
+
+def test_to_anthropic_request_validates_request_body_before_conversion() -> None:
+    adapter = OpenAIResponsesAdapter()
+
+    with pytest.raises(ValueError, match="Field required"):
+        adapter.to_anthropic_request({"input": "hello"})

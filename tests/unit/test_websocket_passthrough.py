@@ -16,6 +16,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ai_calls_router._lib.types import JsonObject
+from ai_calls_router.accounting import metrics
 from ai_calls_router.proxy import server, websocket_passthrough
 from ai_calls_router.routing.adapters.base import ClientAdapter
 
@@ -93,6 +94,7 @@ def test_response_create_to_http_body_ignores_non_create_frames(raw_msg: str) ->
 
 def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) -> None:
     captures: list[JsonObject] = []
+    m = metrics.Metrics()
 
     async def _fake_try_route(
         body_bytes: bytes,
@@ -107,13 +109,20 @@ def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) ->
     ) -> server._RouteAttempt:
         captures.append(json.loads(body_bytes))
         sse = b'event: response.completed\ndata: {"type":"response.completed"}\n\ndata: [DONE]\n\n'
-        return server._RouteAttempt(response=Response(sse, media_type="text/event-stream"))
+        return server._RouteAttempt(
+            response=Response(sse, media_type="text/event-stream"),
+            tier="codex_fast",
+            reason="routed",
+            model="gpt-5",
+            tool_names=["exec_command"],
+        )
 
     def _connect(uri: str, **kwargs: object) -> _FakeConnect:
         pytest.fail("routed response.create should not open upstream websocket")
 
     monkeypatch.setattr(server, "_load_assembled_routes", lambda: {})
     monkeypatch.setattr(server, "_try_route", _fake_try_route)
+    monkeypatch.setattr(server.metrics, "get_metrics", lambda: m)
     monkeypatch.setattr(websocket_passthrough, "connect", _connect)
     app = Starlette(routes=[WebSocketRoute("/v1/responses", server.responses_ws)])
 
@@ -141,6 +150,23 @@ def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) ->
         assert websocket.receive_text() == '{"type":"response.completed"}'
 
     assert captures == [{"model": "gpt-5", "input": "hello", "stream": True}]
+    snapshot = m.snapshot()
+    assert snapshot["requests"] == {
+        "total": 1,
+        "routed": 1,
+        "passthrough": 0,
+        "errors": 0,
+        "escalated": 0,
+        "fallback": 0,
+    }
+    latest = snapshot["last_requests"][0]
+    assert latest["method"] == "WS"
+    assert latest["path"] == "/v1/responses"
+    assert latest["status"] == 101
+    assert latest["route"] == "routed"
+    assert latest["tier"] == "codex_fast"
+    assert latest["model"] == "gpt-5"
+    assert latest["tool_names"] == ["exec_command"]
 
 
 def test_codex_websocket_routes_later_output_with_cached_call(monkeypatch) -> None:
@@ -302,6 +328,8 @@ def test_cached_call_helpers_ignore_non_matching_shapes() -> None:
 
 
 async def test_ws_route_returns_none_when_routed_core_declines(monkeypatch) -> None:
+    m = metrics.Metrics()
+
     async def _fake_try_route(
         body_bytes: bytes,
         *,
@@ -313,10 +341,16 @@ async def test_ws_route_returns_none_when_routed_core_declines(monkeypatch) -> N
         agent: str = "",
         session: str | None = None,
     ) -> server._RouteAttempt:
-        return server._RouteAttempt(reason="routed_fallback")
+        return server._RouteAttempt(
+            tier="codex_fast",
+            reason="routed_fallback",
+            model="gpt-5",
+            tool_names=["exec_command"],
+        )
 
     monkeypatch.setattr(server, "_load_assembled_routes", lambda: {})
     monkeypatch.setattr(server, "_try_route", _fake_try_route)
+    monkeypatch.setattr(server.metrics, "get_metrics", lambda: m)
 
     result = await server._try_route_ws_response_create(
         json.dumps({"type": "response.create", "response": {"model": "gpt-5", "input": "hi"}}),
@@ -324,6 +358,14 @@ async def test_ws_route_returns_none_when_routed_core_declines(monkeypatch) -> N
     )
 
     assert result is None
+    snapshot = m.snapshot()
+    assert snapshot["requests"]["fallback"] == 1
+    latest = snapshot["last_requests"][0]
+    assert latest["method"] == "WS"
+    assert latest["path"] == "/v1/responses"
+    assert latest["status"] == 0
+    assert latest["route"] == "passthrough"
+    assert latest["decision_reason"] == "routed_fallback"
 
 
 async def test_ws_route_errors_fail_open(monkeypatch) -> None:
