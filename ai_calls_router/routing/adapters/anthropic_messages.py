@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ai_calls_router._lib.anthropic_schemas import validate_anthropic_messages_request
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import synthesis
 
@@ -43,6 +44,7 @@ class AnthropicMessagesAdapter:
         Returns:
             The same object because Anthropic Messages is the canonical format.
         """
+        validate_anthropic_messages_request(body)
         return body
 
     def to_client_response(self, anthropic_response: JsonObject) -> JsonObject:

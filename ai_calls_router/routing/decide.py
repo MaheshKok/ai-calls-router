@@ -26,6 +26,12 @@ import yaml
 
 from ai_calls_router._lib import config
 from ai_calls_router.routing.agent_defaults import AGENT_DEFAULT_PREMIUM_TOOLS, AGENT_DEFAULT_TOOLS
+from ai_calls_router.routing.config_schema import (
+    ConfigSchemaError,
+    is_codex_tier,
+    parse_tier_config,
+    validate_routes_payload,
+)
 
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
@@ -72,6 +78,11 @@ def load_routes(path: Path | None = None) -> JsonObject:
         with path.open(encoding="utf-8") as fh:
             parsed = cast("JsonValue", yaml.safe_load(fh) or {})
         if not isinstance(parsed, dict):
+            return {}
+        try:
+            validate_routes_payload(parsed)
+        except ConfigSchemaError as exc:
+            logger.warning("acr: config schema validation failed (%s); routing disabled", exc)
             return {}
         with _cache_lock:
             _cache[path] = (mtime, parsed)
@@ -443,4 +454,30 @@ def resolve_api_key(tier_cfg: JsonObject, settings: JsonObject) -> str | None:
         return _search_env_file(env_path, key_env)
     except Exception as exc:
         logger.warning("acr: env_file read failed (%s)", exc, exc_info=True)
+    return None
+
+
+def resolve_tier_credential(tier_cfg: JsonObject, settings: JsonObject) -> str | None:
+    """Resolve a tier credential, with Codex tiers defaulting to OPENAI_API_KEY.
+
+    Args:
+        tier_cfg: Tier entry from config.yaml.
+        settings: The settings: section of config.yaml.
+
+    Returns:
+        The resolved credential, ``"oauth"`` for Codex OAuth sentinel tiers, or
+        None when unavailable.
+    """
+    try:
+        parsed = parse_tier_config(tier_cfg)
+    except ConfigSchemaError as exc:
+        logger.warning("acr: tier schema validation failed (%s); passing through", exc)
+        return None
+    if parsed.key_env == "oauth" and is_codex_tier(tier_cfg):
+        return "oauth"
+    credential = resolve_api_key(tier_cfg, settings)
+    if credential:
+        return credential
+    if is_codex_tier(tier_cfg):
+        return os.environ.get("OPENAI_API_KEY")
     return None

@@ -12,6 +12,7 @@ import json
 from typing import TYPE_CHECKING, cast
 
 from ai_calls_router._lib.conversion import parse_tool_arguments
+from ai_calls_router._lib.openai_schemas import validate_responses_request
 
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
@@ -268,6 +269,7 @@ def responses_request_to_anthropic(body: JsonObject) -> JsonObject:
     """
     if "input" not in body:
         raise ValueError("Responses request requires input")
+    validate_responses_request(body)
     converted: JsonObject = {"model": body.get("model", ""), "messages": []}
     system_parts = [
         value

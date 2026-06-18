@@ -330,6 +330,17 @@ def test_missing_input_and_tool_choice_variants() -> None:
     )["tool_choice"] == {"type": "auto"}
 
 
+def test_responses_schema_rejects_bad_envelope_fields() -> None:
+    with pytest.raises(ValueError, match="String should have at least 1 character"):
+        responses_request_to_anthropic({"model": "", "input": "hi"})
+    with pytest.raises(ValueError, match="greater than 0"):
+        responses_request_to_anthropic({"model": "m", "input": "hi", "max_output_tokens": 0})
+    with pytest.raises(ValueError, match="Input should be a valid list"):
+        responses_request_to_anthropic({"model": "m", "input": "hi", "tools": "bad"})
+    with pytest.raises(ValueError, match="valid"):
+        responses_request_to_anthropic({"model": "m", "input": [1]})
+
+
 def test_anthropic_to_responses_text_tool_mixed_and_usage() -> None:
     response = anthropic_to_responses(
         {

@@ -111,6 +111,24 @@ def test_chat_request_handles_system_and_text_turns() -> None:
     assert converted["stop_sequences"] == ["END"]
 
 
+def test_chat_request_handles_developer_as_system() -> None:
+    converted = chat_request_to_anthropic(
+        {
+            "model": "openai/gpt-test",
+            "messages": [
+                {"role": "system", "content": "policy"},
+                {"role": "developer", "content": "style"},
+                {"role": "user", "content": "hello"},
+            ],
+        }
+    )
+
+    assert converted["system"] == "policy\nstyle"
+    assert converted["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+    ]
+
+
 def test_list_content_and_unknown_roles_are_handled() -> None:
     converted = openai_chat_to_anthropic_messages(
         [
@@ -150,6 +168,15 @@ def test_tool_choice_conversion_variants() -> None:
 def test_malformed_messages_raise_for_fail_open_server_path() -> None:
     with pytest.raises(ValueError, match="chat messages"):
         chat_request_to_anthropic({"model": "m", "messages": "bad"})
+
+
+def test_chat_schema_rejects_bad_envelope_fields() -> None:
+    with pytest.raises(ValueError, match="String should have at least 1 character"):
+        chat_request_to_anthropic({"model": "", "messages": [{"role": "user", "content": "x"}]})
+    with pytest.raises(ValueError, match="greater than 0"):
+        chat_request_to_anthropic(
+            {"model": "m", "messages": [{"role": "user", "content": "x"}], "max_tokens": 0}
+        )
 
 
 def test_request_conversion_is_immutable() -> None:

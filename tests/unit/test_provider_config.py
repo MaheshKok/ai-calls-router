@@ -97,6 +97,17 @@ def test_cheap_key_env_provider_payload_is_rejected() -> None:
         )
 
 
+def test_provider_payload_tool_map_must_be_string_to_string() -> None:
+    payload = _provider_payload("codex")
+    payload["tools"] = {"exec_command": 7}
+
+    with pytest.raises(provider_config.ProviderConfigError):
+        provider_config.assemble_routes(
+            _base_routes(router=_router()),
+            provider_files={"codex": payload},
+        )
+
+
 def test_missing_provider_file_falls_back_without_dropping_present_groups() -> None:
     assembled = provider_config.assemble_routes(
         _base_routes(router=_router()),

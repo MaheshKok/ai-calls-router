@@ -41,6 +41,24 @@ def acr_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+class _DaemonCallRecorder:
+    """Record daemon calls for CLI restart assertions."""
+
+    def __init__(self, *, stop_result: bool) -> None:
+        self.stop_result = stop_result
+        self.calls: list[str] = []
+
+    def stop(self) -> bool:
+        """Record a daemon stop call."""
+        self.calls.append("stop")
+        return self.stop_result
+
+    def start(self) -> int:
+        """Record a daemon start call."""
+        self.calls.append("start")
+        return 4242
+
+
 class TestParser:
     @pytest.mark.parametrize(
         "command",
@@ -48,6 +66,7 @@ class TestParser:
             "init",
             "start",
             "stop",
+            "restart",
             "status",
             "code",
             "wrap",
@@ -131,6 +150,30 @@ class TestStartStop:
         monkeypatch.setattr(daemon, "stop", lambda: False)
         assert cli.main(["stop"]) == 0
         assert "not running" in capsys.readouterr().out
+
+    def test_restart_stops_running_daemon_before_starting(
+        self, *, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        recorder = _DaemonCallRecorder(stop_result=True)
+        monkeypatch.setattr(daemon, "stop", recorder.stop)
+        monkeypatch.setattr(daemon, "start", recorder.start)
+        assert cli.main(["restart"]) == 0
+        assert recorder.calls == ["stop", "start"]
+        out = capsys.readouterr().out
+        assert "acr stopped" in out
+        assert "http://127.0.0.1:9321" in out
+
+    def test_restart_starts_when_daemon_is_not_running(
+        self, *, acr_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        recorder = _DaemonCallRecorder(stop_result=False)
+        monkeypatch.setattr(daemon, "stop", recorder.stop)
+        monkeypatch.setattr(daemon, "start", recorder.start)
+        assert cli.main(["restart"]) == 0
+        assert recorder.calls == ["stop", "start"]
+        out = capsys.readouterr().out
+        assert "acr is not running" in out
+        assert "http://127.0.0.1:9321" in out
 
 
 class TestInit:

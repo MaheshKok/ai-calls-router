@@ -34,11 +34,13 @@ from ai_calls_router._lib import config, logging_setup
 from ai_calls_router.accounting import metrics, savings
 from ai_calls_router.ops import bootstrap
 from ai_calls_router.proxy import passthrough, websocket_passthrough
+from ai_calls_router.routing import codex_direct, provider_config
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
-from ai_calls_router.routing import provider_config
 from ai_calls_router.routing.adapters import adapter_for_path
 from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
+from ai_calls_router.routing.config_schema import ConfigSchemaError, is_codex_tier
+from ai_calls_router.routing.synthesis_responses import synthesize_response_object_sse
 
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonObject, JsonValue
@@ -276,7 +278,7 @@ def _resolve_tier_config(
         return tier, None, None, routes
     settings_value = routes.get("settings")
     settings_cfg = settings_value if isinstance(settings_value, dict) else {}
-    api_key = routing.resolve_api_key(tier_cfg, settings_cfg)
+    api_key = routing.resolve_tier_credential(tier_cfg, settings_cfg)
     if not api_key:
         logger.info("acr: tier=%s has no API key; passing through", tier)
         return tier, None, None, routes
@@ -336,12 +338,73 @@ def _routed_fallback_attempt(
     return _RouteAttempt(tier=tier, reason=reason, model=requested_model, tool_names=names)
 
 
+async def _try_codex_direct_route(
+    *,
+    body: JsonObject,
+    tier: str,
+    tier_cfg: JsonObject,
+    credential: str,
+    request_headers: Mapping[str, str],
+    streaming: bool,
+    requested_model: str,
+    names: list[str],
+    premium_tools: list[str],
+    request_path: str,
+) -> _RouteAttempt | None:
+    """Serve a Codex Responses request through the direct Codex provider path."""
+    if request_path != "/v1/responses":
+        return None
+    try:
+        if not is_codex_tier(tier_cfg):
+            return None
+    except ConfigSchemaError:
+        return None
+    response_body = await codex_direct.responses_call(
+        body=body,
+        tier_cfg=tier_cfg,
+        credential=credential,
+        chatgpt_headers=websocket_passthrough.codex_chatgpt_headers(request_headers),
+    )
+    if response_body is None:
+        return _routed_fallback_attempt(
+            response_guard_tools=[],
+            requested_model=requested_model,
+            names=names,
+            tier=tier,
+        )
+    response_guard_tools = codex_direct.response_escalates(response_body, premium_tools)
+    if response_guard_tools:
+        return _routed_fallback_attempt(
+            response_guard_tools=response_guard_tools,
+            requested_model=requested_model,
+            names=names,
+            tier=tier,
+        )
+    client_body = {**response_body, "model": requested_model} if requested_model else response_body
+    response = (
+        Response(
+            b"".join(synthesize_response_object_sse(client_body)),
+            media_type="text/event-stream",
+        )
+        if streaming
+        else JSONResponse(client_body)
+    )
+    return _RouteAttempt(
+        response=response,
+        tier=tier,
+        reason="routed",
+        model=requested_model,
+        tool_names=names,
+    )
+
+
 async def _try_route(
     body_bytes: bytes,
     *,
     adapter: ClientAdapter,
     group: str,
     request_path: str,
+    request_headers: Mapping[str, str],
     user_agent: str = "",
     agent: str = "",
     session: str | None = None,
@@ -356,6 +419,7 @@ async def _try_route(
         adapter: Client adapter for the request path.
         group: Agent group to use for routing.
         request_path: Client-facing request path for logging and metrics.
+        request_headers: Client request headers for Codex OAuth detection.
         body_bytes: Raw request body bytes.
         user_agent: Raw User-Agent header from the client.
         agent: Identified agent label.
@@ -391,6 +455,20 @@ async def _try_route(
         settings_value = routes.get("settings")
         settings_cfg = settings_value if isinstance(settings_value, dict) else {}
         premium_tools = routing.agent_premium_tools(routes, group)
+        codex_attempt = await _try_codex_direct_route(
+            body=body,
+            tier=tier,
+            tier_cfg=tier_cfg,
+            credential=api_key,
+            request_headers=request_headers,
+            streaming=streaming,
+            requested_model=requested_model,
+            names=names,
+            premium_tools=premium_tools,
+            request_path=request_path,
+        )
+        if codex_attempt is not None:
+            return codex_attempt
         response_guard_tools: list[str] = []
 
         def _mark_response_guard(tool_names: list[str]) -> None:
@@ -533,6 +611,7 @@ async def _try_route_ws_response_create(
             adapter=adapter,
             group=group,
             request_path="/v1/responses",
+            request_headers=headers,
             user_agent=user_agent,
             agent=metrics.identify_agent(user_agent),
             session=None,
@@ -584,6 +663,7 @@ async def _handle_routed_request(request: Request) -> Response:
         adapter=adapter,
         group=group,
         request_path=path,
+        request_headers=request.headers,
         user_agent=_user_agent(request),
         agent=agent,
         session=session,

@@ -6,6 +6,8 @@ remains byte-stable. These tests pin the path resolver and the one-chunk SSE wra
 
 from __future__ import annotations
 
+import pytest
+
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import synthesis
 from ai_calls_router.routing.adapters import adapter_for_path
@@ -28,10 +30,11 @@ def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, object]:
     ]
     user_blocks = [{"type": "tool_result", "tool_use_id": tool_id} for tool_id, _ in pairs]
     return {
+        "model": "claude-test",
         "messages": [
             {"role": "assistant", "content": assistant_blocks},
             {"role": "user", "content": user_blocks},
-        ]
+        ],
     }
 
 
@@ -64,6 +67,13 @@ class TestAnthropicMessagesAdapter:
         assert adapter.to_client_response(response_body) is response_body
         assert request_body == _body_with_tool_results(("t1", "Bash"))
         assert response_body == {"content": [{"type": "text", "text": "ok"}]}
+
+    def test_malformed_request_raises_for_fail_open_server_path(self) -> None:
+        """Reject malformed Anthropic envelopes before routed decisions."""
+        adapter = AnthropicMessagesAdapter()
+
+        with pytest.raises(ValueError, match="Field required"):
+            adapter.to_anthropic_request({"messages": []})
 
     def test_extract_pending_tools_matches_existing_routing_logic(self) -> None:
         """Delegate pending-tool extraction to the existing routing function."""

@@ -201,3 +201,9 @@ def synthesize_responses_sse(anthropic_body: JsonObject, model: str) -> Iterator
     response = anthropic_to_responses(anthropic_body, model)
     for name, payload in _numbered_events(response):
         yield _sse_event(name, payload)
+
+
+def synthesize_response_object_sse(response: JsonObject) -> Iterator[bytes]:
+    """Yield Responses API SSE bytes for an already-assembled response object."""
+    for name, payload in _numbered_events(response):
+        yield _sse_event(name, payload)

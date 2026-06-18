@@ -20,6 +20,10 @@ from ai_calls_router.routing.adapters.base import (
     AGENT_GROUP_WIRES,
     KNOWN_GROUPS,
 )
+from ai_calls_router.routing.config_schema import (
+    ConfigSchemaError,
+    validate_provider_payload,
+)
 from ai_calls_router.routing.decide import (
     agent_premium_tools,
     agent_tools,
@@ -78,36 +82,23 @@ def router_map(routes: JsonObject) -> JsonObject | None:
     return router if isinstance(router, dict) else None
 
 
-def _contains_forbidden_key_env(value: JsonValue, path: tuple[str, ...] = ()) -> bool:
-    """Return whether a payload contains a non-auth key_env field."""
-    if isinstance(value, dict):
-        for key, child in value.items():
-            child_path = (*path, str(key))
-            if key == "key_env" and child_path != ("auth", "key_env"):
-                return True
-            if _contains_forbidden_key_env(child, child_path):
-                return True
-    if isinstance(value, list):
-        return any(_contains_forbidden_key_env(item, path) for item in value)
-    return False
-
-
 def _validate_provider_payload(group: str, payload: JsonObject) -> None:
     """Validate one provider file payload."""
-    declared = payload.get("group")
-    if declared != group or declared not in KNOWN_GROUPS:
-        raise ProviderConfigError("provider config group mismatch", group=group)
     if not isinstance(payload.get("upstream"), str) or not payload.get("upstream"):
         raise ProviderConfigError("provider config requires upstream", group=group)
-    if payload.get("wire") != AGENT_GROUP_WIRES[group]:
-        raise ProviderConfigError("provider config wire mismatch", group=group)
     endpoints = payload.get("endpoints")
     if not isinstance(endpoints, list) or not all(isinstance(item, str) for item in endpoints):
         raise ProviderConfigError("provider config requires endpoints", group=group)
-    if not set(AGENT_GROUP_ENDPOINTS[group]).issubset(endpoints):
+    try:
+        parsed = validate_provider_payload(group, payload)
+    except ConfigSchemaError as exc:
+        raise ProviderConfigError(str(exc), group=group) from exc
+    if parsed.group != group or parsed.group not in KNOWN_GROUPS:
+        raise ProviderConfigError("provider config group mismatch", group=group)
+    if parsed.wire != AGENT_GROUP_WIRES[group]:
+        raise ProviderConfigError("provider config wire mismatch", group=group)
+    if not set(AGENT_GROUP_ENDPOINTS[group]).issubset(parsed.endpoints):
         raise ProviderConfigError("provider config endpoints mismatch", group=group)
-    if _contains_forbidden_key_env(payload):
-        raise ProviderConfigError("provider config must not carry cheap key_env", group=group)
 
 
 def _fallback_agent_config(routes: JsonObject, group: str) -> JsonObject:

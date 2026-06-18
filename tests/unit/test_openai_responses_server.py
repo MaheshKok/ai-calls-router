@@ -35,6 +35,32 @@ agents:
       apply_patch: premium
 """
 
+CODEX_DIRECT_CONFIG_YAML = """
+server:
+  port: 8747
+settings:
+  tier_precedence: [premium, fast]
+tiers:
+  fast:
+    model: codex/gpt-5-codex-spark
+    provider: codex
+    max_tokens: 1000
+agents:
+  codex:
+    upstream: https://api.anthropic.com
+    premium:
+      provider: anthropic
+    premium_tools: [apply_patch]
+    tools:
+      exec_command: fast
+      apply_patch: premium
+"""
+
+CODEX_DIRECT_OAUTH_CONFIG_YAML = CODEX_DIRECT_CONFIG_YAML.replace(
+    "    max_tokens: 1000\n",
+    "    key_env: oauth\n    max_tokens: 1000\n",
+)
+
 ROUTED_TEXT_BODY: dict[str, object] = {
     "id": "msg_responses",
     "type": "message",
@@ -81,6 +107,46 @@ class _FakeDirectCall:
         return self.response
 
 
+class _FakeCodexResponsesCall:
+    """Codex direct call stand-in recording invocations."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(
+        self,
+        *,
+        body: dict[str, object],
+        tier_cfg: dict[str, object],
+        credential: str,
+        chatgpt_headers: list[tuple[str, str]] | None = None,
+    ) -> dict[str, object]:
+        """Record direct Codex call input and return a Responses body."""
+        self.calls.append(
+            {
+                "body": body,
+                "tier_cfg": tier_cfg,
+                "credential": credential,
+                "chatgpt_headers": chatgpt_headers or [],
+            }
+        )
+        return {
+            "id": "resp_codex_direct",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "gpt-5-codex-spark",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "codex routed"}],
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        }
+
+
 @pytest.fixture
 def upstream() -> _Upstream:
     return _Upstream()
@@ -104,6 +170,24 @@ def client(
     with TestClient(app) as test_client:
         yield test_client
     metrics_mod._metrics_singleton = None
+
+
+def _client_for_config(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream: _Upstream,
+    config_yaml: str,
+) -> TestClient:
+    """Build a TestClient for a custom config payload."""
+    metrics_mod._metrics_singleton = None
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_yaml, encoding="utf-8")
+    monkeypatch.setenv("ACR_HOME", str(tmp_path))
+    monkeypatch.setenv("ACR_CONFIG", str(config_file))
+    monkeypatch.setenv("ACR_SAVINGS_LEDGER", str(tmp_path / "savings.jsonl"))
+    app = create_app(transport=httpx.MockTransport(upstream.handler))
+    return TestClient(app)
 
 
 def _responses_tool_result_body(*, stream: bool = True) -> dict[str, object]:
@@ -223,6 +307,68 @@ def test_responses_non_streaming_returns_response_json(
     assert payload["object"] == "response"
     assert payload["model"] == "gpt-5-codex"
     assert payload["output"][0]["content"][0]["text"] == "routed answer"
+    assert upstream.requests == []
+
+
+def test_codex_direct_route_uses_openai_api_key(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream: _Upstream,
+) -> None:
+    fake = _FakeCodexResponsesCall()
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setattr("ai_calls_router.proxy.server.codex_direct.responses_call", fake)
+    with _client_for_config(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        upstream=upstream,
+        config_yaml=CODEX_DIRECT_CONFIG_YAML,
+    ) as test_client:
+        response = test_client.post(
+            "/v1/responses",
+            json=_responses_tool_result_body(stream=False),
+            headers={"authorization": "Bearer client-premium-secret"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "gpt-5-codex"
+    assert response.json()["output"][0]["content"][0]["text"] == "codex routed"
+    assert fake.calls[0]["credential"] == "openai-key"
+    assert upstream.requests == []
+
+
+def test_codex_direct_route_uses_oauth_sentinel(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream: _Upstream,
+) -> None:
+    fake = _FakeCodexResponsesCall()
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("ai_calls_router.proxy.server.codex_direct.responses_call", fake)
+    with _client_for_config(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        upstream=upstream,
+        config_yaml=CODEX_DIRECT_OAUTH_CONFIG_YAML,
+    ) as test_client:
+        response = test_client.post(
+            "/v1/responses",
+            json=_responses_tool_result_body(stream=False),
+            headers={
+                "authorization": "Bearer chatgpt-oauth",
+                "chatgpt-account-id": "acct_123",
+            },
+        )
+
+    chatgpt_headers = fake.calls[0]["chatgpt_headers"]
+    assert isinstance(chatgpt_headers, list)
+    headers = {key.lower(): value for key, value in chatgpt_headers}
+    assert response.status_code == 200
+    assert fake.calls[0]["credential"] == "oauth"
+    assert headers["authorization"] == "Bearer chatgpt-oauth"
+    assert headers["chatgpt-account-id"] == "acct_123"
     assert upstream.requests == []
 
 

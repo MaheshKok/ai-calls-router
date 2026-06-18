@@ -12,6 +12,7 @@ import json
 from typing import TYPE_CHECKING, cast
 
 from ai_calls_router._lib.conversion import parse_tool_arguments
+from ai_calls_router._lib.openai_schemas import validate_chat_request
 
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
@@ -93,7 +94,7 @@ def _system_from_messages(messages: list[JsonObject]) -> str | None:
     parts = [
         _content_text(message.get("content"))
         for message in messages
-        if message.get("role") == "system"
+        if message.get("role") in {"system", "developer"}
     ]
     kept = [part for part in parts if part]
     if not kept:
@@ -113,7 +114,7 @@ def openai_chat_to_anthropic_messages(messages: list[JsonObject]) -> list[JsonOb
     """
     converted: list[JsonObject] = []
     for message in messages:
-        if message.get("role") == "system":
+        if message.get("role") in {"system", "developer"}:
             continue
         anthropic = _message_to_anthropic(message)
         if anthropic is not None:
@@ -171,6 +172,7 @@ def chat_request_to_anthropic(body: JsonObject) -> JsonObject:
         isinstance(message, dict) for message in cast("JsonArray", raw_messages)
     ):
         raise ValueError("chat messages must be a list of objects")
+    validate_chat_request(body)
     messages = cast("list[JsonObject]", list(raw_messages))
 
     converted: JsonObject = {"model": body.get("model", ""), "messages": []}

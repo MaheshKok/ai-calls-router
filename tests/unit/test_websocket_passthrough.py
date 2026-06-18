@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from collections.abc import Mapping
 from typing import cast
 
 import pytest
@@ -99,6 +100,7 @@ def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) ->
         adapter: ClientAdapter,
         group: str,
         request_path: str,
+        request_headers: Mapping[str, str],
         user_agent: str = "",
         agent: str = "",
         session: str | None = None,
@@ -163,6 +165,7 @@ def test_codex_websocket_routes_later_output_with_cached_call(monkeypatch) -> No
         adapter: ClientAdapter,
         group: str,
         request_path: str,
+        request_headers: Mapping[str, str],
         user_agent: str = "",
         agent: str = "",
         session: str | None = None,
@@ -305,6 +308,7 @@ async def test_ws_route_returns_none_when_routed_core_declines(monkeypatch) -> N
         adapter: ClientAdapter,
         group: str,
         request_path: str,
+        request_headers: Mapping[str, str],
         user_agent: str = "",
         agent: str = "",
         session: str | None = None,

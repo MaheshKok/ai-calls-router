@@ -1,7 +1,7 @@
 """Command-line interface for the ai-calls-router proxy.
 
-Exposes the acr subcommands -- init, start, stop, status, code, wrap, unwrap,
-desktop, savings, serve, and version -- while keeping the concrete work
+Exposes the acr subcommands -- init, start, stop, restart, status, code, wrap,
+unwrap, desktop, savings, serve, and version -- while keeping the concrete work
 delegated to small modules through module references so every layer stays
 independently testable. Operational errors surface as exit code 1 with a
 message on stderr rather than a traceback; daemon state is reported through
@@ -70,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init", help="Create config.yaml interactively.")
     subparsers.add_parser("start", help="Start the proxy daemon.")
     subparsers.add_parser("stop", help="Stop the proxy daemon.")
+    subparsers.add_parser("restart", help="Restart the proxy daemon.")
     subparsers.add_parser("status", help="Report daemon status.")
     code = subparsers.add_parser("code", help="Launch claude through the proxy.")
     code.add_argument("claude_args", nargs=argparse.REMAINDER)
@@ -133,6 +134,19 @@ def _cmd_stop(args: argparse.Namespace) -> int:
     else:
         print("acr is not running")
     return 0
+
+
+def _cmd_restart(args: argparse.Namespace) -> int:
+    """Restart the daemon, starting it when none is running.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Exit code from the start step.
+    """
+    _cmd_stop(args)
+    return _cmd_start(args)
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
@@ -234,6 +248,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "init": _cmd_init,
     "start": _cmd_start,
     "stop": _cmd_stop,
+    "restart": _cmd_restart,
     "status": _cmd_status,
     "code": _cmd_code,
     "wrap": _cmd_wrap,

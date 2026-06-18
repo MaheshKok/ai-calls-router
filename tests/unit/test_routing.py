@@ -70,6 +70,14 @@ class TestLoadRoutes:
         cfg.write_text("tools: [unclosed\n", encoding="utf-8")
         assert routing.load_routes(cfg) == {}
 
+    def test_schema_invalid_tier_returns_empty_dict(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "tiers:\n  fast:\n    model: deepseek/x\n    max_tokens: many\n",
+            encoding="utf-8",
+        )
+        assert routing.load_routes(cfg) == {}
+
     def test_hot_reload_on_mtime_change(self, tmp_path: Path) -> None:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("tools:\n  Bash: fast\n", encoding="utf-8")
@@ -374,3 +382,38 @@ class TestResolveApiKey:
         env_file.write_text("ACR_TEST_KEY=\n", encoding="utf-8")
         key = routing.resolve_api_key({"key_env": "ACR_TEST_KEY"}, {"env_file": str(env_file)})
         assert key is None
+
+    def test_codex_tier_uses_openai_api_key_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+        key = routing.resolve_tier_credential(
+            {"model": "codex/gpt-5-codex-spark", "provider": "codex"},
+            {},
+        )
+        assert key == "openai-key"
+
+    def test_codex_oauth_sentinel_is_codex_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("oauth", raising=False)
+
+        assert (
+            routing.resolve_tier_credential(
+                {
+                    "model": "codex/gpt-5-codex-spark",
+                    "provider": "codex",
+                    "key_env": "oauth",
+                },
+                {},
+            )
+            == "oauth"
+        )
+        assert (
+            routing.resolve_tier_credential(
+                {"model": "deepseek/deepseek-v4-flash", "key_env": "oauth"},
+                {},
+            )
+            is None
+        )
+
+    def test_invalid_tier_schema_has_no_credential(self) -> None:
+        assert routing.resolve_tier_credential({"model": ""}, {}) is None
