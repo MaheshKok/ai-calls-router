@@ -200,7 +200,7 @@ def _emit_tool_use_message(tool_use_blocks: list[JsonObject], text_parts: list[s
             "type": "function",
             "function": {
                 "name": tu["name"],
-                "arguments": json.dumps(tu.get("input", {})),
+                "arguments": json.dumps(tu.get("input", {}), sort_keys=True),
             },
         }
         for tu in tool_use_blocks

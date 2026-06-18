@@ -114,6 +114,7 @@ def test_response_create_to_http_body_ignores_non_create_frames(raw_msg: str) ->
 
 def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) -> None:
     captures: list[JsonObject] = []
+    raw_captures: list[bytes] = []
     m = metrics.Metrics()
 
     async def _fake_try_route(
@@ -127,6 +128,7 @@ def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) ->
         agent: str = "",
         session: str | None = None,
     ) -> server._RouteAttempt:
+        raw_captures.append(body_bytes)
         captures.append(json.loads(body_bytes))
         sse = b'event: response.completed\ndata: {"type":"response.completed"}\n\ndata: [DONE]\n\n'
         return server._RouteAttempt(
@@ -166,14 +168,25 @@ def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) ->
                     "type": "response.create",
                     "response": {
                         "model": "gpt-5",
-                        "input": "hello",
+                        "metadata": {"z": 1, "a": 2},
+                        "input": [{"z": 1, "a": "Ω"}],
                     },
                 }
             )
         )
         assert websocket.receive_text() == '{"type":"response.completed"}'
 
-    assert captures == [{"model": "gpt-5", "input": "hello", "stream": True}]
+    assert captures == [
+        {
+            "model": "gpt-5",
+            "metadata": {"z": 1, "a": 2},
+            "input": [{"z": 1, "a": "Ω"}],
+            "stream": True,
+        }
+    ]
+    assert raw_captures == [
+        '{"input":[{"a":"Ω","z":1}],"metadata":{"a":2,"z":1},"model":"gpt-5","stream":true}'.encode()
+    ]
     snapshot = m.snapshot()
     assert snapshot["requests"] == {
         "total": 1,

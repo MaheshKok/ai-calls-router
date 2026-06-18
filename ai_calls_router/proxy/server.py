@@ -437,7 +437,9 @@ async def _try_route_ws_response_create(
         )
         if group is None:
             return None
-        body_bytes = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        body_bytes = json.dumps(
+            body, separators=(",", ":"), ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
         user_agent = headers.get("user-agent", "")
         attempt = await _try_route(
             body_bytes,

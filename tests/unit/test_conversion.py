@@ -162,6 +162,55 @@ class TestConvertMessagesSpec:
         )
         assert converted[0]["reasoning_content"] == ""
 
+    def test_tool_call_arguments_are_deterministic_bytes(self) -> None:
+        left = {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "Run",
+                    "input": {"z": 1, "a": {"unicode": "Ω", "nested": {"b": 2, "a": 1}}},
+                }
+            ],
+        }
+        right = {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "Run",
+                    "input": {"a": {"nested": {"a": 1, "b": 2}, "unicode": "Ω"}, "z": 1},
+                }
+            ],
+        }
+
+        left_args = conversion.convert_messages_for_litellm([left])[0]["tool_calls"][0]["function"][
+            "arguments"
+        ]
+        right_args = conversion.convert_messages_for_litellm([right])[0]["tool_calls"][0][
+            "function"
+        ]["arguments"]
+
+        assert left_args.encode("utf-8") == right_args.encode("utf-8")
+        assert json.loads(left_args) == {
+            "a": {"nested": {"a": 1, "b": 2}, "unicode": "Ω"},
+            "z": 1,
+        }
+
+    def test_empty_tool_call_input_serializes_deterministically(self) -> None:
+        converted = conversion.convert_messages_for_litellm(
+            [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "toolu_1", "name": "Run"}],
+                }
+            ]
+        )
+
+        assert converted[0]["tool_calls"][0]["function"]["arguments"] == "{}"
+
 
 class TestBackendResponse:
     def test_defaults(self) -> None:

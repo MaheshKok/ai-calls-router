@@ -589,6 +589,21 @@ class TestRoutedCallDeepSeekDirect:
         assert "stream" not in sent
         assert sent["max_tokens"] == 8192
 
+    def test_direct_path_request_body_serializes_stably(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, first = _call_direct(monkeypatch, _direct_body())
+        _, second = _call_direct(monkeypatch, _direct_body())
+
+        first_bytes = json.dumps(
+            first["body"], separators=(",", ":"), ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
+        second_bytes = json.dumps(
+            second["body"], separators=(",", ":"), ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
+
+        assert first_bytes == second_bytes
+
     def test_direct_path_sends_tool_result_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The router applies no reduction on the direct path: tool_result content
         # reaches DeepSeek byte-for-byte as the client sent it, so the prefix
