@@ -202,6 +202,81 @@ class TestMetricsBootstrapCounters:
         assert snap["requests"]["routed"] == 0
         assert snap["last_requests"] == []
 
+    def test_sqlite_history_restores_non_ledger_decisions(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "metrics.db"
+        m = _Metrics(db_path=db_path)
+        m.record_request(
+            method="POST",
+            path="/v1/messages",
+            status=0,
+            tier="premium",
+            route="passthrough",
+            model="claude-opus",
+            user_agent="claude-code/2.0.0",
+            client_ip="127.0.0.1",
+            tool_names=["Edit"],
+            input_tokens=0,
+            output_tokens=0,
+            cache_read=0,
+            cache_creation=0,
+            duration=0.0,
+            premium_model="claude-opus",
+            agent="claude-code-cli",
+            session_id="sess-x",
+            decision_reason="request_premium_guard",
+            request_id="req-x",
+        )
+
+        replay = _Metrics(db_path=db_path)
+        replay.bootstrap(ledger_path=None, max_recent=10)
+        latest = replay.snapshot()["last_requests"][0]
+
+        assert latest["route"] == "passthrough"
+        assert latest["model"] == "claude-opus"
+        assert latest["tool_names"] == ["Edit"]
+        assert latest["decision_reason"] == "request_premium_guard"
+
+    def test_sqlite_history_restores_usage_updates(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "metrics.db"
+        m = _Metrics(db_path=db_path)
+        m.record_request(
+            method="POST",
+            path="/v1/messages",
+            status=0,
+            tier="premium",
+            route="passthrough",
+            model="claude-opus",
+            user_agent="claude-code/2.0.0",
+            client_ip="127.0.0.1",
+            tool_names=[],
+            input_tokens=0,
+            output_tokens=0,
+            cache_read=0,
+            cache_creation=0,
+            duration=0.0,
+            request_id="req-y",
+        )
+        m.update_request_usage(
+            request_id="req-y",
+            status=200,
+            input_tokens=123,
+            output_tokens=45,
+            cache_read=6,
+            cache_creation=7,
+            duration=0.25,
+        )
+
+        replay = _Metrics(db_path=db_path)
+        replay.bootstrap(ledger_path=None, max_recent=10)
+        latest = replay.snapshot()["last_requests"][0]
+
+        assert latest["status"] == 200
+        assert latest["input_tokens"] == 123
+        assert latest["output_tokens"] == 45
+        assert latest["cache_read_tokens"] == 6
+        assert latest["cache_creation_tokens"] == 7
+        assert latest["duration_ms"] == 250
+
     def test_bootstrap_ignores_non_savings_lines(self) -> None:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             f.write('{"not": "a savings entry"}\n')

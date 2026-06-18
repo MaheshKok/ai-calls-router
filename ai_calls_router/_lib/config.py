@@ -109,6 +109,14 @@ def ledger_path() -> Path:
     return home_dir() / "savings.jsonl"
 
 
+def metrics_db_path() -> Path:
+    """Return the metrics SQLite DB location ($ACR_METRICS_DB overrides)."""
+    override = os.environ.get("ACR_METRICS_DB")
+    if override:
+        return Path(override).expanduser()
+    return home_dir() / "metrics.db"
+
+
 def server_settings(routes: JsonObject) -> ServerSettings:
     """Resolve the server: block, failing open to safe defaults.
 

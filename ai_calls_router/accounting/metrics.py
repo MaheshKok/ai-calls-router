@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
+import logging
+import sqlite3
 import threading
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeAlias, cast
 
-from ai_calls_router._lib import jsonnum
+from ai_calls_router._lib import config, jsonnum
 from ai_calls_router.accounting import ledger as savings_ledger
 from ai_calls_router.accounting.shrink_stats import ShrinkStats
 
@@ -22,6 +25,58 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
+
+DbValue: TypeAlias = None | int | float | str | bytes
+DbRow: TypeAlias = tuple[DbValue, ...]
+
+logger = logging.getLogger("acr.metrics")
+
+_REQUEST_EVENT_CREATE = """
+CREATE TABLE IF NOT EXISTS request_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    request_id TEXT NOT NULL,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    tier TEXT NOT NULL,
+    route TEXT NOT NULL,
+    model TEXT NOT NULL,
+    premium_model TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    user_agent TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    decision_reason TEXT NOT NULL,
+    client_ip TEXT NOT NULL,
+    tool_names TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_creation_tokens INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    shrink_chars_before INTEGER NOT NULL,
+    shrink_chars_after INTEGER NOT NULL
+)
+"""
+_REQUEST_EVENT_INSERT = """
+INSERT INTO request_events (
+    ts, request_id, method, path, status, tier, route, model, premium_model,
+    provider, user_agent, agent, session_id, decision_reason, client_ip,
+    tool_names, input_tokens, output_tokens, cache_read_tokens,
+    cache_creation_tokens, duration_ms, shrink_chars_before, shrink_chars_after
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+_REQUEST_EVENT_RECENT = """
+SELECT
+    ts, request_id, method, path, status, tier, route, model, premium_model,
+    provider, user_agent, agent, session_id, decision_reason, client_ip,
+    tool_names, input_tokens, output_tokens, cache_read_tokens,
+    cache_creation_tokens, duration_ms, shrink_chars_before, shrink_chars_after
+FROM request_events
+ORDER BY ts DESC, id DESC
+LIMIT ?
+"""
 
 # ── singleton ──────────────────────────────────────────────────────────────
 
@@ -31,6 +86,13 @@ def _parse_tool_names(value: JsonValue) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if str(item)]
     if isinstance(value, str):
+        if value.strip().startswith("["):
+            try:
+                parsed = cast("JsonValue", json.loads(value))
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed if str(item)]
         return [item.strip() for item in value.split(",") if item.strip()]
     return []
 
@@ -99,6 +161,100 @@ def _request_entry(
     )
 
 
+def _entry_text(entry: JsonObject, key: str) -> str:
+    """Return one entry field as DB-safe text."""
+    value = entry.get(key)
+    return value if isinstance(value, str) else str(value or "")
+
+
+def _entry_int(entry: JsonObject, key: str) -> int:
+    """Return one entry field as DB-safe integer."""
+    return jsonnum.int_value(entry.get(key, 0))
+
+
+def _entry_tool_names_json(entry: JsonObject) -> str:
+    """Return tool names as compact JSON text."""
+    return json.dumps(_parse_tool_names(entry.get("tool_names", [])), separators=(",", ":"))
+
+
+def _db_row_text(row: DbRow, index: int) -> str:
+    """Return a SQLite row value as text."""
+    value = row[index]
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else str(value or "")
+
+
+def _db_row_int(row: DbRow, index: int) -> int:
+    """Return a SQLite row value as integer."""
+    value = row[index]
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        return jsonnum.int_value(value)
+    return 0
+
+
+def _entry_db_values(entry: JsonObject) -> tuple[DbValue, ...]:
+    """Return DB insert values for one request-entry row."""
+    return (
+        _entry_int(entry, "ts"),
+        _entry_text(entry, "request_id"),
+        _entry_text(entry, "method"),
+        _entry_text(entry, "path"),
+        _entry_int(entry, "status"),
+        _entry_text(entry, "tier"),
+        _entry_text(entry, "route"),
+        _entry_text(entry, "model"),
+        _entry_text(entry, "premium_model"),
+        _entry_text(entry, "provider"),
+        _entry_text(entry, "user_agent"),
+        _entry_text(entry, "agent"),
+        _entry_text(entry, "session_id"),
+        _entry_text(entry, "decision_reason"),
+        _entry_text(entry, "client_ip"),
+        _entry_tool_names_json(entry),
+        _entry_int(entry, "input_tokens"),
+        _entry_int(entry, "output_tokens"),
+        _entry_int(entry, "cache_read_tokens"),
+        _entry_int(entry, "cache_creation_tokens"),
+        _entry_int(entry, "duration_ms"),
+        _entry_int(entry, "shrink_chars_before"),
+        _entry_int(entry, "shrink_chars_after"),
+    )
+
+
+def _entry_from_db_row(row: DbRow) -> JsonObject:
+    """Build one dashboard recent-request row from SQLite history."""
+    return _request_entry(
+        ts=_db_row_int(row, 0),
+        request_id=_db_row_text(row, 1),
+        method=_db_row_text(row, 2),
+        path=_db_row_text(row, 3),
+        status=_db_row_int(row, 4),
+        tier=_db_row_text(row, 5),
+        route=_db_row_text(row, 6),
+        model=_db_row_text(row, 7),
+        premium_model=_db_row_text(row, 8),
+        provider=_db_row_text(row, 9),
+        user_agent=_db_row_text(row, 10),
+        agent=_db_row_text(row, 11),
+        session_id=_db_row_text(row, 12),
+        decision_reason=_db_row_text(row, 13),
+        client_ip=_db_row_text(row, 14),
+        tool_names=_parse_tool_names(_db_row_text(row, 15)),
+        input_tokens=_db_row_int(row, 16),
+        output_tokens=_db_row_int(row, 17),
+        cache_read=_db_row_int(row, 18),
+        cache_creation=_db_row_int(row, 19),
+        duration_ms=_db_row_int(row, 20),
+        shrink_chars_before=_db_row_int(row, 21),
+        shrink_chars_after=_db_row_int(row, 22),
+    )
+
+
 def _recent_entry_from_ledger_record(rec: savings_ledger.LedgerEntry) -> JsonObject:
     """Build one dashboard recent-request row from a savings ledger record."""
     routed_model = str(rec.get("routed_model") or "")
@@ -128,12 +284,84 @@ def _recent_entry_from_ledger_record(rec: savings_ledger.LedgerEntry) -> JsonObj
     )
 
 
+def _ensure_request_db(db_path: Path) -> None:
+    """Create the request-history table if needed."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute(_REQUEST_EVENT_CREATE)
+        db.execute("CREATE INDEX IF NOT EXISTS idx_request_events_ts ON request_events(ts)")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_events_request_id ON request_events(request_id)"
+        )
+
+
+def _insert_request_event(db_path: Path, entry: JsonObject) -> None:
+    """Persist one request-history row."""
+    _ensure_request_db(db_path)
+    with sqlite3.connect(db_path) as db:
+        db.execute(_REQUEST_EVENT_INSERT, _entry_db_values(entry))
+
+
+def _update_request_event(
+    db_path: Path,
+    *,
+    request_id: str,
+    status: int,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read: int,
+    cache_creation: int,
+    duration_ms: int,
+) -> None:
+    """Update latest matching persisted request-history row."""
+    _ensure_request_db(db_path)
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            """
+            UPDATE request_events
+            SET status = ?,
+                input_tokens = ?,
+                output_tokens = ?,
+                cache_read_tokens = ?,
+                cache_creation_tokens = ?,
+                duration_ms = ?
+            WHERE id = (
+                SELECT id FROM request_events
+                WHERE request_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+            )
+            """,
+            (
+                status,
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_creation,
+                duration_ms,
+                request_id,
+            ),
+        )
+
+
+def _load_request_events(db_path: Path, max_recent: int) -> list[JsonObject]:
+    """Load newest request-history rows from SQLite."""
+    if not db_path.exists():
+        return []
+    _ensure_request_db(db_path)
+    with sqlite3.connect(db_path) as db:
+        rows = cast("list[DbRow]", db.execute(_REQUEST_EVENT_RECENT, (max_recent,)).fetchall())
+    return [_entry_from_db_row(row) for row in rows]
+
+
 class _Metrics:
     """Thread-safe counters for the proxy."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, db_path: Path | None = None) -> None:
         self._lock = threading.Lock()
         self._started_at = time.time()
+        self._db_path = db_path
         # Counters
         self._total_requests = 0
         self._routed_requests = 0
@@ -296,6 +524,7 @@ class _Metrics:
             self._last_requests.insert(0, entry)
             if len(self._last_requests) > 100:
                 self._last_requests = self._last_requests[:100]
+        self._save_request_entry(entry)
 
     def update_request_usage(
         self,
@@ -321,7 +550,16 @@ class _Metrics:
                 entry["cache_read_tokens"] = cache_read
                 entry["cache_creation_tokens"] = cache_creation
                 entry["duration_ms"] = int(duration * 1000)
-                return
+                break
+        self._update_saved_request_entry(
+            request_id=request_id,
+            status=status,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read=cache_read,
+            cache_creation=cache_creation,
+            duration_ms=int(duration * 1000),
+        )
 
     def bootstrap(self, *, ledger_path: Path | None, max_recent: int = 100) -> None:
         """Restore historical routed metrics from a savings JSONL ledger.
@@ -330,7 +568,12 @@ class _Metrics:
         aggregate is the historical source of truth; in-process counters only
         add process-local deltas after bootstrap.
         """
+        db_recent = self._load_saved_request_entries(max_recent)
         if ledger_path is None or not ledger_path.exists():
+            if db_recent:
+                with self._lock:
+                    self._last_requests = db_recent + self._last_requests
+                    self._last_requests = self._last_requests[:100]
             return
         try:
             entries = [
@@ -340,7 +583,7 @@ class _Metrics:
             return
         summary = savings_ledger.aggregate(entries)
         totals = cast("savings_ledger.Bucket", summary["totals"])
-        recent = [_recent_entry_from_ledger_record(rec) for rec in entries]
+        recent = db_recent or [_recent_entry_from_ledger_record(rec) for rec in entries]
         recent.sort(key=lambda item: jsonnum.int_value(item.get("ts", 0)), reverse=True)
         with self._lock:
             self._routed_requests += int(totals["requests"])
@@ -355,6 +598,53 @@ class _Metrics:
             self._shrink_chars_after += int(totals["shrink_chars_after"])
             self._last_requests = recent[:max_recent] + self._last_requests
             self._last_requests = self._last_requests[:100]
+
+    def _save_request_entry(self, entry: JsonObject) -> None:
+        """Persist one request-history row without raising into serving."""
+        if self._db_path is None:
+            return
+        try:
+            _insert_request_event(self._db_path, entry)
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning("acr: metrics history write failed (%s)", exc, exc_info=True)
+
+    def _update_saved_request_entry(
+        self,
+        *,
+        request_id: str,
+        status: int,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read: int,
+        cache_creation: int,
+        duration_ms: int,
+    ) -> None:
+        """Persist one request-history usage update without raising into serving."""
+        if self._db_path is None:
+            return
+        try:
+            _update_request_event(
+                self._db_path,
+                request_id=request_id,
+                status=status,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read=cache_read,
+                cache_creation=cache_creation,
+                duration_ms=duration_ms,
+            )
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning("acr: metrics history update failed (%s)", exc, exc_info=True)
+
+    def _load_saved_request_entries(self, max_recent: int) -> list[JsonObject]:
+        """Load persisted request-history rows without raising into serving."""
+        if self._db_path is None:
+            return []
+        try:
+            return _load_request_events(self._db_path, max_recent)
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning("acr: metrics history load failed (%s)", exc, exc_info=True)
+            return []
 
     # ── snapshot ───────────────────────────────────────────────────────
 
@@ -543,5 +833,5 @@ def get_metrics() -> _Metrics:
     if _metrics_singleton is None:
         with _metrics_init_lock:
             if _metrics_singleton is None:
-                _metrics_singleton = _Metrics()
+                _metrics_singleton = _Metrics(db_path=config.metrics_db_path())
     return _metrics_singleton
