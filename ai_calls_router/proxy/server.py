@@ -19,9 +19,8 @@ import json
 import logging
 import os
 import threading
-import time
 from collections.abc import AsyncGenerator, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -33,20 +32,13 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
 from ai_calls_router._lib import config, logging_setup
-from ai_calls_router.accounting import metrics, savings
+from ai_calls_router.accounting import metrics
 from ai_calls_router.ops import bootstrap
-from ai_calls_router.proxy import passthrough, websocket_passthrough
-from ai_calls_router.routing import codex_direct, provider_config
+from ai_calls_router.proxy import passthrough, route_dispatch, websocket_passthrough
 from ai_calls_router.routing import decide as routing
-from ai_calls_router.routing import engine as routed_call
+from ai_calls_router.routing import provider_config
 from ai_calls_router.routing.adapters import adapter_for_path
 from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
-from ai_calls_router.routing.config_schema import (
-    ConfigSchemaError,
-    is_codex_tier,
-    parse_tier_config,
-)
-from ai_calls_router.routing.synthesis_responses import synthesize_response_object_sse
 
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonObject, JsonValue
@@ -56,20 +48,9 @@ logger = logging.getLogger("acr.server")
 
 LOG_REVISION = "2026-06-15-premium-guard-v2"
 
-
-@dataclass(frozen=True)
-class _RouteAttempt:
-    response: Response | None = None
-    tier: str = "premium"
-    reason: str = "passthrough"
-    model: str = ""
-    premium_model: str = ""
-    tool_names: list[str] = field(default_factory=lambda: [])
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_creation_tokens: int = 0
-    duration: float = 0.0
+_RouteAttempt = route_dispatch.RouteAttempt
+codex_direct = route_dispatch.codex_direct
+_try_codex_direct_route = route_dispatch.try_codex_direct_route
 
 
 @dataclass
@@ -304,187 +285,6 @@ def _premium_usage_callback(
     return _record
 
 
-def _resolve_tier_config(
-    names: list[str],
-    *,
-    group: str,
-) -> tuple[str, JsonObject | None, routing.TierCredential | None, JsonObject]:
-    """Resolve the tier, its config, and API key from loaded routes.
-
-    Returns (tier_name, tier_cfg, credential, raw_routes). When tier_cfg or
-    credential is None the caller must pass through to premium.
-    """
-    routes = _load_assembled_routes()
-    tier = routing.tier_for_tools(names, routes, group=group)
-    if tier == "premium":
-        return "premium", None, None, routes
-    tiers = routes.get("tiers")
-    tier_cfg = tiers.get(tier) if isinstance(tiers, dict) else None
-    if not isinstance(tier_cfg, dict):
-        return tier, None, None, routes
-    settings_value = routes.get("settings")
-    settings_cfg = settings_value if isinstance(settings_value, dict) else {}
-    credential = routing.resolve_tier_credential(tier_cfg, settings_cfg)
-    if credential is None:
-        logger.info("acr: tier=%s has no API key; passing through", tier)
-        return tier, None, None, routes
-    return tier, tier_cfg, credential, routes
-
-
-def _premium_guard_attempt(
-    *, reason: str, requested_model: str, names: list[str], tier: str
-) -> _RouteAttempt:
-    """Log a premium-guard passthrough decision and build its route attempt.
-
-    Args:
-        reason: Passthrough reason recorded on the attempt and in the log line.
-        requested_model: Model the client asked for.
-        names: Pending tool-result names that triggered the decision.
-        tier: Resolved tier name.
-
-    Returns:
-        A passthrough route attempt carrying the reason and request context.
-    """
-    logger.info(
-        "acr: premium guard decision reason=%s model=%r tools=%s tier=%s",
-        reason,
-        requested_model,
-        names,
-        tier,
-    )
-    return _RouteAttempt(tier=tier, reason=reason, model=requested_model, tool_names=names)
-
-
-def _routed_fallback_attempt(
-    *, response_guard_tools: list[str], requested_model: str, names: list[str], tier: str
-) -> _RouteAttempt:
-    """Build the passthrough attempt for a routed call that returned no body.
-
-    Args:
-        response_guard_tools: Tool names the tier flagged for premium handling
-            mid-response; empty means an ordinary routed fallback.
-        requested_model: Model the client asked for.
-        names: Pending tool-result names for this turn.
-        tier: Resolved tier name.
-
-    Returns:
-        A passthrough route attempt distinguishing a response-side premium
-        guard from a generic routed fallback.
-    """
-    reason = "response_premium_guard" if response_guard_tools else "routed_fallback"
-    if response_guard_tools:
-        logger.info(
-            "acr: premium guard decision reason=%s model=%r tools=%s response_tools=%s tier=%s",
-            reason,
-            requested_model,
-            names,
-            response_guard_tools,
-            tier,
-        )
-    return _RouteAttempt(tier=tier, reason=reason, model=requested_model, tool_names=names)
-
-
-async def _try_codex_direct_route(
-    *,
-    body: JsonObject,
-    tier: str,
-    tier_cfg: JsonObject,
-    credential: routing.TierCredential,
-    request_headers: Mapping[str, str],
-    streaming: bool,
-    requested_model: str,
-    names: list[str],
-    premium_tools: list[str],
-    request_path: str,
-    user_agent: str,
-    agent: str,
-    session: str,
-    client: httpx.AsyncClient | None = None,
-) -> _RouteAttempt | None:
-    """Serve a Codex Responses request through the direct Codex provider path."""
-    if request_path != "/v1/responses":
-        return None
-    try:
-        tier_model = parse_tier_config(tier_cfg).model
-        if not is_codex_tier(tier_cfg):
-            return None
-    except ConfigSchemaError:
-        return None
-    started = time.monotonic()
-    result = await codex_direct.responses_call(
-        body=body,
-        tier_cfg=tier_cfg,
-        credential=credential.value,
-        auth_mode=credential.auth_mode,
-        chatgpt_headers=websocket_passthrough.codex_chatgpt_headers(request_headers),
-        client=client,
-    )
-    duration = time.monotonic() - started
-    if result is None:
-        return _routed_fallback_attempt(
-            response_guard_tools=[],
-            requested_model=requested_model,
-            names=names,
-            tier=tier,
-        )
-    response_body, usage_values = result
-    response_guard_tools = routed_call.premium_tool_names_from_responses(
-        response_body, {}, premium_tools=premium_tools
-    )
-    if response_guard_tools:
-        return _routed_fallback_attempt(
-            response_guard_tools=response_guard_tools,
-            requested_model=requested_model,
-            names=names,
-            tier=tier,
-        )
-    usage = routed_call.RouteUsage(
-        input_tokens=usage_values[0],
-        output_tokens=usage_values[1],
-        cache_read_tokens=usage_values[2],
-        cache_creation_tokens=usage_values[3],
-    )
-    await routed_call.record_route_outcome(
-        routed_call.RouteOutcome(
-            premium_model=requested_model,
-            routed_model=tier_model,
-            tier_name=tier,
-            tier_cfg=tier_cfg,
-            tool_names=names,
-            usage=usage,
-            request_path=request_path,
-            route="direct",
-            user_agent=user_agent,
-            agent=agent,
-            session_id=session,
-            elapsed=duration,
-            request_id=logging_setup.current_request_id(),
-        )
-    )
-    client_body = {**response_body, "model": requested_model} if requested_model else response_body
-    response = (
-        Response(
-            b"".join(synthesize_response_object_sse(client_body)),
-            media_type="text/event-stream",
-        )
-        if streaming
-        else JSONResponse(client_body)
-    )
-    return _RouteAttempt(
-        response=response,
-        tier=tier,
-        reason="routed",
-        model=tier_model,
-        premium_model=requested_model,
-        tool_names=names,
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        cache_read_tokens=usage.cache_read_tokens,
-        cache_creation_tokens=usage.cache_creation_tokens,
-        duration=duration,
-    )
-
-
 async def _try_route(
     body_bytes: bytes,
     *,
@@ -497,128 +297,19 @@ async def _try_route(
     agent: str = "",
     session: str | None = None,
 ) -> _RouteAttempt:
-    """Attempt to serve a /v1/messages request on a cheap tier.
-
-    Any error anywhere in the decision or the routed call resolves to None
-    so the caller replays the turn on premium passthrough (invariant 3:
-    routing never breaks a turn).
-
-    Args:
-        adapter: Client adapter for the request path.
-        group: Agent group to use for routing.
-        request_path: Client-facing request path for logging and metrics.
-        request_headers: Client request headers for Codex OAuth detection.
-        client: Optional shared HTTP client for routed provider calls.
-        body_bytes: Raw request body bytes.
-        user_agent: Raw User-Agent header from the client.
-        agent: Identified agent label.
-        session: Session fingerprint hex string.
-
-    Returns:
-        A route attempt carrying either the routed response or the passthrough reason.
-    """
-    try:
-        body = cast("JsonValue", json.loads(body_bytes))
-        if not isinstance(body, dict):
-            return _RouteAttempt(reason="non_object_body")
-        anthropic_body = adapter.to_anthropic_request(body)
-        requested_model = str(anthropic_body.get("model") or "")
-        streaming = _wants_stream(body, anthropic_body)
-        names = adapter.extract_pending_tools(body)
-        if not names:
-            logger.debug("no pending tool results; passing through")
-            return _RouteAttempt(reason="no_pending_tools", model=requested_model)
-        logger.debug("pending tools=%s", names)
-        tier, tier_cfg, credential, routes = _resolve_tier_config(names, group=group)
-        logger.debug("resolved tier=%s routable=%s", tier, tier_cfg is not None)
-        if tier_cfg is None:
-            reason = "request_premium_guard" if tier == "premium" else "tier_unavailable"
-            return _premium_guard_attempt(
-                reason=reason, requested_model=requested_model, names=names, tier=tier
-            )
-        if credential is None:
-            return _premium_guard_attempt(
-                reason="tier_unavailable", requested_model=requested_model, names=names, tier=tier
-            )
-        savings.register_tier_prices(routes)
-        settings_value = routes.get("settings")
-        settings_cfg = settings_value if isinstance(settings_value, dict) else {}
-        premium_tools = routing.agent_premium_tools(routes, group)
-        codex_attempt = await _try_codex_direct_route(
-            body=body,
-            tier=tier,
-            tier_cfg=tier_cfg,
-            credential=credential,
-            request_headers=request_headers,
-            streaming=streaming,
-            requested_model=requested_model,
-            names=names,
-            premium_tools=premium_tools,
-            request_path=request_path,
-            user_agent=user_agent,
-            agent=agent,
-            session=session or "",
-            client=client,
-        )
-        if codex_attempt is not None:
-            return codex_attempt
-        response_guard_tools: list[str] = []
-
-        def _mark_response_guard(tool_names: list[str]) -> None:
-            response_guard_tools.extend(tool_names)
-
-        result = await routed_call.routed_call(
-            body=anthropic_body,
-            tier_name=tier,
-            tier_cfg=tier_cfg,
-            api_key=credential.value,
-            settings=settings_cfg,
-            tool_names=names,
-            premium_tools=premium_tools,
-            request_path=request_path,
-            user_agent=user_agent,
-            agent=group,
-            session_id=session or "",
-            on_premium_guard=_mark_response_guard,
-            client=client,
-        )
-        if result is None:
-            return _routed_fallback_attempt(
-                response_guard_tools=response_guard_tools,
-                requested_model=requested_model,
-                names=names,
-                tier=tier,
-            )
-        client_body = adapter.to_client_response(result.body)
-        if streaming:
-            return _RouteAttempt(
-                response=Response(
-                    b"".join(adapter.to_client_sse(result.body)),
-                    media_type="text/event-stream",
-                ),
-                tier=tier,
-                reason="routed",
-                model=requested_model,
-                tool_names=names,
-            )
-        return _RouteAttempt(
-            response=JSONResponse(client_body),
-            tier=tier,
-            reason="routed",
-            model=requested_model,
-            tool_names=names,
-        )
-    except Exception as exc:
-        logger.warning("acr: routing decision failed (%s); passing through", exc, exc_info=True)
-        return _RouteAttempt(reason="routing_error")
-
-
-def _wants_stream(client_body: JsonObject, anthropic_body: JsonObject) -> bool:
-    """Return whether the client requested a streaming response."""
-    stream = client_body.get("stream")
-    if isinstance(stream, bool):
-        return stream
-    return bool(anthropic_body.get("stream"))
+    """Compatibility wrapper for tests that monkeypatch server._try_route."""
+    return await route_dispatch.try_route(
+        body_bytes,
+        adapter=adapter,
+        group=group,
+        request_path=request_path,
+        request_headers=request_headers,
+        routes_loader=_load_assembled_routes,
+        client=client,
+        user_agent=user_agent,
+        agent=agent,
+        session=session,
+    )
 
 
 def _record_ws_route_attempt(headers: Mapping[str, str], attempt: _RouteAttempt) -> None:

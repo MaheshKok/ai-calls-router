@@ -56,6 +56,36 @@ ROUTED_BODY: JsonObject = {
 }
 
 
+def test_route_table_unchanged() -> None:
+    """Route registration order and handlers must survive server splits."""
+    routes = [
+        (
+            route.path,
+            sorted(route.methods) if hasattr(route, "methods") and route.methods else [],
+            route.endpoint.__name__,
+        )
+        for route in create_app().routes
+    ]
+
+    assert routes == [
+        ("/health", ["GET", "HEAD"], "health"),
+        ("/metrics", ["GET", "HEAD"], "metrics_endpoint"),
+        ("/dashboard", ["GET", "HEAD"], "dashboard"),
+        ("/v1/messages", ["POST"], "messages"),
+        ("/v1/chat/completions", ["POST"], "chat_completions"),
+        ("/v1/responses", ["POST"], "responses"),
+        ("/v1/responses", [], "responses_ws"),
+        ("/v1/responses/{sub_path:path}", [], "responses_ws_sub"),
+        ("/v1/codex/responses", [], "responses_ws"),
+        ("/v1/codex/responses/{sub_path:path}", [], "responses_ws_sub"),
+        (
+            "/{path:path}",
+            ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"],
+            "proxy",
+        ),
+    ]
+
+
 class _Upstream:
     """Mock premium upstream recording every proxied request."""
 
