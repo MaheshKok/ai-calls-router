@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import httpx
 
+from ai_calls_router._lib import jsonnum
 from ai_calls_router.routing.config_schema import (
     ConfigSchemaError,
     is_codex_tier,
@@ -118,14 +119,7 @@ def _request_target(
 
 def _usage_int(value: JsonValue) -> int:
     """Coerce provider usage values to non-negative integers."""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int | float | str):
-        try:
-            return max(int(value), 0)
-        except (TypeError, ValueError):
-            return 0
-    return 0
+    return jsonnum.int_value(value, minimum=0)
 
 
 def _response_usage(response_body: JsonObject) -> tuple[int, int, int, int]:

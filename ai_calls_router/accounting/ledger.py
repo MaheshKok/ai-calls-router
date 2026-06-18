@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import TypeAlias, cast
 
-from ai_calls_router._lib import config
+from ai_calls_router._lib import config, jsonnum
 from ai_calls_router._lib.types import JsonObject, JsonValue
 
 _INT_FIELDS = (
@@ -28,30 +28,6 @@ _FLOAT_FIELDS = ("routed_usd", "premium_usd", "saved_usd")
 LedgerEntry: TypeAlias = JsonObject
 Bucket: TypeAlias = dict[str, int | float]
 Summary: TypeAlias = dict[str, Bucket | dict[str, Bucket]]
-
-
-def _json_int(value: JsonValue) -> int:
-    """Coerce a ledger JSON value to int, defaulting malformed values to zero."""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int | float | str):
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 0
-    return 0
-
-
-def _json_float(value: JsonValue) -> float:
-    """Coerce a ledger JSON value to float, defaulting malformed values to zero."""
-    if isinstance(value, bool):
-        return 0.0
-    if isinstance(value, int | float | str):
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 0.0
-    return 0.0
 
 
 def load_entries(ledger: Path | None = None) -> list[LedgerEntry]:
@@ -91,11 +67,11 @@ def _accumulate(bucket: Bucket, entry: LedgerEntry) -> None:
     """
     bucket["requests"] += 1
     for key in _INT_FIELDS:
-        bucket[key] += _json_int(entry.get(key, 0))
+        bucket[key] += jsonnum.int_value(entry.get(key, 0))
     for key in _NONNEGATIVE_INT_FIELDS:
-        bucket[key] += max(_json_int(entry.get(key, 0)), 0)
+        bucket[key] += jsonnum.int_value(entry.get(key, 0), minimum=0)
     for key in _FLOAT_FIELDS:
-        bucket[key] += _json_float(entry.get(key, 0.0))
+        bucket[key] += jsonnum.float_value(entry.get(key, 0.0))
 
 
 def _empty_bucket() -> Bucket:

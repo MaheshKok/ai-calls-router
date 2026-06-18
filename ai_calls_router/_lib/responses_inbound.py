@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, cast
 
+from ai_calls_router._lib import jsonnum
 from ai_calls_router._lib.conversion import parse_tool_arguments
 from ai_calls_router._lib.openai_schemas import validate_responses_request
 
@@ -300,22 +301,10 @@ def responses_request_to_anthropic(body: JsonObject) -> JsonObject:
     return converted
 
 
-def _json_int(value: JsonValue) -> int:
-    """Coerce simple JSON values to int, defaulting malformed values to zero."""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int | float | str):
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 0
-    return 0
-
-
 def _usage_to_responses(usage: JsonObject) -> dict[str, int]:
     """Convert Anthropic usage counters to Responses usage."""
-    input_tokens = _json_int(usage.get("input_tokens", 0))
-    output_tokens = _json_int(usage.get("output_tokens", 0))
+    input_tokens = jsonnum.int_value(usage.get("input_tokens", 0))
+    output_tokens = jsonnum.int_value(usage.get("output_tokens", 0))
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,

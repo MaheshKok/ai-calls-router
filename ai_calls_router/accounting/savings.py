@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
-from ai_calls_router._lib import config
+from ai_calls_router._lib import config, jsonnum
 from ai_calls_router._lib.litellm_guard import load_litellm
 from ai_calls_router.accounting.metrics import get_metrics, identify_provider
 
@@ -41,31 +41,6 @@ class _PricingLiteLLM(Protocol):
     def cost_per_token(
         self, *, model: str, prompt_tokens: int, completion_tokens: int
     ) -> tuple[float, float]: ...
-
-
-def _json_float(value: JsonValue) -> float | None:
-    """Coerce a JSON value to a real float when it is numeric.
-
-    Args:
-        value: Candidate price value from config.
-
-    Returns:
-        Float value for int/float inputs that are not bool; otherwise None.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int | float):
-        return float(value)
-    return None
-
-
-def _json_int(value: JsonValue) -> int:
-    """Coerce simple JSON scalars to int, raising on malformed strings."""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int | float | str):
-        return int(value)
-    return 0
 
 
 def register_tier_prices(routes: JsonObject) -> None:
@@ -92,8 +67,8 @@ def register_tier_prices(routes: JsonObject) -> None:
             output_per_1m = tier_cfg.get("output_cost_per_1m")
             if not isinstance(model, str) or not model:
                 continue
-            input_price = _json_float(input_per_1m)
-            output_price = _json_float(output_per_1m)
+            input_price = jsonnum.optional_float_value(input_per_1m)
+            output_price = jsonnum.optional_float_value(output_per_1m)
             if input_price is None or output_price is None:
                 continue
             input_per_token = input_price / 1_000_000
@@ -145,11 +120,11 @@ def _routed_prices_from_tier(
     """
     if not isinstance(tier_cfg, dict):
         return None
-    input_per_1m = _json_float(tier_cfg.get("input_cost_per_1m"))
-    output_per_1m = _json_float(tier_cfg.get("output_cost_per_1m"))
+    input_per_1m = jsonnum.optional_float_value(tier_cfg.get("input_cost_per_1m"))
+    output_per_1m = jsonnum.optional_float_value(tier_cfg.get("output_cost_per_1m"))
     if input_per_1m is None or output_per_1m is None:
         return None
-    cached_per_1m = _json_float(tier_cfg.get("input_cached_cost_per_1m"))
+    cached_per_1m = jsonnum.optional_float_value(tier_cfg.get("input_cached_cost_per_1m"))
     if cached_per_1m is None:
         cached_per_1m = input_per_1m
     return (
@@ -340,10 +315,10 @@ def record_savings_from_response(
     try:
         usage = response_body.get("usage") if isinstance(response_body, dict) else None
         usage = usage if isinstance(usage, dict) else {}
-        input_tokens = _json_int(usage.get("input_tokens", 0))
-        output_tokens = _json_int(usage.get("output_tokens", 0))
-        cache_read = _json_int(usage.get("cache_read_input_tokens", 0))
-        cache_creation = _json_int(usage.get("cache_creation_input_tokens", 0))
+        input_tokens = jsonnum.int_value(usage.get("input_tokens", 0), strict=True)
+        output_tokens = jsonnum.int_value(usage.get("output_tokens", 0), strict=True)
+        cache_read = jsonnum.int_value(usage.get("cache_read_input_tokens", 0), strict=True)
+        cache_creation = jsonnum.int_value(usage.get("cache_creation_input_tokens", 0), strict=True)
     except Exception as exc:
         logger.warning("usage extraction failed: %s", exc, exc_info=True)
         return

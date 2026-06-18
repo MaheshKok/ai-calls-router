@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
     from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
 
+from ai_calls_router._lib import jsonnum
 from ai_calls_router._lib.conversion import (
     BackendResponse,
     LiteLLMResponse,
@@ -143,19 +144,7 @@ def _prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
 
 def _usage_int(usage: JsonObject, key: str) -> int:
     """Return a non-negative integer usage counter from a response body."""
-    return _json_int(usage.get(key, 0))
-
-
-def _json_int(value: JsonValue) -> int:
-    """Coerce a JSON usage value to non-negative int."""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int | float | str):
-        try:
-            return max(int(value), 0)
-        except (TypeError, ValueError):
-            return 0
-    return 0
+    return jsonnum.int_value(usage.get(key, 0), minimum=0)
 
 
 def _usage_summary(response_body: JsonObject) -> str:
@@ -377,10 +366,12 @@ def _usage_from_anthropic(body: JsonObject) -> RouteUsage:
     usage_value = body.get("usage")
     usage = usage_value if isinstance(usage_value, dict) else {}
     return RouteUsage(
-        input_tokens=_json_int(usage.get("input_tokens", 0)),
-        output_tokens=_json_int(usage.get("output_tokens", 0)),
-        cache_read_tokens=_json_int(usage.get("cache_read_input_tokens", 0)),
-        cache_creation_tokens=_json_int(usage.get("cache_creation_input_tokens", 0)),
+        input_tokens=jsonnum.int_value(usage.get("input_tokens", 0), minimum=0),
+        output_tokens=jsonnum.int_value(usage.get("output_tokens", 0), minimum=0),
+        cache_read_tokens=jsonnum.int_value(usage.get("cache_read_input_tokens", 0), minimum=0),
+        cache_creation_tokens=jsonnum.int_value(
+            usage.get("cache_creation_input_tokens", 0), minimum=0
+        ),
     )
 
 

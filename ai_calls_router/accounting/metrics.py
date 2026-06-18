@@ -14,6 +14,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, cast
 
+from ai_calls_router._lib import jsonnum
 from ai_calls_router.accounting import ledger as savings_ledger
 from ai_calls_router.accounting.shrink_stats import ShrinkStats
 
@@ -32,18 +33,6 @@ def _parse_tool_names(value: JsonValue) -> list[str]:
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     return []
-
-
-def _json_int(value: JsonValue, default: int = 0) -> int:
-    """Coerce persisted JSON values to int for dashboard totals."""
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, int | float | str):
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-    return default
 
 
 def _is_savings_record(rec: savings_ledger.LedgerEntry) -> bool:
@@ -114,7 +103,7 @@ def _recent_entry_from_ledger_record(rec: savings_ledger.LedgerEntry) -> JsonObj
     """Build one dashboard recent-request row from a savings ledger record."""
     routed_model = str(rec.get("routed_model") or "")
     return _request_entry(
-        ts=_json_int(rec.get("ts", 0)),
+        ts=jsonnum.int_value(rec.get("ts", 0)),
         method="POST",
         path="/v1/messages",
         status=200,
@@ -129,13 +118,13 @@ def _recent_entry_from_ledger_record(rec: savings_ledger.LedgerEntry) -> JsonObj
         decision_reason=str(rec.get("decision_reason") or "routed"),
         client_ip="",
         tool_names=_parse_tool_names(rec.get("tool_names", "")),
-        input_tokens=_json_int(rec.get("input_tokens", 0)),
-        output_tokens=_json_int(rec.get("output_tokens", 0)),
-        cache_read=_json_int(rec.get("cache_read_input_tokens", 0)),
-        cache_creation=_json_int(rec.get("cache_creation_input_tokens", 0)),
+        input_tokens=jsonnum.int_value(rec.get("input_tokens", 0)),
+        output_tokens=jsonnum.int_value(rec.get("output_tokens", 0)),
+        cache_read=jsonnum.int_value(rec.get("cache_read_input_tokens", 0)),
+        cache_creation=jsonnum.int_value(rec.get("cache_creation_input_tokens", 0)),
         duration_ms=0,
-        shrink_chars_before=_json_int(rec.get("shrink_chars_before", 0)),
-        shrink_chars_after=_json_int(rec.get("shrink_chars_after", 0)),
+        shrink_chars_before=jsonnum.int_value(rec.get("shrink_chars_before", 0)),
+        shrink_chars_after=jsonnum.int_value(rec.get("shrink_chars_after", 0)),
     )
 
 
@@ -352,7 +341,7 @@ class _Metrics:
         summary = savings_ledger.aggregate(entries)
         totals = cast("savings_ledger.Bucket", summary["totals"])
         recent = [_recent_entry_from_ledger_record(rec) for rec in entries]
-        recent.sort(key=lambda item: _json_int(item.get("ts", 0)), reverse=True)
+        recent.sort(key=lambda item: jsonnum.int_value(item.get("ts", 0)), reverse=True)
         with self._lock:
             self._routed_requests += int(totals["requests"])
             self._routed_input_tokens += int(totals["input_tokens"])

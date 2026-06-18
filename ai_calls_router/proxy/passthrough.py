@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, cast
 import httpx
 from starlette.responses import Response, StreamingResponse
 
+from ai_calls_router._lib import jsonnum
+
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonObject, JsonValue
 
@@ -79,15 +81,7 @@ def filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
 
 
 def _usage_int(usage: JsonObject, key: str) -> int:
-    value = usage.get(key, 0)
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int | float | str):
-        try:
-            return max(int(value), 0)
-        except (TypeError, ValueError):
-            return 0
-    return 0
+    return jsonnum.int_value(usage.get(key, 0), minimum=0)
 
 
 class _UsageCapture:

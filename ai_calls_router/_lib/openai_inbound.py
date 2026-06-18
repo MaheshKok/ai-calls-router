@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, cast
 
+from ai_calls_router._lib import jsonnum
 from ai_calls_router._lib.conversion import parse_tool_arguments
 from ai_calls_router._lib.openai_schemas import validate_chat_request
 
@@ -214,22 +215,10 @@ def _chat_tool_call(block: JsonObject, index: int) -> JsonObject:
     }
 
 
-def _json_int(value: JsonValue) -> int:
-    """Return a non-raising int coercion for JSON scalar counters."""
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int | float | str):
-        try:
-            return int(value)
-        except ValueError:
-            return 0
-    return 0
-
-
 def _usage_to_chat(usage: JsonObject) -> JsonObject:
     """Convert Anthropic usage counters to Chat usage counters."""
-    prompt_tokens = _json_int(usage.get("input_tokens", 0))
-    completion_tokens = _json_int(usage.get("output_tokens", 0))
+    prompt_tokens = jsonnum.int_value(usage.get("input_tokens", 0), bool_as_int=True)
+    completion_tokens = jsonnum.int_value(usage.get("output_tokens", 0), bool_as_int=True)
     result: JsonObject = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
