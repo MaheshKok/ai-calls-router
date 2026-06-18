@@ -285,12 +285,15 @@ async def try_route(  # noqa: PLR0911 - pure move of fail-open routing branches.
     session: str | None = None,
 ) -> RouteAttempt:
     """Attempt to serve an adapter request on a routed tier."""
+    requested_model = ""
+    names: list[str] = []
     try:
         body = cast("JsonValue", json.loads(body_bytes))
         if not isinstance(body, dict):
             return RouteAttempt(reason="non_object_body")
+        requested_model = str(body.get("model") or "")
         anthropic_body = adapter.to_anthropic_request(body)
-        requested_model = str(anthropic_body.get("model") or "")
+        requested_model = str(anthropic_body.get("model") or requested_model)
         streaming = wants_stream(body, anthropic_body)
         names = adapter.extract_pending_tools(body)
         if not names:
@@ -377,7 +380,7 @@ async def try_route(  # noqa: PLR0911 - pure move of fail-open routing branches.
         )
     except Exception as exc:
         logger.warning("acr: routing decision failed (%s); passing through", exc, exc_info=True)
-        return RouteAttempt(reason="routing_error")
+        return RouteAttempt(reason="routing_error", model=requested_model, tool_names=names)
 
 
 async def try_route_ws_response_create(

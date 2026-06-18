@@ -324,6 +324,10 @@ class TestMessagesPassthrough:
         response = client.post("/v1/messages", json=_tool_result_body())
         assert response.json() == {"marker": "upstream"}
         assert len(upstream.requests) == 1
+        latest = client.get("/metrics").json()["last_requests"][0]
+        assert latest["decision_reason"] == "routing_error"
+        assert latest["model"] == "claude-fable-5"
+        assert latest["premium_model"] == "claude-fable-5"
 
 
 class TestMessagesRouted:
@@ -340,6 +344,31 @@ class TestMessagesRouted:
         assert response.status_code == 200
         assert response.json() == ROUTED_BODY
         assert upstream.requests == []
+
+    def test_system_role_message_tool_result_routes_after_normalization(
+        self,
+        *,
+        client: TestClient,
+        upstream: _Upstream,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake = _FakeRoutedCall(BackendResponse(body=ROUTED_BODY))
+        monkeypatch.setattr(rc, "routed_call", fake)
+        body = _tool_result_body()
+        messages = body["messages"]
+        assert isinstance(messages, list)
+        messages.insert(0, {"role": "system", "content": "runtime"})
+
+        response = client.post("/v1/messages", json=body)
+
+        assert response.status_code == 200
+        assert response.json() == ROUTED_BODY
+        assert upstream.requests == []
+        assert len(fake.calls) == 1
+        routed_body = fake.calls[0]["body"]
+        assert isinstance(routed_body, dict)
+        assert routed_body["system"] == "runtime"
+        assert routed_body["messages"] == _tool_result_body()["messages"]
 
     def test_routed_call_receives_tier_and_key(
         self,

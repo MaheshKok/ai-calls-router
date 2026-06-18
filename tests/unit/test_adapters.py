@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from ai_calls_router._lib.types import JsonObject
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import synthesis
 from ai_calls_router.routing.adapters import adapter_for_path
@@ -15,7 +16,7 @@ from ai_calls_router.routing.adapters.anthropic_messages import AnthropicMessage
 from ai_calls_router.routing.adapters.openai_responses import OpenAIResponsesAdapter
 
 
-def _body_with_tool_results(*pairs: tuple[str, str]) -> dict[str, object]:
+def _body_with_tool_results(*pairs: tuple[str, str]) -> JsonObject:
     """Build a minimal Anthropic request with pending tool results.
 
     Args:
@@ -68,6 +69,43 @@ class TestAnthropicMessagesAdapter:
         assert request_body == _body_with_tool_results(("t1", "Bash"))
         assert response_body == {"content": [{"type": "text", "text": "ok"}]}
 
+    def test_system_role_message_is_normalized_for_routed_path(self) -> None:
+        """Move Claude-style system messages without mutating the original body."""
+        adapter = AnthropicMessagesAdapter()
+        request_body: JsonObject = {
+            "model": "claude-test",
+            "system": "base",
+            "messages": [
+                {"role": "system", "content": "runtime"},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "t1"}],
+                },
+            ],
+        }
+
+        routed_body = adapter.to_anthropic_request(request_body)
+
+        assert routed_body is not request_body
+        assert routed_body["system"] == "base\n\nruntime"
+        routed_messages = routed_body["messages"]
+        assert routed_messages == [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1"}]},
+        ]
+        original_messages = request_body["messages"]
+        assert isinstance(original_messages, list)
+        assert original_messages[0] == {"role": "system", "content": "runtime"}
+        assert request_body["system"] == "base"
+        assert adapter.extract_pending_tools(request_body) == ["Bash"]
+
     def test_malformed_request_raises_for_fail_open_server_path(self) -> None:
         """Reject malformed Anthropic envelopes before routed decisions."""
         adapter = AnthropicMessagesAdapter()
@@ -78,7 +116,7 @@ class TestAnthropicMessagesAdapter:
     def test_extract_pending_tools_matches_existing_routing_logic(self) -> None:
         """Delegate pending-tool extraction to the existing routing function."""
         adapter = AnthropicMessagesAdapter()
-        empty_body: dict[str, object] = {}
+        empty_body: JsonObject = {}
         tool_body = _body_with_tool_results(("t1", "Read"), ("t2", "Bash"))
 
         assert adapter.extract_pending_tools(empty_body) == routing.pending_tool_names(empty_body)
