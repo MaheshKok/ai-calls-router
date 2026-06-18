@@ -25,6 +25,8 @@ _HOSTED_ITEM_TYPES: frozenset[str] = frozenset(
         "computer_call",
         "code_interpreter_call",
         "mcp_call",
+        "tool_search_call",
+        "tool_search_output",
     }
 )
 
@@ -79,10 +81,10 @@ def _message_content_blocks(item: JsonObject) -> list[JsonObject]:
 def _message_item_to_anthropic(item: JsonObject) -> JsonObject | None:
     """Convert a Responses message item to an Anthropic message."""
     role = item.get("role")
-    if role == "system":
+    if role in {"system", "developer"}:
         return None
     if role not in {"user", "assistant"}:
-        raise ValueError("Responses message role must be user, assistant, or system")
+        raise ValueError("Responses message role must be user, assistant, system, or developer")
     return {"role": role, "content": cast("JsonArray", _message_content_blocks(item))}
 
 
@@ -207,6 +209,27 @@ def responses_tool_to_anthropic(tool: JsonObject) -> JsonObject:
     raise ValueError("unsupported Responses tool type")
 
 
+def _routable_tool_to_anthropic(tool: JsonObject) -> JsonObject | None:
+    """Convert function/custom tools and ignore hosted Responses tools."""
+    if tool.get("type") not in {"function", "custom"}:
+        return None
+    return responses_tool_to_anthropic(tool)
+
+
+def _routable_tools_to_anthropic(tools: JsonValue) -> JsonArray:
+    """Convert routable Responses tools while skipping hosted entries."""
+    converted_tools: JsonArray = []
+    if not isinstance(tools, list):
+        return converted_tools
+    for tool in cast("JsonArray", tools):
+        if not isinstance(tool, dict):
+            continue
+        converted_tool = _routable_tool_to_anthropic(cast("JsonObject", tool))
+        if converted_tool is not None:
+            converted_tools.append(converted_tool)
+    return converted_tools
+
+
 def _tool_choice_to_anthropic(choice: JsonValue) -> JsonObject:
     """Convert Responses tool_choice to Anthropic format."""
     if isinstance(choice, str):
@@ -229,7 +252,7 @@ def _system_from_input(input_items: JsonValue) -> str | None:
         for item in cast("JsonArray", input_items)
         if isinstance(item, dict)
         and item.get("type", "message") == "message"
-        and item.get("role") == "system"
+        and item.get("role") in {"system", "developer"}
     ]
     kept = [part for part in parts if part]
     return "\n".join(kept) if kept else None
@@ -259,13 +282,10 @@ def responses_request_to_anthropic(body: JsonObject) -> JsonObject:
     else:
         raise ValueError("Responses input must be a string or list")  # noqa: TRY004
 
-    tools = body.get("tools")
-    if isinstance(tools, list):
-        converted["tools"] = [
-            responses_tool_to_anthropic(cast("JsonObject", tool))
-            for tool in cast("JsonArray", tools)
-            if isinstance(tool, dict)
-        ]
+    if "tools" in body:
+        converted_tools = _routable_tools_to_anthropic(body["tools"])
+        if converted_tools:
+            converted["tools"] = converted_tools
     if "tool_choice" in body:
         converted["tool_choice"] = _tool_choice_to_anthropic(body["tool_choice"])
     if "max_output_tokens" in body:

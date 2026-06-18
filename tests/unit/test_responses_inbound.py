@@ -158,11 +158,14 @@ def test_instructions_and_system_messages_become_top_level_system() -> None:
     body = {
         "model": "gpt-5-codex",
         "instructions": "be terse",
-        "input": [{"type": "message", "role": "system", "content": "system note"}],
+        "input": [
+            {"type": "message", "role": "system", "content": "system note"},
+            {"type": "message", "role": "developer", "content": "developer note"},
+        ],
     }
     assert responses_request_to_anthropic(body) == {
         "model": "gpt-5-codex",
-        "system": "be terse\nsystem note",
+        "system": "be terse\nsystem note\ndeveloper note",
         "messages": [],
     }
 
@@ -195,6 +198,45 @@ def test_tool_conversion_rejects_missing_name_and_unknown_type() -> None:
         responses_tool_to_anthropic({"type": "function"})
     with pytest.raises(ValueError, match="unsupported Responses tool type"):
         responses_tool_to_anthropic({"type": "hosted", "name": "web_search"})
+
+
+def test_request_conversion_ignores_hosted_tools_without_names() -> None:
+    body = {
+        "model": "gpt-5-codex",
+        "input": "hi",
+        "tools": [
+            {"type": "web_search_preview"},
+            {"type": "function", "name": "exec_command", "parameters": {"type": "object"}},
+        ],
+    }
+
+    converted = responses_request_to_anthropic(body)
+
+    assert converted["tools"] == [{"name": "exec_command", "input_schema": {"type": "object"}}]
+
+
+def test_request_conversion_ignores_codex_tool_search_items() -> None:
+    converted = responses_request_to_anthropic(
+        {
+            "model": "gpt-5-codex",
+            "input": [
+                {"type": "tool_search_call", "call_id": "call_search", "status": "completed"},
+                {"type": "tool_search_output", "call_id": "call_search", "status": "completed"},
+                {"type": "message", "role": "user", "content": "next"},
+            ],
+        }
+    )
+
+    assert converted["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "next"}]}
+    ]
+
+
+def test_request_conversion_rejects_malformed_routable_tool() -> None:
+    with pytest.raises(ValueError, match="requires name"):
+        responses_request_to_anthropic(
+            {"model": "gpt-5-codex", "input": "hi", "tools": [{"type": "function"}]}
+        )
 
 
 def test_malformed_item_raises_for_fail_open_path() -> None:

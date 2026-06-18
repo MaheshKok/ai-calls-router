@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import threading
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -27,12 +27,13 @@ import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket
 
 from ai_calls_router._lib import config, logging_setup
 from ai_calls_router.accounting import metrics, savings
 from ai_calls_router.ops import bootstrap
-from ai_calls_router.proxy import passthrough
+from ai_calls_router.proxy import passthrough, websocket_passthrough
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
 from ai_calls_router.routing import provider_config
@@ -489,6 +490,61 @@ async def responses(request: Request) -> Response:
         return await _handle_routed_request(request)
 
 
+async def responses_ws(websocket: WebSocket) -> None:
+    """Relay Codex ChatGPT-auth Responses WebSockets."""
+    await websocket_passthrough.forward_codex_chatgpt(
+        websocket, route_first_frame=_try_route_ws_response_create
+    )
+
+
+async def responses_ws_sub(websocket: WebSocket) -> None:
+    """Relay Codex ChatGPT-auth Responses WebSocket subpaths."""
+    raw_sub_path = websocket.path_params.get("sub_path", "")
+    sub_path = raw_sub_path if isinstance(raw_sub_path, str) else ""
+    await websocket_passthrough.forward_codex_chatgpt(
+        websocket, sub_path=sub_path, route_first_frame=_try_route_ws_response_create
+    )
+
+
+async def _try_route_ws_response_create(
+    first_msg_raw: str, headers: Mapping[str, str]
+) -> list[str] | None:
+    """Try to serve one Codex WS `response.create` through the routed core."""
+    try:
+        body = websocket_passthrough.response_create_to_http_body(first_msg_raw)
+        if body is None:
+            return None
+        adapter = adapter_for_path("/v1/responses")
+        if adapter is None:
+            return None
+        routes = _load_assembled_routes()
+        group = provider_config.resolve_agent_group(
+            path="/v1/responses",
+            headers=headers,
+            routes=routes,
+            adapter_default=adapter.default_agent_group,
+        )
+        if group is None:
+            return None
+        body_bytes = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        user_agent = headers.get("user-agent", "")
+        attempt = await _try_route(
+            body_bytes,
+            adapter=adapter,
+            group=group,
+            request_path="/v1/responses",
+            user_agent=user_agent,
+            agent=metrics.identify_agent(user_agent),
+            session=None,
+        )
+        if attempt.response is None:
+            return None
+        return websocket_passthrough.sse_to_ws_messages(bytes(attempt.response.body))
+    except Exception as exc:
+        logger.warning("acr: websocket routing decision failed (%s); passing through", exc)
+        return None
+
+
 async def _handle_routed_request(request: Request) -> Response:
     """Serve one adapter-backed request inside an active request context."""
     path = request.url.path
@@ -651,6 +707,10 @@ def create_app(transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
             Route("/v1/messages", messages, methods=["POST"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1/responses", responses, methods=["POST"]),
+            WebSocketRoute("/v1/responses", responses_ws),
+            WebSocketRoute("/v1/responses/{sub_path:path}", responses_ws_sub),
+            WebSocketRoute("/v1/codex/responses", responses_ws),
+            WebSocketRoute("/v1/codex/responses/{sub_path:path}", responses_ws_sub),
             Route("/{path:path}", proxy, methods=PROXY_METHODS),
         ],
         lifespan=lifespan,

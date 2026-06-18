@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from ai_calls_router.accounting import metrics as metrics_mod
 from ai_calls_router.proxy.server import create_app
@@ -120,6 +121,10 @@ def _responses_tool_result_body(*, stream: bool = True) -> dict[str, object]:
             {"type": "reasoning", "encrypted_content": "must-not-route"},
             {"type": "function_call_output", "call_id": "call_exec", "output": "/tmp"},
         ],
+        "tools": [
+            {"type": "web_search_preview"},
+            {"type": "function", "name": "exec_command", "parameters": {"type": "object"}},
+        ],
     }
 
 
@@ -150,10 +155,57 @@ def test_responses_streaming_tool_result_routes_to_deepseek_direct(
         "tool_use_id": "call_exec",
         "content": "/tmp",
     }
+    assert fake.calls[0]["body"]["tools"] == [
+        {"name": "exec_command", "input_schema": {"type": "object"}}
+    ]
 
     latest = client.get("/metrics").json()["last_requests"][0]
     assert latest["path"] == "/v1/responses"
     assert latest["route"] == "direct"
+
+
+def test_responses_websocket_tool_result_routes_to_deepseek_direct(
+    *,
+    client: TestClient,
+    upstream: _Upstream,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDirectCall(ROUTED_TEXT_BODY)
+    monkeypatch.setattr(rc.anthropic_direct, "direct_call", fake)
+    messages: list[str] = []
+
+    with client.websocket_connect(
+        "/v1/responses",
+        headers={
+            "authorization": "Bearer client-premium-secret",
+            "chatgpt-account-id": "acct_123",
+        },
+    ) as websocket:
+        websocket.send_text(
+            json.dumps(
+                {
+                    "type": "response.create",
+                    "response": _responses_tool_result_body(),
+                }
+            )
+        )
+        for _ in range(10):
+            try:
+                message = websocket.receive_text()
+            except WebSocketDisconnect:
+                break
+            messages.append(message)
+            if (
+                '"type":"response.completed"' in message
+                or '"type": "response.completed"' in message
+            ):
+                break
+
+    assert any("response.completed" in message for message in messages)
+    assert upstream.requests == []
+    assert fake.calls[0]["api_key"] == "tier-key"
+    assert "client-premium-secret" not in json.dumps(fake.calls[0])
+    assert "must-not-route" not in json.dumps(fake.calls[0]["body"])
 
 
 def test_responses_non_streaming_returns_response_json(

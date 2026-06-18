@@ -21,7 +21,7 @@ import uvicorn
 
 from ai_calls_router import cli
 from ai_calls_router._lib import config
-from ai_calls_router.ops import daemon, wizard
+from ai_calls_router.ops import daemon, wizard, wrap
 
 CONFIG_YAML = """
 server:
@@ -44,10 +44,22 @@ def acr_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 class TestParser:
     @pytest.mark.parametrize(
         "command",
-        ["init", "start", "stop", "status", "code", "savings", "serve", "version"],
+        [
+            "init",
+            "start",
+            "stop",
+            "status",
+            "code",
+            "wrap",
+            "unwrap",
+            "savings",
+            "serve",
+            "version",
+        ],
     )
     def test_known_commands_parse(self, command: str) -> None:
-        args = cli.build_parser().parse_args([command])
+        argv = [command, "codex"] if command in {"wrap", "unwrap"} else [command]
+        args = cli.build_parser().parse_args(argv)
         assert args.command == command
 
     def test_no_command_exits_with_usage_error(self) -> None:
@@ -63,6 +75,11 @@ class TestParser:
     def test_code_collects_claude_arguments(self) -> None:
         args = cli.build_parser().parse_args(["code", "-p", "hello world"])
         assert args.claude_args == ["-p", "hello world"]
+
+    def test_wrap_collects_agent_arguments(self) -> None:
+        args = cli.build_parser().parse_args(["wrap", "codex", "-p", "hello world"])
+        assert args.agent == "codex"
+        assert args.agent_args == ["-p", "hello world"]
 
 
 class TestStatus:
@@ -161,6 +178,66 @@ class TestCode:
         assert cli.main(["code"]) == 1
         assert runs == []
         assert "boom" in capsys.readouterr().err
+
+
+class TestWrap:
+    def test_wrap_codex_launches_with_proxy_env_and_config(
+        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(daemon, "start", lambda: 4242)
+        writes: list[str] = []
+        runs: list[tuple[list[str], dict[str, str]]] = []
+
+        def _run(
+            cmd: list[str], env: dict[str, str], **kwargs: object
+        ) -> subprocess.CompletedProcess[int]:
+            runs.append((cmd, env))
+            return subprocess.CompletedProcess(cmd, 9)
+
+        monkeypatch.setattr(wrap, "enable_codex_config", writes.append)
+        monkeypatch.setattr(subprocess, "run", _run)
+
+        assert cli.main(["wrap", "codex", "-p", "hi"]) == 9
+        cmd, env = runs[0]
+        assert writes == ["http://127.0.0.1:9321"]
+        assert cmd == ["codex", "-p", "hi"]
+        assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:9321/v1"
+
+    def test_wrap_claude_launches_without_persistent_config(
+        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(daemon, "start", lambda: 4242)
+        runs: list[tuple[list[str], dict[str, str]]] = []
+        writes: list[str] = []
+        monkeypatch.setattr(wrap, "enable_codex_config", writes.append)
+
+        def _run(
+            cmd: list[str], env: dict[str, str], **kwargs: object
+        ) -> subprocess.CompletedProcess[int]:
+            runs.append((cmd, env))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(subprocess, "run", _run)
+
+        assert cli.main(["wrap", "claude", "-p", "hi"]) == 0
+        cmd, env = runs[0]
+        assert cmd == ["claude", "-p", "hi"]
+        assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9321"
+        assert writes == []
+
+    def test_unwrap_codex_restores_config(
+        self,
+        *,
+        acr_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        restored = Path("/tmp/config.toml")
+        monkeypatch.setattr(wrap, "disable_codex_config", lambda: restored)
+
+        assert cli.main(["unwrap", "codex"]) == 0
+
+        assert str(restored) in capsys.readouterr().out
 
 
 class TestSavings:

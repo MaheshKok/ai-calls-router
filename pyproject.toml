@@ -27,6 +27,7 @@ dependencies = [
     "pyyaml>=6.0",
     "starlette>=0.40",
     "uvicorn>=0.30",
+    "websockets>=12",
 ]
 
 [project.optional-dependencies]

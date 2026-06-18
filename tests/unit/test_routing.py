@@ -171,7 +171,11 @@ class TestTierForTools:
             "codex": {
                 "tools": {
                     "exec_command": "fast",
+                    "ctx_shell": "fast",
+                    "ctx_read": "code",
+                    "search_graph": "code",
                     "update_plan": "crud",
+                    "initial_instructions": "crud",
                     "apply_patch": "premium",
                 },
                 "premium_tools": ["apply_patch"],
@@ -216,7 +220,13 @@ class TestTierForTools:
 
     def test_codex_group_resolves_codex_tool_names(self) -> None:
         assert routing.tier_for_tools(["exec_command"], self.ROUTES, group="codex") == "fast"
+        assert routing.tier_for_tools(["ctx_shell"], self.ROUTES, group="codex") == "fast"
+        assert routing.tier_for_tools(["ctx_read"], self.ROUTES, group="codex") == "code"
+        assert routing.tier_for_tools(["search_graph"], self.ROUTES, group="codex") == "code"
         assert routing.tier_for_tools(["update_plan"], self.ROUTES, group="codex") == "crud"
+        assert (
+            routing.tier_for_tools(["initial_instructions"], self.ROUTES, group="codex") == "crud"
+        )
 
     def test_claude_code_group_matches_default_behavior(self) -> None:
         routes = {"agents": {"claude_code": {"tools": AGENT_DEFAULT_TOOLS["claude_code"]}}}

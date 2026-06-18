@@ -1,10 +1,11 @@
 """Command-line interface for the ai-calls-router proxy.
 
-Exposes the acr subcommands -- init, start, stop, status, code, desktop,
-savings, serve, and version -- while keeping the concrete work delegated to small
-modules through module references so every layer stays independently
-testable. Operational errors surface as exit code 1 with a message on stderr
-rather than a traceback; daemon state is reported through exit codes.
+Exposes the acr subcommands -- init, start, stop, status, code, wrap, unwrap,
+desktop, savings, serve, and version -- while keeping the concrete work
+delegated to small modules through module references so every layer stays
+independently testable. Operational errors surface as exit code 1 with a
+message on stderr rather than a traceback; daemon state is reported through
+exit codes.
 """
 
 from __future__ import annotations
@@ -20,18 +21,17 @@ import uvicorn
 from ai_calls_router import __version__
 from ai_calls_router._lib import config
 from ai_calls_router.accounting import ledger
-from ai_calls_router.ops import daemon, desktop, wizard
+from ai_calls_router.ops import daemon, desktop, wizard, wrap
 from ai_calls_router.proxy import server
 from ai_calls_router.routing import decide as routing
 
 
 class _AcrParser(argparse.ArgumentParser):
-    """Argument parser that forwards everything after ``code`` verbatim.
+    """Argument parser that forwards launcher arguments verbatim.
 
     argparse.REMAINDER drops a leading option (``code -p ...``) when used in
-    a subparser, so the code subcommand is split off manually: any tokens
-    after ``code`` become claude_args in their original order, which is what
-    a launcher wrapper needs.
+    a subparser, so launcher subcommands are split off manually: trailing
+    tokens remain in their original order.
     """
 
     def parse_args(  # type: ignore[override]
@@ -39,12 +39,17 @@ class _AcrParser(argparse.ArgumentParser):
         args: list[str] | None = None,
         namespace: argparse.Namespace | None = None,
     ) -> argparse.Namespace:
-        """Parse args, capturing the claude_args tail of the code command."""
+        """Parse args, capturing launcher argument tails."""
         argv = list(sys.argv[1:] if args is None else args)
         if argv and argv[0] == "code":
             parsed = super().parse_args(["code"], namespace)
             assert parsed is not None
             parsed.claude_args = argv[1:]
+            return parsed
+        if len(argv) >= 2 and argv[0] == "wrap":
+            parsed = super().parse_args(["wrap", argv[1]], namespace)
+            assert parsed is not None
+            parsed.agent_args = argv[2:]
             return parsed
         result = super().parse_args(argv, namespace)
         assert result is not None
@@ -55,8 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the acr argument parser.
 
     Returns:
-        A parser with a required subcommand stored on args.command; the
-        code subcommand collects trailing arguments as args.claude_args.
+        A parser with a required subcommand stored on args.command.
     """
     parser = _AcrParser(
         prog="acr", description="Per-tool-result model routing proxy for Claude Code."
@@ -69,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status", help="Report daemon status.")
     code = subparsers.add_parser("code", help="Launch claude through the proxy.")
     code.add_argument("claude_args", nargs=argparse.REMAINDER)
+    wrap_parser = subparsers.add_parser("wrap", help="Launch an agent through the proxy.")
+    wrap_parser.add_argument("agent", choices=sorted(wrap.AGENT_COMMANDS))
+    wrap_parser.add_argument("agent_args", nargs=argparse.REMAINDER)
+    unwrap_parser = subparsers.add_parser("unwrap", help="Remove persistent agent wrap state.")
+    unwrap_parser.add_argument("agent", choices=sorted(wrap.AGENT_COMMANDS))
     desktop_parser = subparsers.add_parser(
         "desktop", help="Manage persistent Claude settings routing."
     )
@@ -148,6 +157,35 @@ def _cmd_code(args: argparse.Namespace) -> int:
     return result.returncode
 
 
+def _cmd_wrap(args: argparse.Namespace) -> int:
+    """Boot the daemon and launch one supported agent through the proxy."""
+    try:
+        daemon.start()
+        proxy_url = _listen_url()
+        if args.agent == "codex":
+            wrap.enable_codex_config(proxy_url)
+    except (daemon.DaemonError, wrap.WrapError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    command = wrap.AGENT_COMMANDS[args.agent]
+    result = subprocess.run([command, *args.agent_args], env=wrap.launch_env(args.agent, proxy_url))
+    return result.returncode
+
+
+def _cmd_unwrap(args: argparse.Namespace) -> int:
+    """Remove persistent wrapper state for one supported agent."""
+    try:
+        if args.agent == "codex":
+            path = wrap.disable_codex_config()
+            print(f"Restored Codex config at {path}")
+        else:
+            print(f"No persistent {args.agent} wrap state")
+    except wrap.WrapError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
 def _cmd_desktop(args: argparse.Namespace) -> int:
     """Manage persistent Claude settings routing for desktop-style clients."""
     settings_path = desktop.resolve_settings_path(args.config)
@@ -198,6 +236,8 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "stop": _cmd_stop,
     "status": _cmd_status,
     "code": _cmd_code,
+    "wrap": _cmd_wrap,
+    "unwrap": _cmd_unwrap,
     "desktop": _cmd_desktop,
     "savings": _cmd_savings,
     "serve": _cmd_serve,
