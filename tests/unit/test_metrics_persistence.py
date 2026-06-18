@@ -50,6 +50,73 @@ def _make_record(
     }
 
 
+def _write_records(tmp_path: Path, records: list[dict[str, object]]) -> Path:
+    """Write records to a temporary savings ledger."""
+    ledger_path = tmp_path / "savings.jsonl"
+    ledger_path.write_text(
+        "".join(f"{json.dumps(record)}\n" for record in records),
+        encoding="utf-8",
+    )
+    return ledger_path
+
+
+def _apply_live_record(m: _Metrics, record: dict[str, object]) -> None:
+    """Apply one ledger-equivalent record through live metrics methods."""
+    input_tokens = int(record["input_tokens"])
+    output_tokens = int(record["output_tokens"])
+    cache_read = int(record["cache_read_input_tokens"])
+    cache_creation = int(record["cache_creation_input_tokens"])
+    m.incr_routed()
+    m.add_routed_tokens(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read=cache_read,
+        cache_creation=cache_creation,
+    )
+    m.add_savings(
+        routed_usd=float(record["routed_usd"]),
+        premium_usd=float(record["premium_usd"]),
+        saved_usd=float(record["saved_usd"]),
+    )
+    m.add_shrink(
+        chars_before=int(record.get("shrink_chars_before", 0)),
+        chars_after=int(record.get("shrink_chars_after", 0)),
+    )
+    m.record_request(
+        method="POST",
+        path="/v1/messages",
+        status=200,
+        tier=str(record["tier_name"]),
+        route="routed",
+        model=str(record["routed_model"]),
+        premium_model=str(record["premium_model"]),
+        user_agent=str(record["user_agent"]),
+        client_ip="",
+        tool_names=[],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read=cache_read,
+        cache_creation=cache_creation,
+        duration=0,
+        agent=str(record["agent"]),
+        session_id=str(record["session_id"]),
+        provider=str(record["provider"]),
+        decision_reason="routed",
+        shrink_chars_before=int(record.get("shrink_chars_before", 0)),
+        shrink_chars_after=int(record.get("shrink_chars_after", 0)),
+    )
+
+
+def _aggregate_view(snapshot: dict[str, object]) -> dict[str, object]:
+    """Extract aggregate fields that ledger replay must reproduce."""
+    return {
+        "requests": snapshot["requests"],
+        "routed_tokens": snapshot["routed_tokens"],
+        "costs": snapshot["costs"],
+        "compression": snapshot["compression"],
+    }
+
+
 class TestMetricsBootstrapCounters:
     """Bootstrap should restore counters from a savings.jsonl file."""
 
@@ -150,6 +217,42 @@ class TestMetricsBootstrapCounters:
             assert snap["requests"]["routed"] == 1
         finally:
             ledger_path.unlink(missing_ok=True)
+
+    def test_ledger_replay_equals_live_aggregate(self, tmp_path: Path) -> None:
+        records = [
+            _make_record(
+                ts=1718000000,
+                input_tokens=100,
+                output_tokens=40,
+                cache_read_input_tokens=10,
+                cache_creation_input_tokens=2,
+                routed_usd=0.001,
+                premium_usd=0.008,
+                saved_usd=0.007,
+            ),
+            _make_record(
+                ts=1718000001,
+                input_tokens=300,
+                output_tokens=80,
+                cache_read_input_tokens=20,
+                cache_creation_input_tokens=5,
+                routed_usd=0.003,
+                premium_usd=0.020,
+                saved_usd=0.017,
+            ),
+        ]
+        records[0]["shrink_chars_before"] = 8000
+        records[0]["shrink_chars_after"] = 3000
+        records[1]["shrink_chars_before"] = -9
+        records[1]["shrink_chars_after"] = -3
+        live = _Metrics()
+        for record in records:
+            _apply_live_record(live, record)
+
+        replay = _Metrics()
+        replay.bootstrap(ledger_path=_write_records(tmp_path, records), max_recent=10)
+
+        assert _aggregate_view(replay.snapshot()) == _aggregate_view(live.snapshot())
 
 
 class TestMetricsBootstrapIntegration:
@@ -369,6 +472,19 @@ class TestRecordRequestPerRowShrink:
         assert row["status"] == 0
         assert row["input_tokens"] == 0
 
+    def test_snapshot_aggregate_is_detached_from_live_updates(self) -> None:
+        m = _Metrics()
+        m.incr_routed()
+        snap = m.snapshot()
+        m.incr_routed()
+        m.add_routed_tokens(input_tokens=7, output_tokens=3, cache_read=2, cache_creation=1)
+        m.add_savings(routed_usd=0.01, premium_usd=0.05, saved_usd=0.04)
+        m.add_shrink(chars_before=100, chars_after=25)
+        assert snap["requests"]["routed"] == 1
+        assert snap["routed_tokens"]["input"] == 0
+        assert snap["costs"]["saved_usd"] == 0
+        assert snap["compression"]["chars_before"] == 0
+
 
 class TestBootstrapPerRowShrink:
     """Bootstrap rebuilds recent-request rows from the ledger, and each row
@@ -423,3 +539,15 @@ class TestBootstrapPerRowShrink:
             assert row["shrink_chars_after"] == 0
         finally:
             ledger_path.unlink(missing_ok=True)
+
+    def test_bootstrap_row_shape_matches_record_request(self, tmp_path: Path) -> None:
+        rec = _make_record(ts=1718000000, saved_usd=0.0)
+        live = _Metrics()
+        _apply_live_record(live, rec)
+
+        replay = _Metrics()
+        replay.bootstrap(ledger_path=_write_records(tmp_path, [rec]), max_recent=1)
+
+        live_row = live.snapshot()["last_requests"][0]
+        replay_row = replay.snapshot()["last_requests"][0]
+        assert set(replay_row) == set(live_row)

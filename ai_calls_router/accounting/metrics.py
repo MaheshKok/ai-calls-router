@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import threading
 import time
 from typing import TYPE_CHECKING, cast
 
+from ai_calls_router.accounting import ledger as savings_ledger
 from ai_calls_router.accounting.shrink_stats import ShrinkStats
 
 if TYPE_CHECKING:
@@ -46,31 +46,97 @@ def _json_int(value: JsonValue, default: int = 0) -> int:
     return default
 
 
-def _json_float(value: JsonValue, default: float = 0.0) -> float:
-    """Coerce persisted JSON values to float for dashboard totals."""
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, int | float | str):
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
-    return default
-
-
-def _parse_savings_line(line: str) -> JsonObject | None:
-    """Parse one JSONL line into a valid savings record, or None on error."""
-    try:
-        rec = cast("JsonValue", json.loads(line))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(rec, dict):
-        return None
+def _is_savings_record(rec: savings_ledger.LedgerEntry) -> bool:
+    """Return True when a ledger record has the savings fields metrics need."""
     premium_model = str(rec.get("premium_model") or "")
     routed_model = str(rec.get("routed_model") or "")
-    if not premium_model or not routed_model:
-        return None
-    return rec
+    return bool(premium_model and routed_model)
+
+
+def _request_entry(
+    *,
+    ts: int,
+    method: str,
+    path: str,
+    status: int,
+    tier: str,
+    route: str,
+    model: str,
+    user_agent: str,
+    client_ip: str,
+    tool_names: list[str],
+    input_tokens: int,
+    output_tokens: int,
+    cache_read: int,
+    cache_creation: int,
+    duration_ms: int,
+    premium_model: str = "",
+    agent: str = "",
+    session_id: str = "",
+    provider: str = "",
+    decision_reason: str = "",
+    request_id: str = "",
+    shrink_chars_before: int = 0,
+    shrink_chars_after: int = 0,
+) -> JsonObject:
+    """Build one dashboard recent-request row."""
+    return cast(
+        "JsonObject",
+        {
+            "ts": ts,
+            "request_id": request_id,
+            "method": method,
+            "path": path,
+            "status": status,
+            "tier": tier,
+            "route": route,
+            "model": model,
+            "premium_model": premium_model,
+            "provider": provider or identify_provider(model),
+            "user_agent": user_agent[:200] if user_agent else "",
+            "agent": agent,
+            "session_id": session_id,
+            "decision_reason": decision_reason,
+            "client_ip": client_ip,
+            "tool_names": tool_names,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read,
+            "cache_creation_tokens": cache_creation,
+            "duration_ms": duration_ms,
+            "shrink_chars_before": max(int(shrink_chars_before), 0),
+            "shrink_chars_after": max(int(shrink_chars_after), 0),
+        },
+    )
+
+
+def _recent_entry_from_ledger_record(rec: savings_ledger.LedgerEntry) -> JsonObject:
+    """Build one dashboard recent-request row from a savings ledger record."""
+    routed_model = str(rec.get("routed_model") or "")
+    return _request_entry(
+        ts=_json_int(rec.get("ts", 0)),
+        method="POST",
+        path="/v1/messages",
+        status=200,
+        tier=str(rec.get("tier_name") or ""),
+        route="routed",
+        model=routed_model,
+        premium_model=str(rec.get("premium_model") or ""),
+        provider=str(rec.get("provider") or identify_provider(routed_model)),
+        user_agent=str(rec.get("user_agent") or ""),
+        agent=str(rec.get("agent") or ""),
+        session_id=str(rec.get("session_id") or ""),
+        decision_reason=str(rec.get("decision_reason") or "routed"),
+        client_ip="",
+        tool_names=_parse_tool_names(rec.get("tool_names", "")),
+        input_tokens=_json_int(rec.get("input_tokens", 0)),
+        output_tokens=_json_int(rec.get("output_tokens", 0)),
+        cache_read=_json_int(rec.get("cache_read_input_tokens", 0)),
+        cache_creation=_json_int(rec.get("cache_creation_input_tokens", 0)),
+        duration_ms=0,
+        shrink_chars_before=_json_int(rec.get("shrink_chars_before", 0)),
+        shrink_chars_after=_json_int(rec.get("shrink_chars_after", 0)),
+    )
 
 
 class _Metrics:
@@ -212,33 +278,30 @@ class _Metrics:
         shrink_chars_before: int = 0,
         shrink_chars_after: int = 0,
     ) -> None:
-        entry = cast(
-            "JsonObject",
-            {
-                "ts": int(time.time()),
-                "request_id": request_id,
-                "method": method,
-                "path": path,
-                "status": status,
-                "tier": tier,
-                "route": route,
-                "model": model,
-                "premium_model": premium_model,
-                "provider": provider or identify_provider(model),
-                "user_agent": user_agent[:200] if user_agent else "",
-                "agent": agent,
-                "session_id": session_id,
-                "decision_reason": decision_reason,
-                "client_ip": client_ip,
-                "tool_names": tool_names,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_tokens": cache_read,
-                "cache_creation_tokens": cache_creation,
-                "duration_ms": int(duration * 1000),
-                "shrink_chars_before": max(int(shrink_chars_before), 0),
-                "shrink_chars_after": max(int(shrink_chars_after), 0),
-            },
+        entry = _request_entry(
+            ts=int(time.time()),
+            method=method,
+            path=path,
+            status=status,
+            tier=tier,
+            route=route,
+            model=model,
+            premium_model=premium_model,
+            provider=provider,
+            user_agent=user_agent,
+            agent=agent,
+            session_id=session_id,
+            decision_reason=decision_reason,
+            client_ip=client_ip,
+            tool_names=tool_names,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read=cache_read,
+            cache_creation=cache_creation,
+            duration_ms=int(duration * 1000),
+            request_id=request_id,
+            shrink_chars_before=shrink_chars_before,
+            shrink_chars_after=shrink_chars_after,
         )
         with self._lock:
             self._last_requests.insert(0, entry)
@@ -271,139 +334,37 @@ class _Metrics:
                 entry["duration_ms"] = int(duration * 1000)
                 return
 
-    class _BootstrapAccumulator:
-        """Mutable state bag for one bootstrap replay pass."""
-
-        def __init__(self) -> None:
-            self.routed_count = 0
-            self.routed_input = 0
-            self.routed_output = 0
-            self.routed_cache_read = 0
-            self.routed_cache_creation = 0
-            self.routed_usd = 0.0
-            self.premium_usd = 0.0
-            self.saved_usd = 0.0
-            self.shrink_chars_before = 0
-            self.shrink_chars_after = 0
-            self.recent: list[JsonObject] = []
-
-        def process_one(self, rec: JsonObject) -> None:
-            self.routed_count += 1
-            routed_model = str(rec.get("routed_model") or "")
-            premium_model = str(rec.get("premium_model") or "")
-            input_tokens = _json_int(rec.get("input_tokens", 0))
-            output_tokens = _json_int(rec.get("output_tokens", 0))
-            cache_read = _json_int(rec.get("cache_read_input_tokens", 0))
-            cache_creation = _json_int(rec.get("cache_creation_input_tokens", 0))
-
-            self.routed_input += input_tokens
-            self.routed_output += output_tokens
-            self.routed_cache_read += cache_read
-            self.routed_cache_creation += cache_creation
-            self.routed_usd += _json_float(rec.get("routed_usd", 0.0))
-            self.premium_usd += _json_float(rec.get("premium_usd", 0.0))
-            self.saved_usd += _json_float(rec.get("saved_usd", 0.0))
-            self.shrink_chars_before += max(_json_int(rec.get("shrink_chars_before", 0)), 0)
-            self.shrink_chars_after += max(_json_int(rec.get("shrink_chars_after", 0)), 0)
-
-            self.recent.append(
-                self._build_recent_entry(
-                    rec,
-                    routed_model=routed_model,
-                    premium_model=premium_model,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cache_read=cache_read,
-                    cache_creation=cache_creation,
-                )
-            )
-
-        @staticmethod
-        def _build_recent_entry(
-            rec: JsonObject,
-            *,
-            routed_model: str,
-            premium_model: str,
-            input_tokens: int,
-            output_tokens: int,
-            cache_read: int,
-            cache_creation: int,
-        ) -> JsonObject:
-            """Build one dashboard recent-request row from a ledger record.
-
-            Args:
-                rec: One parsed savings-ledger record.
-                routed_model: Pre-coerced routed model name.
-                premium_model: Pre-coerced premium model name.
-                input_tokens: Pre-coerced input token count.
-                output_tokens: Pre-coerced output token count.
-                cache_read: Pre-coerced cache-read token count.
-                cache_creation: Pre-coerced cache-creation token count.
-
-            Returns:
-                A recent-request dict matching the live dashboard row shape.
-            """
-            return cast(
-                "JsonObject",
-                {
-                    "ts": _json_int(rec.get("ts", 0)),
-                    "method": "POST",
-                    "path": "/v1/messages",
-                    "status": 200,
-                    "tier": str(rec.get("tier_name") or ""),
-                    "route": "routed",
-                    "model": routed_model,
-                    "premium_model": premium_model,
-                    "provider": str(rec.get("provider") or identify_provider(routed_model)),
-                    "user_agent": str(rec.get("user_agent") or "")[:200],
-                    "agent": str(rec.get("agent") or ""),
-                    "session_id": str(rec.get("session_id") or ""),
-                    "decision_reason": str(rec.get("decision_reason") or "routed"),
-                    "client_ip": "",
-                    "tool_names": _parse_tool_names(rec.get("tool_names", "")),
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cache_read_tokens": cache_read,
-                    "cache_creation_tokens": cache_creation,
-                    "duration_ms": 0,
-                    "shrink_chars_before": max(_json_int(rec.get("shrink_chars_before", 0)), 0),
-                    "shrink_chars_after": max(_json_int(rec.get("shrink_chars_after", 0)), 0),
-                },
-            )
-
     def bootstrap(self, *, ledger_path: Path | None, max_recent: int = 100) -> None:
         """Restore historical routed metrics from a savings JSONL ledger.
 
-        The savings ledger records completed routed requests. Replaying it gives
-        the dashboard historical routed-token/cost/session context after proxy
-        restarts. Request totals remain live-process counters and are not
-        synthesized from the ledger.
+        The savings ledger records completed routed requests. The ledger
+        aggregate is the historical source of truth; in-process counters only
+        add process-local deltas after bootstrap.
         """
         if ledger_path is None or not ledger_path.exists():
             return
-        acc = self._BootstrapAccumulator()
         try:
-            with ledger_path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    rec = _parse_savings_line(line)
-                    if rec is None:
-                        continue
-                    acc.process_one(rec)
+            entries = [
+                rec for rec in savings_ledger.load_entries(ledger_path) if _is_savings_record(rec)
+            ]
         except OSError:
             return
-        acc.recent.sort(key=lambda item: _json_int(item.get("ts", 0)), reverse=True)
+        summary = savings_ledger.aggregate(entries)
+        totals = cast("savings_ledger.Bucket", summary["totals"])
+        recent = [_recent_entry_from_ledger_record(rec) for rec in entries]
+        recent.sort(key=lambda item: _json_int(item.get("ts", 0)), reverse=True)
         with self._lock:
-            self._routed_requests += acc.routed_count
-            self._routed_input_tokens += acc.routed_input
-            self._routed_output_tokens += acc.routed_output
-            self._routed_cache_read_tokens += acc.routed_cache_read
-            self._routed_cache_creation_tokens += acc.routed_cache_creation
-            self._routed_usd += acc.routed_usd
-            self._premium_usd += acc.premium_usd
-            self._saved_usd += acc.saved_usd
-            self._shrink_chars_before += acc.shrink_chars_before
-            self._shrink_chars_after += acc.shrink_chars_after
-            self._last_requests = acc.recent[:max_recent] + self._last_requests
+            self._routed_requests += int(totals["requests"])
+            self._routed_input_tokens += int(totals["input_tokens"])
+            self._routed_output_tokens += int(totals["output_tokens"])
+            self._routed_cache_read_tokens += int(totals["cache_read_input_tokens"])
+            self._routed_cache_creation_tokens += int(totals["cache_creation_input_tokens"])
+            self._routed_usd += float(totals["routed_usd"])
+            self._premium_usd += float(totals["premium_usd"])
+            self._saved_usd += float(totals["saved_usd"])
+            self._shrink_chars_before += int(totals["shrink_chars_before"])
+            self._shrink_chars_after += int(totals["shrink_chars_after"])
+            self._last_requests = recent[:max_recent] + self._last_requests
             self._last_requests = self._last_requests[:100]
 
     # ── snapshot ───────────────────────────────────────────────────────

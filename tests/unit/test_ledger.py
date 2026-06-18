@@ -119,6 +119,17 @@ class TestAggregate:
         assert totals["saved_usd"] == 0.0
         assert totals["savings_pct"] == 0.0
 
+    def test_shrink_fields_clamp_to_non_negative_totals(self) -> None:
+        summary = ledger.aggregate(
+            [
+                _entry(shrink_chars_before=8000, shrink_chars_after=3000),
+                _entry(shrink_chars_before=-500, shrink_chars_after=-9),
+            ]
+        )
+        totals = summary["totals"]
+        assert totals["shrink_chars_before"] == 8000
+        assert totals["shrink_chars_after"] == 3000
+
     def test_savings_pct_rounded_to_one_decimal(self) -> None:
         summary = ledger.aggregate([_entry(saved_usd=1.0, premium_usd=3.0, routed_usd=2.0)])
         # 1/3 * 100 = 33.333... -> 33.3

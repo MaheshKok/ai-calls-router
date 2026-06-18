@@ -22,6 +22,7 @@ _INT_FIELDS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
+_NONNEGATIVE_INT_FIELDS = ("shrink_chars_before", "shrink_chars_after")
 _FLOAT_FIELDS = ("routed_usd", "premium_usd", "saved_usd")
 
 LedgerEntry: TypeAlias = JsonObject
@@ -91,6 +92,8 @@ def _accumulate(bucket: Bucket, entry: LedgerEntry) -> None:
     bucket["requests"] += 1
     for key in _INT_FIELDS:
         bucket[key] += _json_int(entry.get(key, 0))
+    for key in _NONNEGATIVE_INT_FIELDS:
+        bucket[key] += max(_json_int(entry.get(key, 0)), 0)
     for key in _FLOAT_FIELDS:
         bucket[key] += _json_float(entry.get(key, 0.0))
 
@@ -103,6 +106,8 @@ def _empty_bucket() -> Bucket:
     """
     bucket: Bucket = {"requests": 0}
     for key in _INT_FIELDS:
+        bucket[key] = 0
+    for key in _NONNEGATIVE_INT_FIELDS:
         bucket[key] = 0
     for key in _FLOAT_FIELDS:
         bucket[key] = 0.0
