@@ -337,6 +337,38 @@ class TestRecordRequestPerRowShrink:
         assert row["shrink_chars_before"] == 77892
         assert row["shrink_chars_after"] == 77892
 
+    def test_snapshot_rows_are_detached_from_live_updates(self) -> None:
+        m = _Metrics()
+        m.record_request(
+            method="POST",
+            path="/v1/messages",
+            status=0,
+            tier="premium",
+            route="passthrough",
+            model="claude",
+            user_agent="",
+            client_ip="",
+            tool_names=[],
+            input_tokens=0,
+            output_tokens=0,
+            cache_read=0,
+            cache_creation=0,
+            duration=0,
+            request_id="req-1",
+        )
+        row = m.snapshot()["last_requests"][0]
+        m.update_request_usage(
+            request_id="req-1",
+            status=200,
+            input_tokens=7,
+            output_tokens=3,
+            cache_read=2,
+            cache_creation=1,
+            duration=0.5,
+        )
+        assert row["status"] == 0
+        assert row["input_tokens"] == 0
+
 
 class TestBootstrapPerRowShrink:
     """Bootstrap rebuilds recent-request rows from the ledger, and each row

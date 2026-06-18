@@ -18,9 +18,11 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
+from ai_calls_router._lib import config
 from ai_calls_router._lib.conversion import BackendResponse
 from ai_calls_router._lib.types import JsonObject
 from ai_calls_router.accounting import metrics as metrics_mod
+from ai_calls_router.proxy import server as server_mod
 from ai_calls_router.proxy.server import create_app
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as rc
@@ -94,6 +96,42 @@ class _FakeRoutedCall:
 @pytest.fixture
 def upstream() -> _Upstream:
     return _Upstream()
+
+
+def test_public_bind_host_warns_for_unauthenticated_dashboard(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-loopback bind stays allowed but visible in startup logs."""
+    caplog.set_level("WARNING", logger="acr.server")
+    server_mod._warn_if_public_bind(
+        config.ServerSettings(
+            host="0.0.0.0",
+            port=8747,
+            upstream="https://api.anthropic.com",
+        )
+    )
+    assert "not loopback" in caplog.text
+    assert "/metrics and /dashboard are unauthenticated" in caplog.text
+
+
+def test_loopback_bind_host_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    """Loopback-only binds are the expected default for local telemetry."""
+    caplog.set_level("WARNING", logger="acr.server")
+    server_mod._warn_if_public_bind(
+        config.ServerSettings(
+            host="127.0.0.1",
+            port=8747,
+            upstream="https://api.anthropic.com",
+        )
+    )
+    assert not caplog.records
+
+
+def test_loopback_host_classifier_handles_named_and_public_hosts() -> None:
+    """Named loopback is safe; arbitrary hostnames are treated as public."""
+    assert server_mod._is_loopback_host("localhost")
+    assert server_mod._is_loopback_host("::1")
+    assert not server_mod._is_loopback_host("public.example")
 
 
 @pytest.fixture

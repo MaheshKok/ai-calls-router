@@ -17,12 +17,15 @@ lives in the sibling synthesis module.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    import httpx
 
     from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
 
@@ -251,6 +254,7 @@ async def _serve_via_direct(
     body: JsonObject,
     tier_cfg: JsonObject,
     api_key: str,
+    client: httpx.AsyncClient | None = None,
 ) -> tuple[JsonObject | None, shrink_stats.ShrinkStats]:
     """Serve a turn directly on the provider's native Anthropic endpoint.
 
@@ -264,6 +268,7 @@ async def _serve_via_direct(
         body: Anthropic-format request body from the client.
         tier_cfg: Tier config with "model" and optional "max_tokens".
         api_key: The tier API key.
+        client: Optional shared HTTP client for direct provider calls.
 
     Returns:
         A pair of the routed response in Anthropic format (or None when the
@@ -274,7 +279,7 @@ async def _serve_via_direct(
     stats = shrink_stats.compute_shrink(path="none", before=body, after=body)
     routed_body = _prepare_routed_body(body, tier_cfg)
     response = await anthropic_direct.direct_call(
-        body=routed_body, tier_cfg=tier_cfg, api_key=api_key
+        body=routed_body, tier_cfg=tier_cfg, api_key=api_key, client=client
     )
     return response, stats
 
@@ -356,6 +361,7 @@ async def routed_call(
     agent: str = "",
     session_id: str = "",
     on_premium_guard: Callable[[list[str]], None] | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> BackendResponse | None:
     """Serve a request on the tier model, falling back to None on any failure.
 
@@ -384,6 +390,7 @@ async def routed_call(
         session_id: Session fingerprint hex string.
         on_premium_guard: Optional callback invoked with response tool names
             when the escalation guard rejects a routed response.
+        client: Optional shared HTTP client for direct provider calls.
 
     Returns:
         A BackendResponse with the masked Anthropic body, or None when the
@@ -398,7 +405,7 @@ async def routed_call(
         started = time.monotonic()
         if direct:
             anthropic_body, shrink = await _serve_via_direct(
-                body=body, tier_cfg=tier_cfg, api_key=api_key
+                body=body, tier_cfg=tier_cfg, api_key=api_key, client=client
             )
         else:
             anthropic_body, shrink = await _serve_via_litellm(
@@ -449,7 +456,8 @@ async def routed_call(
         _shrink_summary(shrink),
         elapsed,
     )
-    savings.record_savings_from_response(
+    await asyncio.to_thread(
+        savings.record_savings_from_response,
         premium_model=premium_model,
         routed_model=cast("str", model),
         response_body=anthropic_body,

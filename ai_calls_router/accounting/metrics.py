@@ -8,6 +8,7 @@ state the proxy carries (aside from the mtime config cache).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import threading
@@ -450,7 +451,7 @@ class _Metrics:
                         "ratio": round(compression.ratio, 4),
                         "est_tokens_saved": compression.est_tokens_saved(),
                     },
-                    "last_requests": self._last_requests[:50],
+                    "last_requests": copy.deepcopy(self._last_requests[:50]),
                 },
             )
 

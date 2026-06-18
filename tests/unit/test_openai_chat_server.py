@@ -85,8 +85,10 @@ class _FakeDirectCall:
         body: dict[str, object],
         tier_cfg: dict[str, object],
         api_key: str,
+        client: httpx.AsyncClient | None = None,
     ) -> dict[str, object] | None:
         """Record the direct call and return the canned response."""
+        del client
         self.calls.append({"body": body, "tier_cfg": tier_cfg, "api_key": api_key})
         return self.response
 

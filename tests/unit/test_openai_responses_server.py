@@ -102,8 +102,10 @@ class _FakeDirectCall:
         body: dict[str, object],
         tier_cfg: dict[str, object],
         api_key: str,
+        client: httpx.AsyncClient | None = None,
     ) -> dict[str, object] | None:
         """Record direct call input and return the canned response."""
+        del client
         self.calls.append({"body": body, "tier_cfg": tier_cfg, "api_key": api_key})
         return self.response
 
@@ -121,6 +123,7 @@ class _FakeCodexResponsesCall:
         tier_cfg: dict[str, object],
         credential: str,
         chatgpt_headers: list[tuple[str, str]] | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> dict[str, object]:
         """Record direct Codex call input and return a Responses body."""
         self.calls.append(
@@ -129,6 +132,7 @@ class _FakeCodexResponsesCall:
                 "tier_cfg": tier_cfg,
                 "credential": credential,
                 "chatgpt_headers": chatgpt_headers or [],
+                "client": client,
             }
         )
         return {
@@ -145,9 +149,9 @@ class _FakeCodexResponsesCall:
                 }
             ],
             "usage": {
-                "input_tokens": 1,
+                "input_tokens": 2,
                 "output_tokens": 2,
-                "total_tokens": 3,
+                "total_tokens": 4,
                 "input_tokens_details": {"cached_tokens": 1},
             },
         }
@@ -336,12 +340,22 @@ def test_codex_direct_route_uses_openai_api_key(
             json=_responses_tool_result_body(stream=False),
             headers={"authorization": "Bearer client-premium-secret"},
         )
+        snapshot = metrics_mod.get_metrics().snapshot()
 
     assert response.status_code == 200
     assert response.json()["model"] == "gpt-5-codex"
     assert response.json()["output"][0]["content"][0]["text"] == "codex routed"
     assert fake.calls[0]["credential"] == "openai-key"
+    assert isinstance(fake.calls[0]["client"], httpx.AsyncClient)
     assert upstream.requests == []
+    assert snapshot["routed_tokens"] == {
+        "input": 1,
+        "output": 2,
+        "cache_read": 1,
+        "cache_creation": 0,
+    }
+    assert snapshot["last_requests"][0]["input_tokens"] == 1
+    assert snapshot["last_requests"][0]["output_tokens"] == 2
 
 
 def test_codex_direct_route_uses_oauth_sentinel(
@@ -385,18 +399,23 @@ async def test_codex_direct_attempt_reports_yaml_model_and_usage(
     fake = _FakeCodexResponsesCall()
     monkeypatch.setattr("ai_calls_router.proxy.server.codex_direct.responses_call", fake)
 
-    attempt = await server_mod._try_codex_direct_route(
-        body=_responses_tool_result_body(stream=True),
-        tier="codex_code",
-        tier_cfg={"model": "codex/gpt-configured-from-yaml", "provider": "codex"},
-        credential="oauth",
-        request_headers={},
-        streaming=True,
-        requested_model="gpt-5.5",
-        names=["exec_command"],
-        premium_tools=[],
-        request_path="/v1/responses",
-    )
+    async with httpx.AsyncClient() as client:
+        attempt = await server_mod._try_codex_direct_route(
+            body=_responses_tool_result_body(stream=True),
+            tier="codex_code",
+            tier_cfg={"model": "codex/gpt-configured-from-yaml", "provider": "codex"},
+            credential="oauth",
+            request_headers={},
+            streaming=True,
+            requested_model="gpt-5.5",
+            names=["exec_command"],
+            premium_tools=[],
+            request_path="/v1/responses",
+            user_agent="codex-test",
+            agent="codex",
+            session="session",
+            client=client,
+        )
 
     assert attempt is not None
     assert attempt.model == "codex/gpt-configured-from-yaml"

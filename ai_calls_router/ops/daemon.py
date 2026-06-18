@@ -8,17 +8,23 @@ escalating to SIGKILL when the process ignores the polite request.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import logging
 import os
 import signal
 import subprocess
 import sys
 import time
+from typing import TYPE_CHECKING
 
 import httpx
 
 from ai_calls_router._lib import config
 from ai_calls_router.routing import decide as routing
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 logger = logging.getLogger("acr.daemon")
 
@@ -115,6 +121,26 @@ def _wait_healthy(url: str) -> bool:
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
+@contextlib.contextmanager
+def _start_lock() -> Generator[None, None, None]:
+    """Serialize daemon starts across racing CLI processes."""
+    config.home_dir().mkdir(parents=True, exist_ok=True)
+    lock_path = config.pid_path().with_suffix(f"{config.pid_path().suffix}.lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "w") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def _write_pid_atomic(pid: int) -> None:
+    """Replace the pidfile atomically."""
+    path = config.pid_path()
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(str(pid), encoding="utf-8")
+    tmp_path.chmod(0o600)
+    tmp_path.replace(path)
+
+
 def start() -> int:
     """Start the proxy daemon if it is not already running.
 
@@ -129,32 +155,33 @@ def start() -> int:
         DaemonError: When the spawned process never becomes healthy; the
             child is terminated and the pidfile removed before raising.
     """
-    existing = status()
-    if existing is not None:
-        return existing
-
     config.home_dir().mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-m", "ai_calls_router", "serve"]
-    # Raw stdout/stderr (uvicorn banner, pre-logging crashes) goes to the
-    # daemon capture file; structured per-request lines land in acr.log via
-    # the app's RotatingFileHandler.
-    with config.daemon_log_path().open("ab") as log_handle:
-        child = subprocess.Popen(
-            cmd,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    config.pid_path().write_text(str(child.pid), encoding="utf-8")
+    with _start_lock():
+        existing = status()
+        if existing is not None:
+            return existing
 
-    if not _wait_healthy(_health_url()):
-        child.terminate()
-        config.pid_path().unlink(missing_ok=True)
-        raise DaemonError(
-            "acr daemon did not become healthy; "
-            f"see {config.daemon_log_path()} and {config.log_path()}"
-        )
-    return child.pid
+        cmd = [sys.executable, "-m", "ai_calls_router", "serve"]
+        # Raw stdout/stderr (uvicorn banner, pre-logging crashes) goes to the
+        # daemon capture file; structured per-request lines land in acr.log via
+        # the app's RotatingFileHandler.
+        with config.daemon_log_path().open("ab") as log_handle:
+            child = subprocess.Popen(
+                cmd,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        _write_pid_atomic(child.pid)
+
+        if not _wait_healthy(_health_url()):
+            child.terminate()
+            config.pid_path().unlink(missing_ok=True)
+            raise DaemonError(
+                "acr daemon did not become healthy; "
+                f"see {config.daemon_log_path()} and {config.log_path()}"
+            )
+        return child.pid
 
 
 def stop() -> bool:

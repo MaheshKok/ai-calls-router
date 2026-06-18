@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import logging
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -84,8 +85,12 @@ def router_map(routes: JsonObject) -> JsonObject | None:
 
 def _validate_provider_payload(group: str, payload: JsonObject) -> None:
     """Validate one provider file payload."""
-    if not isinstance(payload.get("upstream"), str) or not payload.get("upstream"):
+    upstream = payload.get("upstream")
+    if not isinstance(upstream, str) or not upstream:
         raise ProviderConfigError("provider config requires upstream", group=group)
+    parsed_upstream = urlsplit(upstream)
+    if parsed_upstream.scheme != "https" or not parsed_upstream.hostname:
+        raise ProviderConfigError("provider config upstream must be an https URL", group=group)
     endpoints = payload.get("endpoints")
     if not isinstance(endpoints, list) or not all(isinstance(item, str) for item in endpoints):
         raise ProviderConfigError("provider config requires endpoints", group=group)

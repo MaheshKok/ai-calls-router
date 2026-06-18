@@ -83,6 +83,11 @@ class TestFilterRequestHeaders:
         assert filtered["anthropic-version"] == "2023-06-01"
         assert filtered["content-type"] == "application/json"
 
+    def test_acr_control_headers_dropped(self) -> None:
+        filtered = pt.filter_request_headers({"x-acr-agent": "codex", "authorization": "Bearer c"})
+        assert "x-acr-agent" not in {key.lower(): value for key, value in filtered.items()}
+        assert filtered["authorization"] == "Bearer c"
+
 
 class TestForward:
     async def test_forwards_method_path_query_and_body(self) -> None:
@@ -260,6 +265,7 @@ class TestForward:
             )
         assert response.status_code == 502
         assert b'"type": "error"' in response.body
+        assert b"connection refused" not in response.body
 
 
 class _FakeUpstreamResponse:

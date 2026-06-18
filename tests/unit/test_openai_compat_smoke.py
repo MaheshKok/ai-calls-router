@@ -19,7 +19,6 @@ from starlette.testclient import TestClient
 from ai_calls_router._lib import config
 from ai_calls_router.accounting import metrics as metrics_mod
 from ai_calls_router.proxy.server import create_app
-from ai_calls_router.routing import direct as direct_mod
 from ai_calls_router.routing.adapters.base import AGENT_GROUP_ENDPOINTS, AGENT_GROUP_WIRES
 from ai_calls_router.routing.agent_defaults import (
     AGENT_DEFAULT_PREMIUM_TOOLS,
@@ -91,7 +90,18 @@ def client(
     monkeypatch.setenv("ACR_SAVINGS_LEDGER", str(tmp_path / "savings.jsonl"))
     _write_global_config(tmp_path)
     _write_provider_configs()
-    app = create_app(transport=httpx.MockTransport(upstream.handler))
+
+    app_holder: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        app = app_holder["app"]
+        direct_provider = getattr(app.state, "direct_provider", None)
+        if request.url.host == "api.deepseek.com" and isinstance(direct_provider, _DirectProvider):
+            return direct_provider.handler(request)
+        return upstream.handler(request)
+
+    app = create_app(transport=httpx.MockTransport(_handler))
+    app_holder["app"] = app
     with TestClient(app) as test_client:
         yield test_client
     metrics_mod._metrics_singleton = None
@@ -294,7 +304,8 @@ def _exercise_group(
 ) -> None:
     """Drive one group through routed direct and premium passthrough paths."""
     direct_provider = _DirectProvider()
-    monkeypatch.setattr(direct_mod.httpx, "AsyncClient", direct_provider.client)
+    del monkeypatch
+    client.app.state.direct_provider = direct_provider
 
     routed_response = _post_json_bytes(client=client, path=path, body=cheap_body)
     _assert_routed_direct(

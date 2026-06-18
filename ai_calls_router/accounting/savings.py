@@ -287,6 +287,7 @@ def record_routing_savings(
             ledger.parent.mkdir(parents=True, exist_ok=True)
             with ledger.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            ledger.chmod(0o600)
         get_metrics().add_savings(
             routed_usd=routed_usd_value,
             premium_usd=premium_usd_value,

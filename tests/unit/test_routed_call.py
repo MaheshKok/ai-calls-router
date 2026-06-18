@@ -535,8 +535,13 @@ def _call_direct(
     captured: dict[str, object] = {}
 
     async def _fake_direct(
-        *, body: dict[str, object], tier_cfg: dict[str, object], api_key: str
+        *,
+        body: dict[str, object],
+        tier_cfg: dict[str, object],
+        api_key: str,
+        client: object | None = None,
     ) -> object:
+        del client
         captured["body"] = body
         captured["tier_cfg"] = tier_cfg
         captured["api_key"] = api_key

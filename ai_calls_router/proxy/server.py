@@ -11,9 +11,11 @@ other path proxies unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import functools
 import importlib.resources
+import ipaddress
 import json
 import logging
 import os
@@ -62,6 +64,7 @@ class _RouteAttempt:
     tier: str = "premium"
     reason: str = "passthrough"
     model: str = ""
+    premium_model: str = ""
     tool_names: list[str] = field(default_factory=lambda: [])
     input_tokens: int = 0
     output_tokens: int = 0
@@ -72,12 +75,33 @@ class _RouteAttempt:
 
 @dataclass
 class _RoutesCache:
-    signature: tuple[tuple[str, float], ...] | None = None
+    signature: tuple[tuple[str, int, int, int], ...] | None = None
     routes: JsonObject | None = None
 
 
 _ROUTES_CACHE_LOCK = threading.Lock()
 _ROUTES_CACHE = _RoutesCache()
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether a configured bind host is loopback-only."""
+    normalized = host.strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _warn_if_public_bind(settings: config.ServerSettings) -> None:
+    """Warn when unauthenticated local telemetry is bound beyond loopback."""
+    if _is_loopback_host(settings.host):
+        return
+    logger.warning(
+        "acr: server.host=%s is not loopback; /metrics and /dashboard are unauthenticated",
+        settings.host,
+    )
 
 
 def _request_summary(body: JsonObject) -> str:
@@ -109,30 +133,50 @@ def _codex_response_usage(response_body: JsonObject) -> tuple[int, int, int, int
     details = usage.get("input_tokens_details")
     if isinstance(details, dict):
         cache_read = _usage_int(details.get("cached_tokens"))
+    total_input = _usage_int(usage.get("input_tokens"))
     return (
-        _usage_int(usage.get("input_tokens")),
+        max(total_input - cache_read, 0),
         _usage_int(usage.get("output_tokens")),
         cache_read,
         0,
     )
 
 
+def _codex_savings_body(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
+) -> JsonObject:
+    """Build an Anthropic-shaped usage block for shared savings accounting."""
+    return {
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read_tokens,
+            "cache_creation_input_tokens": cache_creation_tokens,
+        }
+    }
+
+
 PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
 
 
-def _mtime_or_zero(path: Path) -> float:
-    """Return a config file mtime, treating missing files as absent."""
+def _file_signature(path: Path) -> tuple[str, int, int, int]:
+    """Return a config file signature, treating missing files as absent."""
     try:
-        return path.stat().st_mtime
+        stat = path.stat()
     except OSError:
-        return 0.0
+        return str(path), 0, 0, 0
+    return str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino
 
 
-def _assembled_routes_signature() -> tuple[tuple[str, float], ...]:
+def _assembled_routes_signature() -> tuple[tuple[str, int, int, int], ...]:
     """Build the mtime signature for the global and provider config files."""
     paths = [config.config_path()]
     paths.extend(config.provider_config_path(group) for group in sorted(KNOWN_GROUPS))
-    return tuple((str(path), _mtime_or_zero(path)) for path in paths)
+    return tuple(_file_signature(path) for path in paths)
 
 
 def _assemble_routes_fail_open(
@@ -393,6 +437,45 @@ def _routed_fallback_attempt(
     return _RouteAttempt(tier=tier, reason=reason, model=requested_model, tool_names=names)
 
 
+def _record_codex_http_route_attempt(
+    *,
+    request: Request,
+    attempt: _RouteAttempt,
+    agent: str,
+    session: str | None,
+) -> None:
+    """Record successful HTTP Codex direct routing for the dashboard."""
+    if not attempt.premium_model:
+        return
+    m = metrics.get_metrics()
+    m.add_routed_tokens(
+        input_tokens=attempt.input_tokens,
+        output_tokens=attempt.output_tokens,
+        cache_read=attempt.cache_read_tokens,
+        cache_creation=attempt.cache_creation_tokens,
+    )
+    m.record_request(
+        method="POST",
+        path=request.url.path,
+        status=200,
+        tier=attempt.tier,
+        route="direct",
+        model=attempt.model,
+        user_agent=_user_agent(request),
+        client_ip=_client_ip(request),
+        tool_names=attempt.tool_names,
+        input_tokens=attempt.input_tokens,
+        output_tokens=attempt.output_tokens,
+        cache_read=attempt.cache_read_tokens,
+        cache_creation=attempt.cache_creation_tokens,
+        duration=attempt.duration,
+        premium_model=attempt.premium_model,
+        agent=agent,
+        session_id=session or "",
+        request_id=logging_setup.current_request_id(),
+    )
+
+
 async def _try_codex_direct_route(
     *,
     body: JsonObject,
@@ -405,6 +488,10 @@ async def _try_codex_direct_route(
     names: list[str],
     premium_tools: list[str],
     request_path: str,
+    user_agent: str,
+    agent: str,
+    session: str,
+    client: httpx.AsyncClient | None = None,
 ) -> _RouteAttempt | None:
     """Serve a Codex Responses request through the direct Codex provider path."""
     if request_path != "/v1/responses":
@@ -421,6 +508,7 @@ async def _try_codex_direct_route(
         tier_cfg=tier_cfg,
         credential=credential,
         chatgpt_headers=websocket_passthrough.codex_chatgpt_headers(request_headers),
+        client=client,
     )
     duration = time.monotonic() - started
     if response_body is None:
@@ -441,6 +529,23 @@ async def _try_codex_direct_route(
     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens = _codex_response_usage(
         response_body
     )
+    await asyncio.to_thread(
+        savings.record_savings_from_response,
+        premium_model=requested_model,
+        routed_model=tier_model,
+        response_body=_codex_savings_body(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        ),
+        tier_cfg=tier_cfg,
+        tier_name=tier,
+        tool_names=names,
+        user_agent=user_agent,
+        agent=agent,
+        session_id=session,
+    )
     client_body = {**response_body, "model": requested_model} if requested_model else response_body
     response = (
         Response(
@@ -455,6 +560,7 @@ async def _try_codex_direct_route(
         tier=tier,
         reason="routed",
         model=tier_model,
+        premium_model=requested_model,
         tool_names=names,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -471,6 +577,7 @@ async def _try_route(
     group: str,
     request_path: str,
     request_headers: Mapping[str, str],
+    client: httpx.AsyncClient | None = None,
     user_agent: str = "",
     agent: str = "",
     session: str | None = None,
@@ -486,6 +593,7 @@ async def _try_route(
         group: Agent group to use for routing.
         request_path: Client-facing request path for logging and metrics.
         request_headers: Client request headers for Codex OAuth detection.
+        client: Optional shared HTTP client for routed provider calls.
         body_bytes: Raw request body bytes.
         user_agent: Raw User-Agent header from the client.
         agent: Identified agent label.
@@ -532,6 +640,10 @@ async def _try_route(
             names=names,
             premium_tools=premium_tools,
             request_path=request_path,
+            user_agent=user_agent,
+            agent=agent,
+            session=session or "",
+            client=client,
         )
         if codex_attempt is not None:
             return codex_attempt
@@ -553,6 +665,7 @@ async def _try_route(
             agent=group,
             session_id=session or "",
             on_premium_guard=_mark_response_guard,
+            client=client,
         )
         if result is None:
             return _routed_fallback_attempt(
@@ -779,12 +892,19 @@ async def _handle_routed_request(request: Request) -> Response:
         group=group,
         request_path=path,
         request_headers=request.headers,
+        client=request.app.state.client,
         user_agent=_user_agent(request),
         agent=agent,
         session=session,
     )
     if attempt.response is not None:
         m.incr_routed()
+        _record_codex_http_route_attempt(
+            request=request,
+            attempt=attempt,
+            agent=agent,
+            session=session,
+        )
         logger.info("outcome=routed %s agent=%s tier=%s", path, agent, attempt.tier)
         return attempt.response
 
@@ -867,6 +987,10 @@ async def _lifespan(
         bootstrap.ensure_provider_configs()
     except Exception as exc:
         logger.warning("acr: provider config bootstrap failed (%s); continuing", exc, exc_info=True)
+    try:
+        _warn_if_public_bind(config.server_settings(routing.load_routes()))
+    except Exception as exc:
+        logger.warning("acr: public bind warning check failed (%s); continuing", exc, exc_info=True)
     mtr = metrics.get_metrics()
     mtr.bootstrap(ledger_path=config.ledger_path(), max_recent=100)
     app.state.client = httpx.AsyncClient(transport=transport, timeout=passthrough.UPSTREAM_TIMEOUT)

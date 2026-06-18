@@ -60,7 +60,7 @@ def filter_request_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {
         key: value
         for key, value in headers.items()
-        if key.lower() not in HOP_BY_HOP_REQUEST_HEADERS
+        if key.lower() not in HOP_BY_HOP_REQUEST_HEADERS and not key.lower().startswith("x-acr-")
     }
 
 
@@ -239,10 +239,8 @@ def _bad_gateway(exc: Exception) -> Response:
     Returns:
         A JSON 502 response the Anthropic SDK can parse.
     """
-    body = {
-        "type": "error",
-        "error": {"type": "api_error", "message": f"acr upstream unreachable: {exc}"},
-    }
+    del exc
+    body = {"type": "error", "error": {"type": "api_error", "message": "acr upstream unreachable"}}
     return Response(json.dumps(body), status_code=502, media_type="application/json")
 
 

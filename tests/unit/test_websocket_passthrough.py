@@ -6,7 +6,7 @@ import asyncio
 import base64
 import json
 from collections.abc import Mapping
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from starlette.applications import Starlette
@@ -19,6 +19,9 @@ from ai_calls_router._lib.types import JsonObject
 from ai_calls_router.accounting import metrics
 from ai_calls_router.proxy import server, websocket_passthrough
 from ai_calls_router.routing.adapters.base import ClientAdapter
+
+if TYPE_CHECKING:
+    from websockets.asyncio.client import ClientConnection
 
 
 class _FakeUpstream:
@@ -61,6 +64,23 @@ class _SendOnlyWebSocket:
 
     async def send_text(self, message: str) -> None:
         self.sent.append(message)
+
+
+class _HangingWebSocket:
+    async def iter_text(self) -> object:
+        while True:
+            await asyncio.sleep(60)
+            yield "never"
+
+
+class _ClosableUpstream(_FakeUpstream):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+        await super().close()
 
 
 def test_response_create_to_http_body_unwraps_envelope_without_mutating() -> None:
@@ -283,6 +303,27 @@ async def test_try_send_routed_response_declines_without_routed_messages() -> No
         cast("WebSocket", websocket), "{}", _decline, {}, call_items
     )
     assert websocket.sent == []
+
+
+@pytest.mark.asyncio
+async def test_relay_awaits_cancelled_client_task_and_closes_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _finish_immediately(*args: object) -> None:
+        del args
+
+    upstream = _ClosableUpstream()
+    monkeypatch.setattr(websocket_passthrough, "_upstream_to_client", _finish_immediately)
+
+    await websocket_passthrough._relay_both(
+        cast("WebSocket", _HangingWebSocket()),
+        cast("ClientConnection", upstream),
+        route_frame=None,
+        headers={},
+        call_items={},
+    )
+
+    assert upstream.closed
 
 
 def test_cached_call_helpers_ignore_non_matching_shapes() -> None:

@@ -172,13 +172,15 @@ async def _relay_both(
         _client_to_upstream(websocket, upstream, route_frame, headers, call_items)
     )
     upstream_task = asyncio.create_task(_upstream_to_client(websocket, upstream, call_items))
-    done, pending = await asyncio.wait(
+    _done, pending = await asyncio.wait(
         {client_task, upstream_task}, return_when=asyncio.FIRST_COMPLETED
     )
     for task in pending:
         task.cancel()
-    for task in done:
-        task.result()
+    results = await asyncio.gather(client_task, upstream_task, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+            raise result
 
 
 async def _client_to_upstream(
@@ -196,7 +198,7 @@ async def _client_to_upstream(
                 continue
             _remember_call_items(message, call_items)
             await upstream.send(message)
-    except WebSocketDisconnect:
+    except (ConnectionClosed, RuntimeError, WebSocketDisconnect):
         return
     finally:
         with contextlib.suppress(Exception):
@@ -213,7 +215,7 @@ async def _upstream_to_client(
                 await websocket.send_text(message)
             else:
                 await websocket.send_bytes(message)
-    except ConnectionClosed:
+    except (ConnectionClosed, RuntimeError, WebSocketDisconnect):
         return
 
 
