@@ -142,20 +142,16 @@ def _prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
     return routed
 
 
-def _usage_int(usage: JsonObject, key: str) -> int:
-    """Return a non-negative integer usage counter from a response body."""
-    return jsonnum.int_value(usage.get(key, 0), minimum=0)
-
-
 def _usage_summary(response_body: JsonObject) -> str:
     """Return a compact token/cache summary for routing logs."""
     raw_usage = response_body.get("usage")
     usage = raw_usage if isinstance(raw_usage, dict) else {}
+    input_tokens = jsonnum.int_value(usage.get("input_tokens", 0), minimum=0)
+    output_tokens = jsonnum.int_value(usage.get("output_tokens", 0), minimum=0)
+    cache_read = jsonnum.int_value(usage.get("cache_read_input_tokens", 0), minimum=0)
+    cache_creation = jsonnum.int_value(usage.get("cache_creation_input_tokens", 0), minimum=0)
     return (
-        f"in={_usage_int(usage, 'input_tokens')} "
-        f"out={_usage_int(usage, 'output_tokens')} "
-        f"cache_hit={_usage_int(usage, 'cache_read_input_tokens')} "
-        f"cache_miss={_usage_int(usage, 'cache_creation_input_tokens')}"
+        f"in={input_tokens} out={output_tokens} cache_hit={cache_read} cache_miss={cache_creation}"
     )
 
 

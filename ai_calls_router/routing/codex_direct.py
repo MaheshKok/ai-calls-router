@@ -117,11 +117,6 @@ def _request_target(
     return None
 
 
-def _usage_int(value: JsonValue) -> int:
-    """Coerce provider usage values to non-negative integers."""
-    return jsonnum.int_value(value, minimum=0)
-
-
 def _response_usage(response_body: JsonObject) -> tuple[int, int, int, int]:
     """Return Responses usage as input, output, cache-read, cache-creation tokens."""
     usage = response_body.get("usage")
@@ -130,11 +125,11 @@ def _response_usage(response_body: JsonObject) -> tuple[int, int, int, int]:
     cache_read = 0
     details = usage.get("input_tokens_details")
     if isinstance(details, dict):
-        cache_read = _usage_int(details.get("cached_tokens"))
-    total_input = _usage_int(usage.get("input_tokens"))
+        cache_read = jsonnum.int_value(details.get("cached_tokens"), minimum=0)
+    total_input = jsonnum.int_value(usage.get("input_tokens"), minimum=0)
     return (
         max(total_input - cache_read, 0),
-        _usage_int(usage.get("output_tokens")),
+        jsonnum.int_value(usage.get("output_tokens"), minimum=0),
         cache_read,
         0,
     )

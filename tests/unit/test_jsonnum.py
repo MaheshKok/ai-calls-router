@@ -8,23 +8,27 @@ from ai_calls_router._lib import jsonnum
 from ai_calls_router._lib.types import JsonValue
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
+def test_jsonnum_coerce_boundaries() -> None:
+    usage: dict[str, JsonValue] = {}
+    very_large = 10**30
+    cases: list[tuple[JsonValue, int]] = [
         (None, 0),
+        (usage.get("input_tokens", 0), 0),
+        ("0", 0),
         ("3", 3),
         (3.0, 3),
-        ("x", 0),
         (-4, -4),
+        (very_large, very_large),
+        ("x", 0),
         (True, 0),
         ({}, 0),
-    ],
-)
-def test_int_value_defaults(value: JsonValue, expected: int) -> None:
-    assert jsonnum.int_value(value) == expected
+    ]
+
+    for value, expected in cases:
+        assert jsonnum.int_value(value) == expected
 
 
-def test_int_value_missing_key_and_minimum() -> None:
+def test_int_value_minimum_clamps_negative() -> None:
     usage: dict[str, JsonValue] = {}
     assert jsonnum.int_value(usage.get("input_tokens", 0), minimum=0) == 0
     assert jsonnum.int_value(-4, minimum=0) == 0

@@ -80,10 +80,6 @@ def filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def _usage_int(usage: JsonObject, key: str) -> int:
-    return jsonnum.int_value(usage.get(key, 0), minimum=0)
-
-
 class _UsageCapture:
     """Capture Anthropic usage metadata while preserving relayed bytes."""
 
@@ -160,7 +156,7 @@ class _UsageCapture:
     def _apply_usage(self, usage: JsonObject) -> None:
         for key in _USAGE_KEYS:
             if key in usage:
-                self._usage[key] = _usage_int(usage, key)
+                self._usage[key] = jsonnum.int_value(usage.get(key, 0), minimum=0)
 
 
 def _finish_capture(
