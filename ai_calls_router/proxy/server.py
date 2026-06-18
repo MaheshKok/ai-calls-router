@@ -11,7 +11,6 @@ other path proxies unchanged.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import functools
 import importlib.resources
@@ -110,54 +109,6 @@ def _request_summary(body: JsonObject) -> str:
     model = body.get("model")
     stream = body.get("stream")
     return f"model={model!r} stream={stream!r} messages={msg_count}"
-
-
-def _usage_int(value: JsonValue) -> int:
-    """Coerce provider usage values to non-negative integers."""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int | float | str):
-        try:
-            return max(int(value), 0)
-        except (TypeError, ValueError):
-            return 0
-    return 0
-
-
-def _codex_response_usage(response_body: JsonObject) -> tuple[int, int, int, int]:
-    """Return Responses usage as input, output, cache-read, cache-creation tokens."""
-    usage = response_body.get("usage")
-    if not isinstance(usage, dict):
-        return 0, 0, 0, 0
-    cache_read = 0
-    details = usage.get("input_tokens_details")
-    if isinstance(details, dict):
-        cache_read = _usage_int(details.get("cached_tokens"))
-    total_input = _usage_int(usage.get("input_tokens"))
-    return (
-        max(total_input - cache_read, 0),
-        _usage_int(usage.get("output_tokens")),
-        cache_read,
-        0,
-    )
-
-
-def _codex_savings_body(
-    *,
-    input_tokens: int,
-    output_tokens: int,
-    cache_read_tokens: int,
-    cache_creation_tokens: int,
-) -> JsonObject:
-    """Build an Anthropic-shaped usage block for shared savings accounting."""
-    return {
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_input_tokens": cache_read_tokens,
-            "cache_creation_input_tokens": cache_creation_tokens,
-        }
-    }
 
 
 PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
@@ -361,11 +312,11 @@ def _resolve_tier_config(
     names: list[str],
     *,
     group: str,
-) -> tuple[str, JsonObject | None, str | None, JsonObject]:
+) -> tuple[str, JsonObject | None, routing.TierCredential | None, JsonObject]:
     """Resolve the tier, its config, and API key from loaded routes.
 
-    Returns (tier_name, tier_cfg, api_key, raw_routes). When tier_cfg or
-    api_key is None the caller must pass through to premium.
+    Returns (tier_name, tier_cfg, credential, raw_routes). When tier_cfg or
+    credential is None the caller must pass through to premium.
     """
     routes = _load_assembled_routes()
     tier = routing.tier_for_tools(names, routes, group=group)
@@ -377,11 +328,11 @@ def _resolve_tier_config(
         return tier, None, None, routes
     settings_value = routes.get("settings")
     settings_cfg = settings_value if isinstance(settings_value, dict) else {}
-    api_key = routing.resolve_tier_credential(tier_cfg, settings_cfg)
-    if not api_key:
+    credential = routing.resolve_tier_credential(tier_cfg, settings_cfg)
+    if credential is None:
         logger.info("acr: tier=%s has no API key; passing through", tier)
         return tier, None, None, routes
-    return tier, tier_cfg, api_key, routes
+    return tier, tier_cfg, credential, routes
 
 
 def _premium_guard_attempt(
@@ -437,51 +388,12 @@ def _routed_fallback_attempt(
     return _RouteAttempt(tier=tier, reason=reason, model=requested_model, tool_names=names)
 
 
-def _record_codex_http_route_attempt(
-    *,
-    request: Request,
-    attempt: _RouteAttempt,
-    agent: str,
-    session: str | None,
-) -> None:
-    """Record successful HTTP Codex direct routing for the dashboard."""
-    if not attempt.premium_model:
-        return
-    m = metrics.get_metrics()
-    m.add_routed_tokens(
-        input_tokens=attempt.input_tokens,
-        output_tokens=attempt.output_tokens,
-        cache_read=attempt.cache_read_tokens,
-        cache_creation=attempt.cache_creation_tokens,
-    )
-    m.record_request(
-        method="POST",
-        path=request.url.path,
-        status=200,
-        tier=attempt.tier,
-        route="direct",
-        model=attempt.model,
-        user_agent=_user_agent(request),
-        client_ip=_client_ip(request),
-        tool_names=attempt.tool_names,
-        input_tokens=attempt.input_tokens,
-        output_tokens=attempt.output_tokens,
-        cache_read=attempt.cache_read_tokens,
-        cache_creation=attempt.cache_creation_tokens,
-        duration=attempt.duration,
-        premium_model=attempt.premium_model,
-        agent=agent,
-        session_id=session or "",
-        request_id=logging_setup.current_request_id(),
-    )
-
-
 async def _try_codex_direct_route(
     *,
     body: JsonObject,
     tier: str,
     tier_cfg: JsonObject,
-    credential: str,
+    credential: routing.TierCredential,
     request_headers: Mapping[str, str],
     streaming: bool,
     requested_model: str,
@@ -503,22 +415,26 @@ async def _try_codex_direct_route(
     except ConfigSchemaError:
         return None
     started = time.monotonic()
-    response_body = await codex_direct.responses_call(
+    result = await codex_direct.responses_call(
         body=body,
         tier_cfg=tier_cfg,
-        credential=credential,
+        credential=credential.value,
+        auth_mode=credential.auth_mode,
         chatgpt_headers=websocket_passthrough.codex_chatgpt_headers(request_headers),
         client=client,
     )
     duration = time.monotonic() - started
-    if response_body is None:
+    if result is None:
         return _routed_fallback_attempt(
             response_guard_tools=[],
             requested_model=requested_model,
             names=names,
             tier=tier,
         )
-    response_guard_tools = codex_direct.response_escalates(response_body, premium_tools)
+    response_body, usage_values = result
+    response_guard_tools = routed_call.premium_tool_names_from_responses(
+        response_body, {}, premium_tools=premium_tools
+    )
     if response_guard_tools:
         return _routed_fallback_attempt(
             response_guard_tools=response_guard_tools,
@@ -526,25 +442,28 @@ async def _try_codex_direct_route(
             names=names,
             tier=tier,
         )
-    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens = _codex_response_usage(
-        response_body
+    usage = routed_call.RouteUsage(
+        input_tokens=usage_values[0],
+        output_tokens=usage_values[1],
+        cache_read_tokens=usage_values[2],
+        cache_creation_tokens=usage_values[3],
     )
-    await asyncio.to_thread(
-        savings.record_savings_from_response,
-        premium_model=requested_model,
-        routed_model=tier_model,
-        response_body=_codex_savings_body(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read_tokens,
-            cache_creation_tokens=cache_creation_tokens,
-        ),
-        tier_cfg=tier_cfg,
-        tier_name=tier,
-        tool_names=names,
-        user_agent=user_agent,
-        agent=agent,
-        session_id=session,
+    await routed_call.record_route_outcome(
+        routed_call.RouteOutcome(
+            premium_model=requested_model,
+            routed_model=tier_model,
+            tier_name=tier,
+            tier_cfg=tier_cfg,
+            tool_names=names,
+            usage=usage,
+            request_path=request_path,
+            route="direct",
+            user_agent=user_agent,
+            agent=agent,
+            session_id=session,
+            elapsed=duration,
+            request_id=logging_setup.current_request_id(),
+        )
     )
     client_body = {**response_body, "model": requested_model} if requested_model else response_body
     response = (
@@ -562,10 +481,10 @@ async def _try_codex_direct_route(
         model=tier_model,
         premium_model=requested_model,
         tool_names=names,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_creation_tokens=cache_creation_tokens,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_creation_tokens=usage.cache_creation_tokens,
         duration=duration,
     )
 
@@ -614,14 +533,14 @@ async def _try_route(
             logger.debug("no pending tool results; passing through")
             return _RouteAttempt(reason="no_pending_tools", model=requested_model)
         logger.debug("pending tools=%s", names)
-        tier, tier_cfg, api_key, routes = _resolve_tier_config(names, group=group)
+        tier, tier_cfg, credential, routes = _resolve_tier_config(names, group=group)
         logger.debug("resolved tier=%s routable=%s", tier, tier_cfg is not None)
         if tier_cfg is None:
             reason = "request_premium_guard" if tier == "premium" else "tier_unavailable"
             return _premium_guard_attempt(
                 reason=reason, requested_model=requested_model, names=names, tier=tier
             )
-        if api_key is None:
+        if credential is None:
             return _premium_guard_attempt(
                 reason="tier_unavailable", requested_model=requested_model, names=names, tier=tier
             )
@@ -633,7 +552,7 @@ async def _try_route(
             body=body,
             tier=tier,
             tier_cfg=tier_cfg,
-            credential=api_key,
+            credential=credential,
             request_headers=request_headers,
             streaming=streaming,
             requested_model=requested_model,
@@ -656,7 +575,7 @@ async def _try_route(
             body=anthropic_body,
             tier_name=tier,
             tier_cfg=tier_cfg,
-            api_key=api_key,
+            api_key=credential.value,
             settings=settings_cfg,
             tool_names=names,
             premium_tools=premium_tools,
@@ -899,12 +818,6 @@ async def _handle_routed_request(request: Request) -> Response:
     )
     if attempt.response is not None:
         m.incr_routed()
-        _record_codex_http_route_attempt(
-            request=request,
-            attempt=attempt,
-            agent=agent,
-            session=session,
-        )
         logger.info("outcome=routed %s agent=%s tier=%s", path, agent, attempt.tier)
         return attempt.response
 

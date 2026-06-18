@@ -13,7 +13,9 @@ from starlette.websockets import WebSocketDisconnect
 from ai_calls_router.accounting import metrics as metrics_mod
 from ai_calls_router.proxy import server as server_mod
 from ai_calls_router.proxy.server import create_app
+from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as rc
+from tests.acr_testkit import read_ledger
 
 CONFIG_YAML = """
 server:
@@ -60,6 +62,40 @@ agents:
 CODEX_DIRECT_OAUTH_CONFIG_YAML = CODEX_DIRECT_CONFIG_YAML.replace(
     "    max_tokens: 1000\n",
     "    key_env: oauth\n    max_tokens: 1000\n",
+)
+
+PRICED_PREMIUM_MODEL = "deepseek/acr-test-premium"
+
+CODEX_DIRECT_PRICED_CONFIG_YAML = """
+server:
+  port: 8747
+settings:
+  tier_precedence: [premium, fast]
+tiers:
+  fast:
+    model: codex/acr-test-cheap
+    provider: codex
+    input_cost_per_1m: 1.0
+    input_cached_cost_per_1m: 0.5
+    output_cost_per_1m: 2.0
+  premium_stand_in:
+    model: deepseek/acr-test-premium
+    input_cost_per_1m: 10.0
+    output_cost_per_1m: 20.0
+agents:
+  codex:
+    upstream: https://api.anthropic.com
+    premium:
+      provider: anthropic
+    premium_tools: [apply_patch]
+    tools:
+      exec_command: fast
+      apply_patch: premium
+"""
+
+DEEPSEEK_RESPONSES_PRICED_CONFIG_YAML = CODEX_DIRECT_PRICED_CONFIG_YAML.replace(
+    "    model: codex/acr-test-cheap\n    provider: codex\n",
+    "    model: deepseek/acr-test-cheap\n    key_env: ACR_TEST_KEY\n",
 )
 
 ROUTED_TEXT_BODY: dict[str, object] = {
@@ -122,20 +158,22 @@ class _FakeCodexResponsesCall:
         body: dict[str, object],
         tier_cfg: dict[str, object],
         credential: str,
+        auth_mode: str = "api_key",
         chatgpt_headers: list[tuple[str, str]] | None = None,
         client: httpx.AsyncClient | None = None,
-    ) -> dict[str, object]:
+    ) -> tuple[dict[str, object], tuple[int, int, int, int]]:
         """Record direct Codex call input and return a Responses body."""
         self.calls.append(
             {
                 "body": body,
                 "tier_cfg": tier_cfg,
                 "credential": credential,
+                "auth_mode": auth_mode,
                 "chatgpt_headers": chatgpt_headers or [],
                 "client": client,
             }
         )
-        return {
+        response = {
             "id": "resp_codex_direct",
             "object": "response",
             "created_at": 0,
@@ -155,6 +193,14 @@ class _FakeCodexResponsesCall:
                 "input_tokens_details": {"cached_tokens": 1},
             },
         }
+        return response, (1, 2, 1, 0)
+
+
+class _FailingCodexResponsesCall:
+    """Codex direct call stand-in that declines routing."""
+
+    async def __call__(self, **_: object) -> None:
+        """Return None so the server falls back to passthrough."""
 
 
 @pytest.fixture
@@ -220,6 +266,13 @@ def _responses_tool_result_body(*, stream: bool = True) -> dict[str, object]:
             {"type": "function", "name": "exec_command", "parameters": {"type": "object"}},
         ],
     }
+
+
+def _responses_tool_result_body_for_model(model: str, *, stream: bool = False) -> dict[str, object]:
+    """Build a Responses tool-result body with a chosen premium model."""
+    body = _responses_tool_result_body(stream=stream)
+    body["model"] = model
+    return body
 
 
 def test_responses_streaming_tool_result_routes_to_deepseek_direct(
@@ -358,6 +411,110 @@ def test_codex_direct_route_uses_openai_api_key(
     assert snapshot["last_requests"][0]["output_tokens"] == 2
 
 
+def test_routed_codex_call_records_savings_and_tokens(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream: _Upstream,
+) -> None:
+    fake = _FakeCodexResponsesCall()
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setattr("ai_calls_router.proxy.server.codex_direct.responses_call", fake)
+    with _client_for_config(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        upstream=upstream,
+        config_yaml=CODEX_DIRECT_PRICED_CONFIG_YAML,
+    ) as test_client:
+        response = test_client.post(
+            "/v1/responses",
+            json=_responses_tool_result_body_for_model(PRICED_PREMIUM_MODEL),
+        )
+        snapshot = metrics_mod.get_metrics().snapshot()
+
+    entries = read_ledger(tmp_path)
+    assert response.status_code == 200
+    assert upstream.requests == []
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["premium_model"] == PRICED_PREMIUM_MODEL
+    assert entry["routed_model"] == "codex/acr-test-cheap"
+    assert entry["input_tokens"] == 2
+    assert entry["output_tokens"] == 2
+    assert entry["cache_read_input_tokens"] == 1
+    assert entry["cache_creation_input_tokens"] == 0
+    assert entry["saved_usd"] > 0
+    assert snapshot["routed_tokens"] == {
+        "input": 1,
+        "output": 2,
+        "cache_read": 1,
+        "cache_creation": 0,
+    }
+    assert snapshot["last_requests"][0]["path"] == "/v1/responses"
+    assert snapshot["last_requests"][0]["input_tokens"] == 1
+
+
+def test_codex_and_deepseek_record_same_shape(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream: _Upstream,
+) -> None:
+    codex_home = tmp_path / "codex"
+    deepseek_home = tmp_path / "deepseek"
+    codex_home.mkdir()
+    deepseek_home.mkdir()
+    fake_codex = _FakeCodexResponsesCall()
+    fake_deepseek = _FakeDirectCall(
+        {
+            **ROUTED_TEXT_BODY,
+            "model": "acr-test-cheap",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "cache_read_input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+            },
+        }
+    )
+    monkeypatch.setattr("ai_calls_router.proxy.server.codex_direct.responses_call", fake_codex)
+    monkeypatch.setattr(rc.anthropic_direct, "direct_call", fake_deepseek)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("ACR_TEST_KEY", "tier-key")
+
+    with _client_for_config(
+        tmp_path=codex_home,
+        monkeypatch=monkeypatch,
+        upstream=upstream,
+        config_yaml=CODEX_DIRECT_PRICED_CONFIG_YAML,
+    ) as test_client:
+        assert (
+            test_client.post(
+                "/v1/responses",
+                json=_responses_tool_result_body_for_model(PRICED_PREMIUM_MODEL),
+            ).status_code
+            == 200
+        )
+    metrics_mod._metrics_singleton = None
+    with _client_for_config(
+        tmp_path=deepseek_home,
+        monkeypatch=monkeypatch,
+        upstream=upstream,
+        config_yaml=DEEPSEEK_RESPONSES_PRICED_CONFIG_YAML,
+    ) as test_client:
+        assert (
+            test_client.post(
+                "/v1/responses",
+                json=_responses_tool_result_body_for_model(PRICED_PREMIUM_MODEL),
+            ).status_code
+            == 200
+        )
+
+    codex_entry = read_ledger(codex_home)[0]
+    deepseek_entry = read_ledger(deepseek_home)[0]
+    assert set(codex_entry) == set(deepseek_entry)
+
+
 def test_codex_direct_route_uses_oauth_sentinel(
     *,
     tmp_path: Path,
@@ -392,6 +549,30 @@ def test_codex_direct_route_uses_oauth_sentinel(
     assert upstream.requests == []
 
 
+def test_codex_upstream_error_falls_back_to_premium(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream: _Upstream,
+) -> None:
+    monkeypatch.setattr(
+        "ai_calls_router.proxy.server.codex_direct.responses_call",
+        _FailingCodexResponsesCall(),
+    )
+    body = _responses_tool_result_body_for_model(PRICED_PREMIUM_MODEL)
+    with _client_for_config(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        upstream=upstream,
+        config_yaml=CODEX_DIRECT_PRICED_CONFIG_YAML,
+    ) as test_client:
+        response = test_client.post("/v1/responses", json=body)
+
+    assert response.status_code == 200
+    assert response.json() == {"marker": "upstream"}
+    assert json.loads(upstream.requests[0].content) == body
+
+
 @pytest.mark.asyncio
 async def test_codex_direct_attempt_reports_yaml_model_and_usage(
     monkeypatch: pytest.MonkeyPatch,
@@ -404,7 +585,7 @@ async def test_codex_direct_attempt_reports_yaml_model_and_usage(
             body=_responses_tool_result_body(stream=True),
             tier="codex_code",
             tier_cfg={"model": "codex/gpt-configured-from-yaml", "provider": "codex"},
-            credential="oauth",
+            credential=routing.TierCredential(value="oauth", auth_mode="oauth"),
             request_headers={},
             streaming=True,
             requested_model="gpt-5.5",

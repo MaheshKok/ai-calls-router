@@ -391,22 +391,19 @@ class TestResolveApiKey:
             {"model": "codex/gpt-5-codex-spark", "provider": "codex"},
             {},
         )
-        assert key == "openai-key"
+        assert key == routing.TierCredential(value="openai-key", auth_mode="api_key")
 
     def test_codex_oauth_sentinel_is_codex_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("oauth", raising=False)
 
-        assert (
-            routing.resolve_tier_credential(
-                {
-                    "model": "codex/gpt-5-codex-spark",
-                    "provider": "codex",
-                    "key_env": "oauth",
-                },
-                {},
-            )
-            == "oauth"
-        )
+        assert routing.resolve_tier_credential(
+            {
+                "model": "codex/gpt-5-codex-spark",
+                "provider": "codex",
+                "key_env": "oauth",
+            },
+            {},
+        ) == routing.TierCredential(value="oauth", auth_mode="oauth")
         assert (
             routing.resolve_tier_credential(
                 {"model": "deepseek/deepseek-v4-flash", "key_env": "oauth"},

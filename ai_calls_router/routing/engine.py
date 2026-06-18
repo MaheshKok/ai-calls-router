@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
@@ -48,6 +49,38 @@ class _LiteLLMCompletion(Protocol):
     """LiteLLM async completion surface used by the routed engine."""
 
     async def acompletion(self, **kwargs: JsonValue) -> LiteLLMResponse: ...
+
+
+@dataclass(frozen=True)
+class RouteUsage:
+    """Normalized routed token buckets."""
+
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class RouteOutcome:
+    """Transport-agnostic routed outcome for shared accounting."""
+
+    premium_model: str | None
+    routed_model: str
+    tier_name: str
+    tier_cfg: JsonObject
+    tool_names: list[str]
+    usage: RouteUsage
+    request_path: str
+    route: str
+    user_agent: str = ""
+    agent: str = ""
+    session_id: str = ""
+    elapsed: float = 0.0
+    shrink: shrink_stats.ShrinkStats | None = None
+    method: str = "POST"
+    status: int = 200
+    request_id: str = ""
 
 
 def _strip_thinking_from_messages(body: JsonObject, routed: JsonObject) -> None:
@@ -166,16 +199,18 @@ def escalates(
         True when the guard is enabled and any tool_use block names a
         premium tool, otherwise False.
     """
-    return bool(_premium_tool_names(response_body, settings, premium_tools=premium_tools))
+    return bool(
+        premium_tool_names_from_anthropic(response_body, settings, premium_tools=premium_tools)
+    )
 
 
-def _premium_tool_names(
-    response_body: JsonObject,
+def _response_guard_tool_names(
+    response_tool_names: list[str],
     settings: JsonObject,
     *,
     premium_tools: list[str] | None = None,
 ) -> list[str]:
-    """Return premium tool names invoked by a routed response."""
+    """Return guarded premium tool names from response tool names."""
     if not settings.get("escalate_on_premium_tools", True):
         return []
     raw_tools = premium_tools if premium_tools is not None else settings.get("premium_tools")
@@ -186,6 +221,15 @@ def _premium_tool_names(
     )
     if not guard_tools:
         return []
+    names: list[str] = []
+    for name in response_tool_names:
+        if name in guard_tools and name not in names:
+            names.append(name)
+    return names
+
+
+def _anthropic_response_tool_names(response_body: JsonObject) -> list[str]:
+    """Return tool names invoked by an Anthropic response body."""
     content = response_body.get("content")
     if not isinstance(content, list):
         return []
@@ -194,9 +238,53 @@ def _premium_tool_names(
         for block in cast("JsonArray", content)
         if isinstance(block, dict)
         and block.get("type") == "tool_use"
-        and block.get("name") in guard_tools
         and isinstance(block.get("name"), str)
     ]
+
+
+def _responses_output_tool_names(response_body: JsonObject) -> list[str]:
+    """Return tool names invoked by an OpenAI Responses body."""
+    output = response_body.get("output")
+    if not isinstance(output, list):
+        return []
+    names: list[str] = []
+    for item in cast("JsonArray", output):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") not in {"function_call", "custom_tool_call"}:
+            continue
+        name = item.get("name")
+        if isinstance(name, str):
+            names.append(name)
+    return names
+
+
+def premium_tool_names_from_anthropic(
+    response_body: JsonObject,
+    settings: JsonObject,
+    *,
+    premium_tools: list[str] | None = None,
+) -> list[str]:
+    """Return premium tool names invoked by an Anthropic response."""
+    return _response_guard_tool_names(
+        _anthropic_response_tool_names(response_body),
+        settings,
+        premium_tools=premium_tools,
+    )
+
+
+def premium_tool_names_from_responses(
+    response_body: JsonObject,
+    settings: JsonObject,
+    *,
+    premium_tools: list[str] | None = None,
+) -> list[str]:
+    """Return premium tool names invoked by an OpenAI Responses body."""
+    return _response_guard_tool_names(
+        _responses_output_tool_names(response_body),
+        settings,
+        premium_tools=premium_tools,
+    )
 
 
 async def _serve_via_litellm(
@@ -284,66 +372,69 @@ async def _serve_via_direct(
     return response, stats
 
 
-def _token_fields(body: JsonObject) -> dict[str, int]:
-    """Extract token counts from an Anthropic usage block.
-
-    Returns a dict with keys: input, output, cache_read, cache_creation.
-    """
+def _usage_from_anthropic(body: JsonObject) -> RouteUsage:
+    """Extract normalized token counts from an Anthropic usage block."""
     usage_value = body.get("usage")
     usage = usage_value if isinstance(usage_value, dict) else {}
-    return {
-        "input": _json_int(usage.get("input_tokens", 0)),
-        "output": _json_int(usage.get("output_tokens", 0)),
-        "cache_read": _json_int(usage.get("cache_read_input_tokens", 0)),
-        "cache_creation": _json_int(usage.get("cache_creation_input_tokens", 0)),
-    }
+    return RouteUsage(
+        input_tokens=_json_int(usage.get("input_tokens", 0)),
+        output_tokens=_json_int(usage.get("output_tokens", 0)),
+        cache_read_tokens=_json_int(usage.get("cache_read_input_tokens", 0)),
+        cache_creation_tokens=_json_int(usage.get("cache_creation_input_tokens", 0)),
+    )
 
 
-def _record_metrics(
-    *,
-    request_path: str,
-    tier_name: str,
-    model: str,
-    premium_model: str,
-    direct: bool,
-    tool_names: list[str],
-    user_agent: str,
-    anthropic_body: JsonObject,
-    elapsed: float,
-    shrink: shrink_stats.ShrinkStats,
-    agent: str = "",
-    session_id: str = "",
-) -> None:
-    """Record per-request metrics after a successful routed call."""
+async def record_route_outcome(outcome: RouteOutcome) -> None:
+    """Record routed savings and live metrics from normalized usage."""
+    shrink = outcome.shrink or shrink_stats.compute_shrink(path="none", before={}, after={})
+    usage = outcome.usage
+    await asyncio.to_thread(
+        savings.record_routing_savings,
+        premium_model=outcome.premium_model,
+        routed_model=outcome.routed_model,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_creation_tokens=usage.cache_creation_tokens,
+        routed_prices=savings.routed_prices_from_tier(outcome.tier_cfg),
+        tier_name=outcome.tier_name,
+        tool_names=",".join(outcome.tool_names),
+        user_agent=outcome.user_agent,
+        agent=outcome.agent,
+        session_id=outcome.session_id,
+        shrink_path=shrink.path,
+        shrink_chars_before=shrink.chars_before,
+        shrink_chars_after=shrink.chars_after,
+    )
     mtr = metrics_mod.get_metrics()
-    tok = _token_fields(anthropic_body)
     mtr.add_routed_tokens(
-        input_tokens=tok["input"],
-        output_tokens=tok["output"],
-        cache_read=tok["cache_read"],
-        cache_creation=tok["cache_creation"],
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read=usage.cache_read_tokens,
+        cache_creation=usage.cache_creation_tokens,
     )
     mtr.add_shrink(chars_before=shrink.chars_before, chars_after=shrink.chars_after)
     mtr.record_request(
-        method="POST",
-        path=request_path,
-        status=200,
-        tier=tier_name,
-        route="direct" if direct else "litellm",
-        model=model,
-        user_agent=user_agent,
+        method=outcome.method,
+        path=outcome.request_path,
+        status=outcome.status,
+        tier=outcome.tier_name,
+        route=outcome.route,
+        model=outcome.routed_model,
+        user_agent=outcome.user_agent,
         client_ip="",
-        tool_names=tool_names,
-        input_tokens=tok["input"],
-        output_tokens=tok["output"],
-        cache_read=tok["cache_read"],
-        cache_creation=tok["cache_creation"],
-        duration=elapsed,
-        premium_model=premium_model,
-        agent=agent,
-        session_id=session_id,
+        tool_names=outcome.tool_names,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read=usage.cache_read_tokens,
+        cache_creation=usage.cache_creation_tokens,
+        duration=outcome.elapsed,
+        premium_model=outcome.premium_model or "",
+        agent=outcome.agent,
+        session_id=outcome.session_id,
         shrink_chars_before=shrink.chars_before,
         shrink_chars_after=shrink.chars_after,
+        request_id=outcome.request_id,
     )
 
 
@@ -423,7 +514,7 @@ async def routed_call(
                 elapsed,
             )
             return None
-        premium_guard_tools = _premium_tool_names(
+        premium_guard_tools = premium_tool_names_from_anthropic(
             anthropic_body, settings, premium_tools=premium_tools
         )
         if premium_guard_tools:
@@ -456,33 +547,23 @@ async def routed_call(
         _shrink_summary(shrink),
         elapsed,
     )
-    await asyncio.to_thread(
-        savings.record_savings_from_response,
-        premium_model=premium_model,
-        routed_model=cast("str", model),
-        response_body=anthropic_body,
-        tier_cfg=tier_cfg,
-        tier_name=tier_name,
-        tool_names=tool_names,
-        user_agent=user_agent,
-        agent=agent,
-        session_id=session_id,
-        shrink=shrink,
+    await record_route_outcome(
+        RouteOutcome(
+            premium_model=premium_model,
+            routed_model=cast("str", model),
+            tier_name=tier_name,
+            tier_cfg=tier_cfg,
+            tool_names=_tool_names,
+            usage=_usage_from_anthropic(anthropic_body),
+            request_path=request_path,
+            route="direct" if direct else "litellm",
+            user_agent=user_agent,
+            agent=agent,
+            session_id=session_id,
+            elapsed=elapsed,
+            shrink=shrink,
+        )
     )
     if isinstance(premium_model, str) and premium_model:
         anthropic_body = {**anthropic_body, "model": premium_model}
-    _record_metrics(
-        request_path=request_path,
-        tier_name=tier_name,
-        model=cast("str", model),
-        premium_model=str(premium_model) if premium_model else "",
-        direct=direct,
-        tool_names=_tool_names,
-        user_agent=user_agent,
-        anthropic_body=anthropic_body,
-        elapsed=elapsed,
-        shrink=shrink,
-        agent=agent,
-        session_id=session_id,
-    )
     return BackendResponse(body=anthropic_body)

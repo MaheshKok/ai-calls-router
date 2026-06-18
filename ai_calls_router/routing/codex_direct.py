@@ -12,20 +12,17 @@ import copy
 import json
 import logging
 import re
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import httpx
 
 from ai_calls_router.routing.config_schema import (
-    CODEX_OAUTH_SENTINEL,
     ConfigSchemaError,
     is_codex_tier,
     parse_tier_config,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
 
 logger = logging.getLogger("acr.codex_direct")
@@ -85,26 +82,6 @@ def prepare_responses_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject
     return routed
 
 
-def response_escalates(response_body: JsonObject, premium_tools: Sequence[str]) -> list[str]:
-    """Return premium tool names requested by a Codex Responses output."""
-    premium = set(premium_tools)
-    if not premium:
-        return []
-    output = response_body.get("output")
-    if not isinstance(output, list):
-        return []
-    names: list[str] = []
-    for item in output:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") not in {"function_call", "custom_tool_call"}:
-            continue
-        name = item.get("name")
-        if isinstance(name, str) and name in premium and name not in names:
-            names.append(name)
-    return names
-
-
 def _api_key_headers(api_key: str) -> dict[str, str]:
     """Return OpenAI API-key headers without client header leakage."""
     return {
@@ -113,13 +90,60 @@ def _api_key_headers(api_key: str) -> dict[str, str]:
     }
 
 
-def _oauth_headers(chatgpt_headers: Sequence[tuple[str, str]] | None) -> dict[str, str] | None:
-    """Return ChatGPT OAuth headers when the client supplied Codex auth."""
+def _chatgpt_oauth_headers(
+    chatgpt_headers: list[tuple[str, str]] | None,
+) -> dict[str, str] | None:
+    """Return ChatGPT OAuth headers from already-resolved OAuth mode."""
     if chatgpt_headers is None:
         return None
     headers = dict(chatgpt_headers)
     headers["Content-Type"] = "application/json"
     return headers
+
+
+def _request_target(
+    *,
+    credential: str,
+    auth_mode: Literal["api_key", "oauth"],
+    chatgpt_headers: list[tuple[str, str]] | None,
+) -> tuple[str, dict[str, str]] | None:
+    """Return URL and headers for an already-resolved auth mode."""
+    if auth_mode == "oauth":
+        headers = _chatgpt_oauth_headers(chatgpt_headers)
+        return (CHATGPT_CODEX_RESPONSES_URL, headers) if headers is not None else None
+    if auth_mode == "api_key":
+        return OPENAI_RESPONSES_URL, _api_key_headers(credential)
+    return None
+
+
+def _usage_int(value: JsonValue) -> int:
+    """Coerce provider usage values to non-negative integers."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int | float | str):
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _response_usage(response_body: JsonObject) -> tuple[int, int, int, int]:
+    """Return Responses usage as input, output, cache-read, cache-creation tokens."""
+    usage = response_body.get("usage")
+    if not isinstance(usage, dict):
+        return 0, 0, 0, 0
+    cache_read = 0
+    details = usage.get("input_tokens_details")
+    if isinstance(details, dict):
+        cache_read = _usage_int(details.get("cached_tokens"))
+    total_input = _usage_int(usage.get("input_tokens"))
+    return (
+        max(total_input - cache_read, 0),
+        _usage_int(usage.get("output_tokens")),
+        cache_read,
+        0,
+    )
 
 
 def _provider_error_excerpt(response: httpx.Response) -> str:
@@ -165,35 +189,41 @@ async def responses_call(
     body: JsonObject,
     tier_cfg: JsonObject,
     credential: str,
-    chatgpt_headers: Sequence[tuple[str, str]] | None = None,
+    auth_mode: Literal["api_key", "oauth"] = "api_key",
+    chatgpt_headers: list[tuple[str, str]] | None = None,
     client: httpx.AsyncClient | None = None,
-) -> JsonObject | None:
+) -> tuple[JsonObject, tuple[int, int, int, int]] | None:
     """POST a sanitized Responses request to a Codex tier.
 
     Args:
         body: Original OpenAI Responses request body from the client.
         tier_cfg: Tier config marked as a Codex tier.
-        credential: OpenAI API key or ``"oauth"`` sentinel.
-        chatgpt_headers: Forwardable ChatGPT OAuth headers for the sentinel path.
+        credential: Resolved credential value.
+        auth_mode: Resolved credential mode.
+        chatgpt_headers: Forwardable ChatGPT OAuth headers for OAuth mode.
         client: Optional shared HTTP client for tests or server reuse.
 
     Returns:
-        Parsed Responses JSON body, or None when the caller must passthrough.
+        Parsed Responses JSON body and normalized token usage, or None when
+        the caller must passthrough.
     """
     try:
-        if not is_codex_tier(tier_cfg):
+        target = (
+            _request_target(
+                credential=credential,
+                auth_mode=auth_mode,
+                chatgpt_headers=chatgpt_headers,
+            )
+            if is_codex_tier(tier_cfg)
+            else None
+        )
+        if target is None:
             return None
+        url, headers = target
         payload = prepare_responses_body(body, tier_cfg)
-        if credential == CODEX_OAUTH_SENTINEL:
+        if auth_mode == "oauth":
             payload["stream"] = True
             payload.pop("max_output_tokens", None)
-            headers = _oauth_headers(chatgpt_headers)
-            url = CHATGPT_CODEX_RESPONSES_URL
-        else:
-            headers = _api_key_headers(credential)
-            url = OPENAI_RESPONSES_URL
-        if headers is None:
-            return None
         timeout_value = tier_cfg.get("timeout", DEFAULT_TIMEOUT_SECONDS)
         timeout = (
             timeout_value if isinstance(timeout_value, int | float) else DEFAULT_TIMEOUT_SECONDS
@@ -213,7 +243,7 @@ async def responses_call(
                 _provider_error_excerpt(response),
             )
             return None
-        if credential == CODEX_OAUTH_SENTINEL:
+        if auth_mode == "oauth":
             parsed_sse = _response_from_sse(response.text)
             if parsed_sse is None:
                 logger.warning(
@@ -221,9 +251,11 @@ async def responses_call(
                     url,
                     _provider_error_excerpt(response),
                 )
-            return parsed_sse
+            return (parsed_sse, _response_usage(parsed_sse)) if parsed_sse is not None else None
         parsed_response = cast("JsonValue", response.json())
-        return parsed_response if isinstance(parsed_response, dict) else None
+        if not isinstance(parsed_response, dict):
+            return None
+        return parsed_response, _response_usage(parsed_response)
     except (ConfigSchemaError, httpx.HTTPError, ValueError) as exc:
         logger.warning("codex direct call failed (%s); passing through", exc, exc_info=True)
         return None

@@ -19,14 +19,16 @@ import fnmatch
 import logging
 import os
 import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import yaml
 
 from ai_calls_router._lib import config
 from ai_calls_router.routing.agent_defaults import AGENT_DEFAULT_PREMIUM_TOOLS, AGENT_DEFAULT_TOOLS
 from ai_calls_router.routing.config_schema import (
+    CODEX_OAUTH_SENTINEL,
     ConfigSchemaError,
     is_codex_tier,
     parse_tier_config,
@@ -41,6 +43,14 @@ logger = logging.getLogger("acr.routing")
 _cache_lock = threading.Lock()
 _cache: dict[Path, tuple[float, JsonObject]] = {}
 _DEFAULT_AGENT_GROUP = "claude_code"
+
+
+@dataclass(frozen=True)
+class TierCredential:
+    """Resolved tier credential and auth mode."""
+
+    value: str
+    auth_mode: Literal["api_key", "oauth"]
 
 
 def _json_mapping(value: JsonValue) -> JsonObject:
@@ -457,27 +467,28 @@ def resolve_api_key(tier_cfg: JsonObject, settings: JsonObject) -> str | None:
     return None
 
 
-def resolve_tier_credential(tier_cfg: JsonObject, settings: JsonObject) -> str | None:
-    """Resolve a tier credential, with Codex tiers defaulting to OPENAI_API_KEY.
+def resolve_tier_credential(tier_cfg: JsonObject, settings: JsonObject) -> TierCredential | None:
+    """Resolve a tier credential and auth mode.
 
     Args:
         tier_cfg: Tier entry from config.yaml.
         settings: The settings: section of config.yaml.
 
     Returns:
-        The resolved credential, ``"oauth"`` for Codex OAuth sentinel tiers, or
-        None when unavailable.
+        The resolved credential metadata, or None when unavailable.
     """
     try:
         parsed = parse_tier_config(tier_cfg)
     except ConfigSchemaError as exc:
         logger.warning("acr: tier schema validation failed (%s); passing through", exc)
         return None
-    if parsed.key_env == "oauth" and is_codex_tier(tier_cfg):
-        return "oauth"
+    if parsed.key_env == CODEX_OAUTH_SENTINEL and is_codex_tier(tier_cfg):
+        return TierCredential(value=CODEX_OAUTH_SENTINEL, auth_mode="oauth")
     credential = resolve_api_key(tier_cfg, settings)
     if credential:
-        return credential
+        return TierCredential(value=credential, auth_mode="api_key")
     if is_codex_tier(tier_cfg):
-        return os.environ.get("OPENAI_API_KEY")
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if openai_key:
+            return TierCredential(value=openai_key, auth_mode="api_key")
     return None

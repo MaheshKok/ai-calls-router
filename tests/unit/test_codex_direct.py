@@ -60,18 +60,6 @@ def test_prepare_responses_body_handles_string_input_and_plain_model() -> None:
     assert routed["input"] == "hello"
 
 
-def test_response_escalates_empty_and_malformed_outputs() -> None:
-    assert codex_direct.response_escalates({"output": []}, []) == []
-    assert codex_direct.response_escalates({"output": "bad"}, ["apply_patch"]) == []
-    assert (
-        codex_direct.response_escalates(
-            {"output": ["bad", {"type": "message"}, {"type": "function_call", "name": 7}]},
-            ["apply_patch"],
-        )
-        == []
-    )
-
-
 @pytest.mark.asyncio
 async def test_responses_call_api_key_uses_openai_endpoint_without_client_auth() -> None:
     captured: list[httpx.Request] = []
@@ -87,12 +75,16 @@ async def test_responses_call_api_key_uses_openai_endpoint_without_client_auth()
                 "status": "completed",
                 "model": "gpt-5-codex-spark",
                 "output": [],
-                "usage": None,
+                "usage": {
+                    "input_tokens": 5,
+                    "output_tokens": 2,
+                    "input_tokens_details": {"cached_tokens": 3},
+                },
             },
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        response = await codex_direct.responses_call(
+        result = await codex_direct.responses_call(
             body=_body(),
             tier_cfg=_tier(),
             credential="openai-key",
@@ -100,12 +92,14 @@ async def test_responses_call_api_key_uses_openai_endpoint_without_client_auth()
             client=client,
         )
 
-    assert response is not None
+    assert result is not None
+    _response, usage = result
     assert str(captured[0].url) == codex_direct.OPENAI_RESPONSES_URL
     assert captured[0].headers["authorization"] == "Bearer openai-key"
     assert "client-oauth" not in json.dumps(dict(captured[0].headers))
     assert "secret" not in captured[0].content.decode()
     assert "stream" not in json.loads(captured[0].content)
+    assert usage == (2, 2, 3, 0)
 
 
 @pytest.mark.asyncio
@@ -133,10 +127,11 @@ async def test_responses_call_oauth_uses_chatgpt_backend_headers() -> None:
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        response = await codex_direct.responses_call(
+        result = await codex_direct.responses_call(
             body=_body(),
             tier_cfg=_tier(),
             credential="oauth",
+            auth_mode="oauth",
             chatgpt_headers=[
                 ("Authorization", "Bearer chatgpt-oauth"),
                 ("ChatGPT-Account-ID", "acct_123"),
@@ -144,8 +139,10 @@ async def test_responses_call_oauth_uses_chatgpt_backend_headers() -> None:
             client=client,
         )
 
-    assert response is not None
+    assert result is not None
+    response, usage = result
     assert response["id"] == "resp_2"
+    assert usage == (0, 0, 0, 0)
     assert str(captured[0].url) == codex_direct.CHATGPT_CODEX_RESPONSES_URL
     assert captured[0].headers["authorization"] == "Bearer chatgpt-oauth"
     assert captured[0].headers["chatgpt-account-id"] == "acct_123"
@@ -169,6 +166,7 @@ async def test_responses_call_declines_non_codex_and_missing_oauth_headers() -> 
             body=_body(),
             tier_cfg=_tier(),
             credential="oauth",
+            auth_mode="oauth",
         )
         is None
     )
@@ -233,14 +231,3 @@ async def test_responses_call_non_object_json_returns_none() -> None:
             )
             is None
         )
-
-
-def test_response_escalates_on_premium_tool_output() -> None:
-    response = {
-        "output": [
-            {"type": "function_call", "name": "apply_patch"},
-            {"type": "function_call", "name": "exec_command"},
-        ]
-    }
-
-    assert codex_direct.response_escalates(response, ["apply_patch"]) == ["apply_patch"]

@@ -159,6 +159,11 @@ def _routed_prices_from_tier(
     )
 
 
+def routed_prices_from_tier(tier_cfg: JsonValue) -> tuple[float, float, float] | None:
+    """Return cache-aware routed prices from a tier config."""
+    return _routed_prices_from_tier(tier_cfg)
+
+
 def _compute_routed_usd(
     litellm: _PricingLiteLLM,
     routed_model: str,
