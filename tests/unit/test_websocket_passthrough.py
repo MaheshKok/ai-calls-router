@@ -13,7 +13,7 @@ from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from ai_calls_router.accounting import metrics
+from ai_calls_router.accounting import metrics, shrink_stats
 from ai_calls_router.proxy import server, websocket_passthrough
 
 if TYPE_CHECKING:
@@ -440,6 +440,74 @@ def test_codex_websocket_without_chatgpt_oauth_closes(monkeypatch) -> None:
 
     assert excinfo.value.code == 1008
     assert calls == []
+
+
+def test_codex_websocket_routing_flag_routes_routable_turn(monkeypatch) -> None:
+    # Flag on: a turn whose pending tool maps to a cheaper tier is served over
+    # the HTTP bridge and synthesized back as WS frames, never sent upstream.
+    routes = {
+        "settings": {"tier_precedence": ["premium", "structured", "code", "fast", "crud"]},
+        "agents": {"codex": {"tools": {"exec_command": "fast"}}},
+        "tiers": {"fast": {"model": "codex/gpt-5.4-mini", "provider": "codex", "key_env": "oauth"}},
+    }
+    routed_response = {
+        "id": "resp_routed_ws",
+        "object": "response",
+        "created_at": 0,
+        "status": "completed",
+        "model": "gpt-5.4-mini",
+        "output": [],
+        "usage": {"input_tokens": 3, "output_tokens": 1},
+    }
+    shrink = shrink_stats.compute_shrink(path="none", before={}, after={})
+
+    async def fake_responses_call(**_kwargs: object) -> object:
+        return routed_response, (3, 1, 0, 0), shrink
+
+    async def fake_record(_outcome: object) -> None:
+        return None
+
+    upstream = _FakeUpstream()
+    monkeypatch.setattr(websocket_passthrough, "connect", lambda uri, **kw: _FakeConnect(upstream))
+    monkeypatch.setattr(websocket_passthrough.config, "codex_ws_routing_enabled", lambda: True)
+    monkeypatch.setattr(server, "_load_assembled_routes", lambda: routes)
+    router = websocket_passthrough.codex_ws_router
+    monkeypatch.setattr(router.codex_direct, "responses_call", fake_responses_call)
+    monkeypatch.setattr(router.routed_call, "record_route_outcome", fake_record)
+    app = Starlette(routes=[WebSocketRoute("/v1/responses", server.responses_ws)])
+
+    create_frame = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.5-codex",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "exec_command",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+            ],
+        }
+    )
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/responses", headers={"chatgpt-account-id": "acct_123"}
+        ) as websocket,
+    ):
+        websocket.send_text(create_frame)
+        types: list[str] = []
+        while True:
+            event = json.loads(websocket.receive_text())
+            types.append(event["type"])
+            if event["type"] == "response.completed":
+                break
+
+    assert types[0] == "response.created"
+    assert types[-1] == "response.completed"
+    assert upstream.sent == []
 
 
 def _jwt(account_id: str) -> str:

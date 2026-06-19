@@ -1,12 +1,18 @@
 """WebSocket passthrough for Codex ChatGPT-auth Responses traffic.
 
-This module relays Codex ChatGPT-auth Responses WebSockets transparently to
-`wss://chatgpt.com/backend-api/codex/responses`: every client frame is forwarded
-to the backend unchanged and every backend frame is forwarded back unchanged.
-Frames are never intercepted or re-routed, so the stateful conversation (server
-side `previous_response_id` and function-call pairing) stays intact. A passive
-`_UsageRecorder` sniffs the relayed `response.completed` frames so the dashboard
-records real token usage, model, tools, and duration without altering traffic.
+By default this module relays Codex ChatGPT-auth Responses WebSockets
+transparently to `wss://chatgpt.com/backend-api/codex/responses`: every client
+frame is forwarded to the backend unchanged and every backend frame is forwarded
+back unchanged. Frames are never intercepted or re-routed, so the stateful
+conversation (server side `previous_response_id` and function-call pairing) stays
+intact. A passive `_UsageRecorder` sniffs the relayed `response.completed` frames
+so the dashboard records real token usage, model, tools, and duration without
+altering traffic.
+
+When `ACR_CODEX_WS_ROUTING` is enabled and a routes loader is supplied, the
+connection is instead handed to `codex_ws_router`, which observes the stream and
+routes routable turns to cheaper tiers (see that module). The passthrough path
+below is unchanged and remains the default.
 """
 
 from __future__ import annotations
@@ -23,11 +29,12 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
-from ai_calls_router._lib import logging_setup
+from ai_calls_router._lib import config, logging_setup
 from ai_calls_router.accounting import metrics
+from ai_calls_router.proxy import codex_ws_router
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from websockets.typing import Subprotocol
 
@@ -53,18 +60,26 @@ _HOP_HEADERS = frozenset(
 )
 
 
-async def forward_codex_chatgpt(websocket: WebSocket, *, sub_path: str = "") -> None:
+async def forward_codex_chatgpt(
+    websocket: WebSocket,
+    *,
+    sub_path: str = "",
+    routes_loader: Callable[[], JsonObject] | None = None,
+) -> None:
     """Relay a Codex ChatGPT-auth WebSocket to the ChatGPT Codex backend.
 
-    The relay is transparent: client frames reach the backend unchanged and
-    backend frames reach the client unchanged, so Codex's stateful
+    By default the relay is transparent: client frames reach the backend
+    unchanged and backend frames reach the client unchanged, so Codex's stateful
     `previous_response_id` continuation and function-call pairing are never
     disrupted. A `_UsageRecorder` observes the relayed frames to feed dashboard
-    metrics; it never modifies what is sent.
+    metrics; it never modifies what is sent. When `ACR_CODEX_WS_ROUTING` is
+    enabled and `routes_loader` is supplied, the connection is handed to
+    `codex_ws_router` for opt-in cheaper-tier routing instead.
 
     Args:
         websocket: Accepted Starlette WebSocket.
         sub_path: Optional `/responses/...` suffix to preserve.
+        routes_loader: Assembled-routes loader required to enable routing.
     """
     headers = codex_chatgpt_headers(websocket.headers)
     if headers is None:
@@ -76,6 +91,17 @@ async def forward_codex_chatgpt(websocket: WebSocket, *, sub_path: str = "") -> 
     target = _chatgpt_ws_url(sub_path, websocket.url.query)
     user_agent = websocket.headers.get("user-agent")
     recorder = _UsageRecorder(user_agent or "")
+    if routes_loader is not None and config.codex_ws_routing_enabled():
+        await _run_routed_relay(
+            websocket,
+            target,
+            headers=headers,
+            subprotocols=subprotocols,
+            recorder=recorder,
+            routes_loader=routes_loader,
+            user_agent=user_agent,
+        )
+        return
     first_msg = await _receive_first_text(websocket)
     if first_msg is None:
         return
@@ -93,6 +119,39 @@ async def forward_codex_chatgpt(websocket: WebSocket, *, sub_path: str = "") -> 
         logger.warning("acr: codex websocket passthrough failed (%s)", exc, exc_info=True)
         with contextlib.suppress(Exception):
             await websocket.close(code=1011, reason="upstream websocket failed")
+
+
+async def _run_routed_relay(
+    websocket: WebSocket,
+    target: str,
+    *,
+    headers: list[tuple[str, str]],
+    subprotocols: list[Subprotocol],
+    recorder: _UsageRecorder,
+    routes_loader: Callable[[], JsonObject],
+    user_agent: str | None,
+) -> None:
+    """Open the upstream and hand the connection to the hybrid routing relay."""
+    try:
+        async with connect(
+            target,
+            additional_headers=headers,
+            user_agent_header=user_agent,
+            subprotocols=subprotocols or None,
+        ) as upstream:
+            await codex_ws_router.run_hybrid_relay(
+                websocket,
+                upstream,
+                recorder=recorder,
+                chatgpt_headers=headers,
+                routes_loader=routes_loader,
+                user_agent=user_agent or "",
+                agent=metrics.identify_agent(user_agent or ""),
+            )
+    except Exception as exc:
+        logger.warning("acr: codex websocket routed relay failed (%s)", exc, exc_info=True)
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011, reason="codex routed relay failed")
 
 
 def codex_chatgpt_headers(headers: Mapping[str, str]) -> list[tuple[str, str]] | None:

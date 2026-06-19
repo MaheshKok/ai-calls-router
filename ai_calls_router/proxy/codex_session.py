@@ -67,8 +67,10 @@ class CodexSession:
             return [*delta]
         return [*history, *delta]
 
-    def record_response(self, *, full_input: JsonArray, output: JsonArray) -> str:
-        """Store a completed turn and return a new router response id.
+    def record_response(
+        self, *, full_input: JsonArray, output: JsonArray, response_id: str | None = None
+    ) -> str:
+        """Store a completed turn and return the response id it was stored under.
 
         The snapshot is ``full_input`` followed by ``output``: the conversation
         state a continuation turn will build on. The returned id is what the
@@ -79,13 +81,17 @@ class CodexSession:
                 this turn's delta), as returned by ``reconstruct_input``.
             output: The streamed output items of this response (messages,
                 function calls, reasoning, ...).
+            response_id: The id to store under. When None (a router-served turn)
+                a unique router id is generated. When given (a passthrough turn
+                observed on the wire), the upstream's real response id is used so
+                the client's next ``previous_response_id`` resolves to this turn.
 
         Returns:
-            A unique, response-shaped router id mapped to the stored snapshot.
+            The response id the snapshot was stored under.
         """
-        response_id = f"resp_acr_{uuid.uuid4().hex}"
-        self._history[response_id] = [*full_input, *output]
-        return response_id
+        key = response_id if response_id is not None else f"resp_acr_{uuid.uuid4().hex}"
+        self._history[key] = [*full_input, *output]
+        return key
 
     def knows(self, response_id: str) -> bool:
         """Return whether a response id was issued by this session.

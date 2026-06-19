@@ -333,14 +333,18 @@ async def responses(request: Request) -> Response:
 
 async def responses_ws(websocket: WebSocket) -> None:
     """Relay Codex ChatGPT-auth Responses WebSockets."""
-    await websocket_passthrough.forward_codex_chatgpt(websocket)
+    await websocket_passthrough.forward_codex_chatgpt(
+        websocket, routes_loader=_load_assembled_routes
+    )
 
 
 async def responses_ws_sub(websocket: WebSocket) -> None:
     """Relay Codex ChatGPT-auth Responses WebSocket subpaths."""
     raw_sub_path = websocket.path_params.get("sub_path", "")
     sub_path = raw_sub_path if isinstance(raw_sub_path, str) else ""
-    await websocket_passthrough.forward_codex_chatgpt(websocket, sub_path=sub_path)
+    await websocket_passthrough.forward_codex_chatgpt(
+        websocket, sub_path=sub_path, routes_loader=_load_assembled_routes
+    )
 
 
 async def _handle_routed_request(request: Request) -> Response:

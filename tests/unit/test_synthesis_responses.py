@@ -11,7 +11,11 @@ from __future__ import annotations
 import json
 
 from ai_calls_router._lib.responses_inbound import anthropic_to_responses
-from ai_calls_router.routing.synthesis_responses import synthesize_responses_sse
+from ai_calls_router.routing.synthesis_responses import (
+    synthesize_response_object_frames,
+    synthesize_response_object_sse,
+    synthesize_responses_sse,
+)
 
 
 def _events(body: bytes) -> list[dict[str, object]]:
@@ -84,3 +88,78 @@ def test_tool_call_response_sse_event_sequence_and_arguments() -> None:
     assert events[3]["name"] == "exec_command"
     assert events[3]["delta"] == '{"cmd": "ls"}'
     assert events[-1]["response"]["output"][0]["arguments"] == '{"cmd": "ls"}'
+
+
+def _assembled_response() -> dict[str, object]:
+    """Return an already-assembled Responses object with a message and a tool call."""
+    return {
+        "id": "resp_ws_1",
+        "object": "response",
+        "created_at": 0,
+        "status": "completed",
+        "model": "gpt-5-codex-spark",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "on it"}],
+            },
+            {
+                "type": "function_call",
+                "id": "fc_99",
+                "call_id": "call_99",
+                "name": "exec_command",
+                "arguments": '{"cmd":"ls"}',
+            },
+        ],
+        "usage": {"input_tokens": 7, "output_tokens": 4},
+    }
+
+
+def test_ws_frames_start_created_end_completed_with_monotonic_sequence() -> None:
+    # The Codex WS parser consumes the same named events as the SSE route; a routed
+    # turn must open with response.created and close with response.completed.
+    frames = list(synthesize_response_object_frames(_assembled_response()))
+
+    assert frames[0]["type"] == "response.created"
+    assert frames[-1]["type"] == "response.completed"
+    assert [frame["sequence_number"] for frame in frames] == list(range(len(frames)))
+
+
+def test_ws_frames_stream_each_output_item_with_done_payloads() -> None:
+    # The client accumulates output from response.output_item.done frames, so each
+    # output item (message + tool call) must appear with its full final payload.
+    frames = list(synthesize_response_object_frames(_assembled_response()))
+    done_items = [f["item"] for f in frames if f["type"] == "response.output_item.done"]
+
+    assert {item["type"] for item in done_items} == {"message", "function_call"}
+    call = next(item for item in done_items if item["type"] == "function_call")
+    assert call["call_id"] == "call_99"
+    assert call["name"] == "exec_command"
+    assert call["arguments"] == '{"cmd":"ls"}'
+    message = next(item for item in done_items if item["type"] == "message")
+    assert message["content"][0]["text"] == "on it"
+
+
+def test_ws_frames_carry_usage_in_completed_frame() -> None:
+    frames = list(synthesize_response_object_frames(_assembled_response()))
+    completed = frames[-1]
+
+    assert completed["response"]["usage"] == {"input_tokens": 7, "output_tokens": 4}
+    assert completed["response"]["output"][1]["arguments"] == '{"cmd":"ls"}'
+
+
+def test_ws_frames_match_sse_route_payloads_exactly() -> None:
+    # DRY contract: WS frames are the SSE route's event payloads minus the
+    # event:/data: framing. If they diverge, one transport has drifted.
+    response = _assembled_response()
+    frames = list(synthesize_response_object_frames(response))
+    sse_payloads = [
+        json.loads(block.splitlines()[1][6:])
+        for block in b"".join(synthesize_response_object_sse(response))
+        .decode("utf-8")
+        .strip()
+        .split("\n\n")
+    ]
+
+    assert frames == sse_payloads

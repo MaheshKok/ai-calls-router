@@ -152,6 +152,50 @@ def test_record_does_not_alias_caller_lists() -> None:
     ]
 
 
+def test_record_under_explicit_id_uses_that_id_for_reconstruction() -> None:
+    # Passthrough turns must be recorded under the upstream's REAL response id,
+    # because the client echoes that id as previous_response_id on the next turn.
+    # If a later turn becomes routable, reconstruct_input must find this history.
+    session = CodexSession()
+    turn_input: JsonArray = [_msg("user", "do it")]
+    turn_output: JsonArray = [_call("call_R", "exec_command")]
+
+    returned = session.record_response(
+        full_input=turn_input, output=turn_output, response_id="resp_upstream_42"
+    )
+
+    assert returned == "resp_upstream_42"
+    assert session.knows("resp_upstream_42") is True
+    assert session.reconstruct_input("resp_upstream_42", [_call_output("call_R", "ok")]) == [
+        _msg("user", "do it"),
+        _call("call_R", "exec_command"),
+        _call_output("call_R", "ok"),
+    ]
+
+
+def test_record_without_explicit_id_still_generates_unique_id() -> None:
+    session = CodexSession()
+
+    generated = session.record_response(full_input=[], output=[])
+
+    assert generated.startswith("resp_acr_")
+
+
+def test_record_under_explicit_id_does_not_alias_caller_lists() -> None:
+    session = CodexSession()
+    full_input: JsonArray = [_msg("user", "x")]
+    output: JsonArray = [_msg("assistant", "y")]
+
+    session.record_response(full_input=full_input, output=output, response_id="resp_real")
+    full_input.append(_msg("user", "late"))
+    output.append(_msg("assistant", "late"))
+
+    assert session.reconstruct_input("resp_real", []) == [
+        _msg("user", "x"),
+        _msg("assistant", "y"),
+    ]
+
+
 def test_sessions_are_isolated_from_each_other() -> None:
     session_a = CodexSession()
     session_b = CodexSession()

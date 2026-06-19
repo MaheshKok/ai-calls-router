@@ -207,3 +207,24 @@ def synthesize_response_object_sse(response: JsonObject) -> Iterator[bytes]:
     """Yield Responses API SSE bytes for an already-assembled response object."""
     for name, payload in _numbered_events(response):
         yield _sse_event(name, payload)
+
+
+def synthesize_response_object_frames(response: JsonObject) -> Iterator[JsonObject]:
+    """Yield Codex WebSocket frame payloads for an assembled Responses object.
+
+    Codex's WebSocket transport carries the same named Responses stream events as
+    the SSE route, but each event is one JSON text frame instead of an
+    ``event:``/``data:`` SSE block. Reusing the SSE route's event grammar keeps a
+    routed WebSocket turn byte-identical (modulo framing) to the proven HTTP route,
+    so the Codex Responses parser accepts both paths the same way.
+
+    Args:
+        response: An already-assembled Responses object (id, model, output, usage).
+
+    Yields:
+        Each stream event as a frame payload dict, in order from
+        ``response.created`` through ``response.completed``, with monotonically
+        increasing ``sequence_number`` fields.
+    """
+    for _name, payload in _numbered_events(response):
+        yield payload
