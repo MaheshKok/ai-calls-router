@@ -81,7 +81,10 @@ def test_tool_detection_parity_across_wires(tool_name: str, expected_tier: str) 
 
 
 def test_direct_module_contains_no_decision_logic() -> None:
-    tree = ast.parse(Path("ai_calls_router/routing/direct.py").read_text(encoding="utf-8"))
+    # Anchor to the repo root via __file__ so the read is CWD-independent (the
+    # test passes from any working directory, e.g. an IDE single-test run).
+    direct_py = Path(__file__).resolve().parents[2] / "ai_calls_router" / "routing" / "direct.py"
+    tree = ast.parse(direct_py.read_text(encoding="utf-8"))
     imports_decide = any(
         isinstance(node, ast.ImportFrom)
         and node.module == "ai_calls_router.routing"
