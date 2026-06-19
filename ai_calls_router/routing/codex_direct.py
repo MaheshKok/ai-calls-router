@@ -1,9 +1,12 @@
 """Direct routed calls for Codex/OpenAI Responses tiers.
 
 Codex subscription OAuth does not fit LiteLLM's API-key-only completion path,
-so Codex tiers use the Responses API wire directly. The helper keeps that path
-small, strips routed-only reasoning payloads, and returns None on provider
-errors so serving can fall back to passthrough.
+so Codex tiers use the Responses API wire directly. The ChatGPT Codex backend
+is stateless -- it rejects ``previous_response_id`` ("Unsupported parameter")
+-- so the path drops that field and replays full input, while preserving the
+encrypted ``reasoning`` items the backend needs to pair a ``function_call`` with
+its ``function_call_output``. It returns None on provider errors so serving can
+fall back to passthrough.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from typing import TYPE_CHECKING, Literal, cast
 import httpx
 
 from ai_calls_router._lib import jsonnum
+from ai_calls_router.accounting import shrink_stats
 from ai_calls_router.routing.config_schema import (
     ConfigSchemaError,
     is_codex_tier,
@@ -24,7 +28,7 @@ from ai_calls_router.routing.config_schema import (
 )
 
 if TYPE_CHECKING:
-    from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
+    from ai_calls_router._lib.types import JsonObject, JsonValue
 
 logger = logging.getLogger("acr.codex_direct")
 
@@ -48,20 +52,25 @@ def native_model_id(tier_cfg: JsonObject) -> str:
     return model
 
 
-def _strip_reasoning_items(input_value: JsonValue) -> JsonValue:
-    """Return Responses input without encrypted reasoning items."""
-    if not isinstance(input_value, list):
-        return copy.deepcopy(input_value)
-    cleaned: JsonArray = []
-    for item in input_value:
-        if isinstance(item, dict) and item.get("type") == "reasoning":
-            continue
-        cleaned.append(copy.deepcopy(item))
-    return cleaned
-
-
 def prepare_responses_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
-    """Build a deterministic Responses request body for the routed Codex tier."""
+    """Build a deterministic Responses request body for the routed Codex tier.
+
+    ``stream`` and ``previous_response_id`` are dropped: the path sets ``stream``
+    per auth mode, and the ChatGPT Codex backend rejects ``previous_response_id``
+    ("Unsupported parameter") because it is stateless -- Codex replays full input
+    history instead. Encrypted ``reasoning`` items are preserved: they precede
+    their ``function_call`` and the backend needs them to pair the call with its
+    ``function_call_output`` (dropping them triggers a 400 "No tool output found
+    for function call"). The model id and ``max_output_tokens`` are normalized to
+    the tier.
+
+    Args:
+        body: Original OpenAI Responses request body from the client.
+        tier_cfg: Tier config marked as a Codex tier.
+
+    Returns:
+        A new Responses body with the routed model and clamped token ceiling.
+    """
     parsed = parse_tier_config(tier_cfg)
     routed = {
         key: copy.deepcopy(value)
@@ -69,8 +78,6 @@ def prepare_responses_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject
         if key not in {"stream", "previous_response_id"}
     }
     routed["model"] = native_model_id(tier_cfg)
-    if "input" in body:
-        routed["input"] = _strip_reasoning_items(body["input"])
     requested = body.get("max_output_tokens")
     if parsed.max_tokens is not None:
         over_limit = (
@@ -81,6 +88,43 @@ def prepare_responses_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject
         if over_limit:
             routed["max_output_tokens"] = parsed.max_tokens
     return routed
+
+
+def unpaired_function_call_ids(body: JsonObject) -> list[str]:
+    """Return ids of ``function_call`` items with no matching output in ``body``.
+
+    The ChatGPT Codex backend is stateless: with ``previous_response_id`` dropped
+    it validates the full input array, so every ``function_call`` /
+    ``custom_tool_call`` must be answered by a ``function_call_output`` /
+    ``custom_tool_call_output`` present in the same array. Codex sends delta input
+    that relies on server-side state, so a routed continuation turn can carry a
+    call whose output lives server-side -- that orphan triggers a 400 "No tool
+    output found for function call". Callers decline routing (fall back to
+    passthrough) when this is non-empty.
+
+    Args:
+        body: A prepared Responses request body.
+
+    Returns:
+        Sorted call ids of unanswered function calls; empty when input is safe.
+    """
+    items = body.get("input")
+    if not isinstance(items, list):
+        return []
+    calls: set[str] = set()
+    answered: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str):
+            continue
+        item_type = item.get("type")
+        if item_type in {"function_call", "custom_tool_call"}:
+            calls.add(call_id)
+        elif item_type in {"function_call_output", "custom_tool_call_output"}:
+            answered.add(call_id)
+    return sorted(calls - answered)
 
 
 def _api_key_headers(api_key: str) -> dict[str, str]:
@@ -173,7 +217,7 @@ def _response_from_sse(text: str) -> JsonObject | None:
     return None
 
 
-async def responses_call(
+async def responses_call(  # noqa: PLR0911 - fail-open routing declines to passthrough.
     *,
     body: JsonObject,
     tier_cfg: JsonObject,
@@ -181,7 +225,7 @@ async def responses_call(
     auth_mode: Literal["api_key", "oauth"] = "api_key",
     chatgpt_headers: list[tuple[str, str]] | None = None,
     client: httpx.AsyncClient | None = None,
-) -> tuple[JsonObject, tuple[int, int, int, int]] | None:
+) -> tuple[JsonObject, tuple[int, int, int, int], shrink_stats.ShrinkStats] | None:
     """POST a sanitized Responses request to a Codex tier.
 
     Args:
@@ -193,8 +237,8 @@ async def responses_call(
         client: Optional shared HTTP client for tests or server reuse.
 
     Returns:
-        Parsed Responses JSON body and normalized token usage, or None when
-        the caller must passthrough.
+        Parsed Responses JSON body, normalized token usage, and shrink stats,
+        or None when the caller must passthrough.
     """
     try:
         target = (
@@ -210,6 +254,15 @@ async def responses_call(
             return None
         url, headers = target
         payload = prepare_responses_body(body, tier_cfg)
+        orphans = unpaired_function_call_ids(payload)
+        if orphans:
+            logger.info(
+                "codex direct declined: %d unanswered function_call(s) in input "
+                "(stateless backend would 400); passing through",
+                len(orphans),
+            )
+            return None
+        shrink = shrink_stats.compute_shrink(path="none", before=body, after=payload)
         if auth_mode == "oauth":
             payload["stream"] = True
             payload.pop("max_output_tokens", None)
@@ -240,11 +293,15 @@ async def responses_call(
                     url,
                     _provider_error_excerpt(response),
                 )
-            return (parsed_sse, _response_usage(parsed_sse)) if parsed_sse is not None else None
+            return (
+                (parsed_sse, _response_usage(parsed_sse), shrink)
+                if parsed_sse is not None
+                else None
+            )
         parsed_response = cast("JsonValue", response.json())
         if not isinstance(parsed_response, dict):
             return None
-        return parsed_response, _response_usage(parsed_response)
+        return parsed_response, _response_usage(parsed_response), shrink
     except (ConfigSchemaError, httpx.HTTPError, ValueError) as exc:
         logger.warning("codex direct call failed (%s); passing through", exc, exc_info=True)
         return None

@@ -50,6 +50,9 @@ class _FakePopen:
     def terminate(self) -> None:
         self.terminated = True
 
+    def wait(self) -> int:
+        return 0
+
 
 class _KillRecorder:
     """os.kill stand-in tracking signals and simulated process liveness."""

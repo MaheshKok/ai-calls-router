@@ -201,6 +201,30 @@ def test_compute_shrink_measures_before_and_after() -> None:
     assert stats.chars_saved == 7
 
 
+def test_compute_shrink_counts_responses_function_outputs() -> None:
+    before = {
+        "input": [
+            {"type": "function_call_output", "call_id": "call_1", "output": "abcdef"},
+            {"type": "custom_tool_call_output", "call_id": "call_2", "output": "xyz"},
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "ignore"}],
+            },
+        ]
+    }
+    after = {
+        "input": [
+            {"type": "function_call_output", "call_id": "call_1", "output": "abc"},
+            {"type": "custom_tool_call_output", "call_id": "call_2", "output": "x"},
+        ]
+    }
+    stats = compute_shrink(path="compress", before=before, after=after)
+    assert stats.chars_before == 9
+    assert stats.chars_after == 4
+    assert stats.chars_saved == 5
+
+
 def test_compute_shrink_no_op_identity_gives_zero_saved() -> None:
     body = {"messages": [_tool_result_msg("unchanged")]}
     stats = compute_shrink(path="reduce", before=body, after=body)

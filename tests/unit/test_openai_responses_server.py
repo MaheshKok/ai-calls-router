@@ -8,9 +8,9 @@ from pathlib import Path
 import httpx
 import pytest
 from starlette.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 from ai_calls_router.accounting import metrics as metrics_mod
+from ai_calls_router.accounting import shrink_stats
 from ai_calls_router.proxy import server as server_mod
 from ai_calls_router.proxy.server import create_app
 from ai_calls_router.routing import decide as routing
@@ -161,7 +161,7 @@ class _FakeCodexResponsesCall:
         auth_mode: str = "api_key",
         chatgpt_headers: list[tuple[str, str]] | None = None,
         client: httpx.AsyncClient | None = None,
-    ) -> tuple[dict[str, object], tuple[int, int, int, int]]:
+    ) -> tuple[dict[str, object], tuple[int, int, int, int], shrink_stats.ShrinkStats]:
         """Record direct Codex call input and return a Responses body."""
         self.calls.append(
             {
@@ -193,7 +193,11 @@ class _FakeCodexResponsesCall:
                 "input_tokens_details": {"cached_tokens": 1},
             },
         }
-        return response, (1, 2, 1, 0)
+        return (
+            response,
+            (1, 2, 1, 0),
+            shrink_stats.ShrinkStats(path="none", chars_before=4, chars_after=4),
+        )
 
 
 class _FailingCodexResponsesCall:
@@ -309,50 +313,6 @@ def test_responses_streaming_tool_result_routes_to_deepseek_direct(
     latest = client.get("/metrics").json()["last_requests"][0]
     assert latest["path"] == "/v1/responses"
     assert latest["route"] == "direct"
-
-
-def test_responses_websocket_tool_result_routes_to_deepseek_direct(
-    *,
-    client: TestClient,
-    upstream: _Upstream,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake = _FakeDirectCall(ROUTED_TEXT_BODY)
-    monkeypatch.setattr(rc.anthropic_direct, "direct_call", fake)
-    messages: list[str] = []
-
-    with client.websocket_connect(
-        "/v1/responses",
-        headers={
-            "authorization": "Bearer client-premium-secret",
-            "chatgpt-account-id": "acct_123",
-        },
-    ) as websocket:
-        websocket.send_text(
-            json.dumps(
-                {
-                    "type": "response.create",
-                    "response": _responses_tool_result_body(),
-                }
-            )
-        )
-        for _ in range(10):
-            try:
-                message = websocket.receive_text()
-            except WebSocketDisconnect:
-                break
-            messages.append(message)
-            if (
-                '"type":"response.completed"' in message
-                or '"type": "response.completed"' in message
-            ):
-                break
-
-    assert any("response.completed" in message for message in messages)
-    assert upstream.requests == []
-    assert fake.calls[0]["api_key"] == "tier-key"
-    assert "client-premium-secret" not in json.dumps(fake.calls[0])
-    assert "must-not-route" not in json.dumps(fake.calls[0]["body"])
 
 
 def test_responses_non_streaming_returns_response_json(

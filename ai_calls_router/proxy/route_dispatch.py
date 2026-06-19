@@ -16,12 +16,11 @@ from typing import TYPE_CHECKING, cast
 from starlette.responses import JSONResponse, Response
 
 from ai_calls_router._lib import logging_setup
-from ai_calls_router.accounting import metrics, savings, shrink_stats
+from ai_calls_router.accounting import savings, shrink_stats
 from ai_calls_router.proxy import websocket_passthrough
-from ai_calls_router.routing import codex_direct, provider_config
+from ai_calls_router.routing import codex_direct
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
-from ai_calls_router.routing.adapters import adapter_for_path
 from ai_calls_router.routing.config_schema import (
     ConfigSchemaError,
     is_codex_tier,
@@ -56,57 +55,6 @@ class RouteAttempt:
     cache_creation_tokens: int = 0
     duration: float = 0.0
     shrink: shrink_stats.ShrinkStats | None = None
-
-
-def record_ws_route_attempt(headers: Mapping[str, str], attempt: RouteAttempt) -> None:
-    """Record one WebSocket response.create route attempt for dashboard visibility."""
-    try:
-        m = metrics.get_metrics()
-        shrink = attempt.shrink or shrink_stats.compute_shrink(path="none", before={}, after={})
-        user_agent = headers.get("user-agent", "")
-        routed = attempt.response is not None
-        m.incr_total()
-        if routed:
-            m.incr_routed()
-            route = "routed"
-            status = 101
-        else:
-            m.incr_passthrough()
-            if attempt.reason == "response_premium_guard":
-                m.incr_escalated()
-            elif attempt.reason in {"routing_error", "routed_fallback", "tier_unavailable"}:
-                m.incr_fallback()
-            route = (
-                "premium_guard"
-                if attempt.reason in {"request_premium_guard", "response_premium_guard"}
-                else "passthrough"
-            )
-            status = 0
-        m.record_request(
-            method="WS",
-            path="/v1/responses",
-            status=status,
-            tier=attempt.tier,
-            route=route,
-            model=attempt.model,
-            user_agent=user_agent,
-            client_ip="",
-            tool_names=attempt.tool_names,
-            input_tokens=attempt.input_tokens,
-            output_tokens=attempt.output_tokens,
-            cache_read=attempt.cache_read_tokens,
-            cache_creation=attempt.cache_creation_tokens,
-            duration=attempt.duration,
-            shrink_chars_before=shrink.chars_before,
-            shrink_chars_after=shrink.chars_after,
-            premium_model="" if routed else attempt.model,
-            agent=metrics.identify_agent(user_agent),
-            session_id="",
-            decision_reason=attempt.reason,
-            request_id=logging_setup.current_request_id(),
-        )
-    except Exception as exc:
-        logger.warning("acr: websocket metrics update failed (%s); continuing", exc, exc_info=True)
 
 
 def resolve_tier_config(
@@ -387,57 +335,6 @@ async def try_route(  # noqa: PLR0911 - pure move of fail-open routing branches.
     except Exception as exc:
         logger.warning("acr: routing decision failed (%s); passing through", exc, exc_info=True)
         return RouteAttempt(reason="routing_error", model=requested_model, tool_names=names)
-
-
-async def try_route_ws_response_create(
-    first_msg_raw: str,
-    headers: Mapping[str, str],
-    *,
-    routes_loader: Callable[[], JsonObject],
-) -> list[str] | None:
-    """Try to serve one Codex WS `response.create` through the routed core."""
-    try:
-        body = websocket_passthrough.response_create_to_http_body(first_msg_raw)
-        if body is None:
-            return None
-        adapter = adapter_for_path("/v1/responses")
-        if adapter is None:
-            return None
-        routes = routes_loader()
-        group = provider_config.resolve_agent_group(
-            path="/v1/responses",
-            headers=headers,
-            routes=routes,
-            adapter_default=adapter.default_agent_group,
-        )
-        if group is None:
-            return None
-        body_bytes = json.dumps(
-            body, separators=(",", ":"), ensure_ascii=False, sort_keys=True
-        ).encode()
-        user_agent = headers.get("user-agent", "")
-        attempt = await try_route(
-            body_bytes,
-            adapter=adapter,
-            group=group,
-            request_path="/v1/responses",
-            request_headers=headers,
-            user_agent=user_agent,
-            agent=metrics.identify_agent(user_agent),
-            session=None,
-            routes_loader=routes_loader,
-        )
-        record_ws_route_attempt(headers, attempt)
-        if attempt.response is None:
-            return None
-        previous_response_id = body.get("previous_response_id")
-        response_id = previous_response_id if isinstance(previous_response_id, str) else None
-        return websocket_passthrough.sse_to_ws_messages(
-            bytes(attempt.response.body), response_id=response_id
-        )
-    except Exception as exc:
-        logger.warning("acr: websocket routing decision failed (%s); passing through", exc)
-        return None
 
 
 def wants_stream(client_body: JsonObject, anthropic_body: JsonObject) -> bool:

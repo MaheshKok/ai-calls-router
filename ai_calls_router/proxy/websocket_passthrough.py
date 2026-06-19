@@ -1,8 +1,12 @@
 """WebSocket passthrough for Codex ChatGPT-auth Responses traffic.
 
-This module intentionally handles only the live Codex OAuth path first:
-`/v1/responses` from Codex to `wss://chatgpt.com/backend-api/codex/responses`.
-HTTP routing and non-streaming conversions stay in the existing adapter stack.
+This module relays Codex ChatGPT-auth Responses WebSockets transparently to
+`wss://chatgpt.com/backend-api/codex/responses`: every client frame is forwarded
+to the backend unchanged and every backend frame is forwarded back unchanged.
+Frames are never intercepted or re-routed, so the stateful conversation (server
+side `previous_response_id` and function-call pairing) stays intact. A passive
+`_UsageRecorder` sniffs the relayed `response.completed` frames so the dashboard
+records real token usage, model, tools, and duration without altering traffic.
 """
 
 from __future__ import annotations
@@ -12,22 +16,30 @@ import base64
 import contextlib
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, cast
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
+from ai_calls_router._lib import logging_setup
+from ai_calls_router.accounting import metrics
+
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Mapping
+    from collections.abc import Iterable, Mapping
 
     from websockets.typing import Subprotocol
 
-    from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
+    from ai_calls_router._lib.types import JsonObject, JsonValue
 
 CHATGPT_CODEX_RESPONSES_WS = "wss://chatgpt.com/backend-api/codex/responses"
 logger = logging.getLogger("acr.websocket")
 _CHATGPT_ACCOUNT_CLAIM = "https://api.openai.com/auth.chatgpt_account_id"
+_TERMINAL_RESPONSE_TYPES = frozenset(
+    {"response.completed", "response.failed", "response.incomplete"}
+)
+_FUNCTION_CALL_TYPES = frozenset({"function_call", "custom_tool_call"})
 _HOP_HEADERS = frozenset(
     {
         "host",
@@ -41,20 +53,18 @@ _HOP_HEADERS = frozenset(
 )
 
 
-async def forward_codex_chatgpt(
-    websocket: WebSocket,
-    *,
-    sub_path: str = "",
-    route_first_frame: Callable[[str, Mapping[str, str]], Awaitable[list[str] | None]]
-    | None = None,
-) -> None:
+async def forward_codex_chatgpt(websocket: WebSocket, *, sub_path: str = "") -> None:
     """Relay a Codex ChatGPT-auth WebSocket to the ChatGPT Codex backend.
+
+    The relay is transparent: client frames reach the backend unchanged and
+    backend frames reach the client unchanged, so Codex's stateful
+    `previous_response_id` continuation and function-call pairing are never
+    disrupted. A `_UsageRecorder` observes the relayed frames to feed dashboard
+    metrics; it never modifies what is sent.
 
     Args:
         websocket: Accepted Starlette WebSocket.
         sub_path: Optional `/responses/...` suffix to preserve.
-        route_first_frame: Optional callback that returns WebSocket messages
-            when acr can serve a `response.create` frame itself.
     """
     headers = codex_chatgpt_headers(websocket.headers)
     if headers is None:
@@ -65,15 +75,11 @@ async def forward_codex_chatgpt(
     await websocket.accept(subprotocol=subprotocols[0] if subprotocols else None)
     target = _chatgpt_ws_url(sub_path, websocket.url.query)
     user_agent = websocket.headers.get("user-agent")
-    call_items: dict[str, JsonObject] = {}
+    recorder = _UsageRecorder(user_agent or "")
     first_msg = await _receive_first_text(websocket)
     if first_msg is None:
         return
-    if await _try_send_routed_response(
-        websocket, first_msg, route_first_frame, websocket.headers, call_items
-    ):
-        return
-    _remember_call_items(first_msg, call_items)
+    recorder.note_request(first_msg)
     try:
         async with connect(
             target,
@@ -82,13 +88,7 @@ async def forward_codex_chatgpt(
             subprotocols=subprotocols or None,
         ) as upstream:
             await upstream.send(first_msg)
-            await _relay_both(
-                websocket,
-                upstream,
-                route_frame=route_first_frame,
-                headers=websocket.headers,
-                call_items=call_items,
-            )
+            await _relay_both(websocket, upstream, recorder=recorder)
     except Exception as exc:
         logger.warning("acr: codex websocket passthrough failed (%s)", exc, exc_info=True)
         with contextlib.suppress(Exception):
@@ -119,7 +119,7 @@ def response_create_to_http_body(raw_msg: str) -> JsonObject | None:
     """Normalize a Codex WS `response.create` frame into an HTTP Responses body.
 
     Args:
-        raw_msg: First WebSocket text frame from Codex.
+        raw_msg: A WebSocket text frame from Codex.
 
     Returns:
         A copied HTTP body with `stream: true`, or `None` for non-create frames.
@@ -140,38 +140,156 @@ def response_create_to_http_body(raw_msg: str) -> JsonObject | None:
     return {**body, "stream": True}
 
 
-def sse_to_ws_messages(sse_bytes: bytes) -> list[str]:
-    """Convert Responses SSE bytes into Codex WebSocket JSON messages.
+class _UsageRecorder:
+    """Passively records dashboard metrics from relayed Codex WS frames.
 
-    Args:
-        sse_bytes: Synthesized Responses SSE bytes.
-
-    Returns:
-        The `data:` payloads, excluding the SSE-only `[DONE]` sentinel.
+    A Codex WebSocket carries many request/response cycles. Each client
+    `response.create` frame refreshes the pending request context (model, tool
+    names, start time); each terminal backend frame (`response.completed`,
+    `response.failed`, `response.incomplete`) emits one metrics row with the
+    real token usage parsed from that frame. The recorder never mutates frames.
     """
-    messages: list[str] = []
-    for block in sse_bytes.decode("utf-8").split("\n\n"):
-        for line in block.splitlines():
-            if not line.startswith("data:"):
-                continue
-            data = line.removeprefix("data:").strip()
-            if data and data != "[DONE]":
-                messages.append(data)
-    return messages
+
+    def __init__(self, user_agent: str) -> None:
+        """Bind the recorder to one WebSocket connection's client identity.
+
+        Args:
+            user_agent: Client User-Agent header, used to identify the agent.
+        """
+        self._user_agent = user_agent
+        self._agent = metrics.identify_agent(user_agent)
+        self._model = ""
+        self._tool_names: list[str] = []
+        self._started: float | None = None
+
+    def note_request(self, raw_msg: str) -> None:
+        """Capture request context from a client `response.create` frame.
+
+        Args:
+            raw_msg: A client WebSocket text frame; non-create frames are ignored.
+        """
+        body = response_create_to_http_body(raw_msg)
+        if body is None:
+            return
+        model = body.get("model")
+        self._model = model if isinstance(model, str) else ""
+        self._tool_names = _request_tool_names(body)
+        self._started = time.monotonic()
+
+    def note_response(self, raw_msg: str) -> None:
+        """Record one metrics row when a backend frame ends a response.
+
+        Args:
+            raw_msg: A backend WebSocket text frame; non-terminal frames are
+                ignored.
+        """
+        try:
+            parsed = cast("JsonValue", json.loads(raw_msg))
+        except json.JSONDecodeError:
+            return
+        if not isinstance(parsed, dict):
+            return
+        msg_type = parsed.get("type")
+        if msg_type not in _TERMINAL_RESPONSE_TYPES:
+            return
+        response = parsed.get("response")
+        self._record(str(msg_type), response if isinstance(response, dict) else {})
+
+    def _record(self, msg_type: str, response: JsonObject) -> None:
+        """Persist one WebSocket request row from a terminal response frame."""
+        input_tokens, output_tokens, cache_read, cache_creation = _usage_from_response(response)
+        model = response.get("model")
+        resolved_model = model if isinstance(model, str) and model else self._model
+        tool_names = _response_tool_names(response) or self._tool_names
+        duration = time.monotonic() - self._started if self._started is not None else 0.0
+        status = 200 if msg_type == "response.completed" else 400
+        try:
+            m = metrics.get_metrics()
+            m.incr_total()
+            m.incr_passthrough()
+            m.record_request(
+                method="WS",
+                path="/v1/responses",
+                status=status,
+                tier="premium",
+                route="passthrough",
+                model=resolved_model,
+                user_agent=self._user_agent,
+                client_ip="",
+                tool_names=tool_names,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read=cache_read,
+                cache_creation=cache_creation,
+                duration=duration,
+                premium_model=resolved_model,
+                agent=self._agent,
+                session_id="",
+                decision_reason="codex_passthrough",
+                request_id=logging_setup.current_request_id(),
+            )
+        except Exception as exc:
+            logger.warning("acr: websocket metrics record failed (%s); continuing", exc)
+        self._started = None
+
+
+def _usage_from_response(response: JsonObject) -> tuple[int, int, int, int]:
+    """Return Responses usage as cache-miss input, output, cache-read, cache-create."""
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return 0, 0, 0, 0
+    cache_read = 0
+    details = usage.get("input_tokens_details")
+    if isinstance(details, dict):
+        cache_read = _non_negative_int(details.get("cached_tokens"))
+    total_input = _non_negative_int(usage.get("input_tokens"))
+    output_tokens = _non_negative_int(usage.get("output_tokens"))
+    return max(total_input - cache_read, 0), output_tokens, cache_read, 0
+
+
+def _non_negative_int(value: JsonValue) -> int:
+    """Return a non-negative int for a usage field, treating bad input as zero."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(value, 0)
+
+
+def _request_tool_names(body: JsonObject) -> list[str]:
+    """Return function-call tool names referenced in a request body's input."""
+    items = body.get("input")
+    if not isinstance(items, list):
+        return []
+    return _tool_names_from_items(items)
+
+
+def _response_tool_names(response: JsonObject) -> list[str]:
+    """Return function-call tool names the model emitted in a response output."""
+    items = response.get("output")
+    if not isinstance(items, list):
+        return []
+    return _tool_names_from_items(items)
+
+
+def _tool_names_from_items(items: list[JsonValue]) -> list[str]:
+    """Return ordered, de-duplicated function-call names from response items."""
+    names: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") not in _FUNCTION_CALL_TYPES:
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    return names
 
 
 async def _relay_both(
     websocket: WebSocket,
     upstream: ClientConnection,
     *,
-    route_frame: Callable[[str, Mapping[str, str]], Awaitable[list[str] | None]] | None,
-    headers: Mapping[str, str],
-    call_items: dict[str, JsonObject],
+    recorder: _UsageRecorder,
 ) -> None:
-    client_task = asyncio.create_task(
-        _client_to_upstream(websocket, upstream, route_frame, headers, call_items)
-    )
-    upstream_task = asyncio.create_task(_upstream_to_client(websocket, upstream, call_items))
+    client_task = asyncio.create_task(_client_to_upstream(websocket, upstream, recorder))
+    upstream_task = asyncio.create_task(_upstream_to_client(websocket, upstream, recorder))
     _done, pending = await asyncio.wait(
         {client_task, upstream_task}, return_when=asyncio.FIRST_COMPLETED
     )
@@ -186,17 +304,11 @@ async def _relay_both(
 async def _client_to_upstream(
     websocket: WebSocket,
     upstream: ClientConnection,
-    route_frame: Callable[[str, Mapping[str, str]], Awaitable[list[str] | None]] | None,
-    headers: Mapping[str, str],
-    call_items: dict[str, JsonObject],
+    recorder: _UsageRecorder,
 ) -> None:
     try:
         async for message in websocket.iter_text():
-            if await _try_send_routed_response(
-                websocket, message, route_frame, headers, call_items
-            ):
-                continue
-            _remember_call_items(message, call_items)
+            recorder.note_request(message)
             await upstream.send(message)
     except (ConnectionClosed, RuntimeError, WebSocketDisconnect):
         return
@@ -206,110 +318,17 @@ async def _client_to_upstream(
 
 
 async def _upstream_to_client(
-    websocket: WebSocket, upstream: ClientConnection, call_items: dict[str, JsonObject]
+    websocket: WebSocket, upstream: ClientConnection, recorder: _UsageRecorder
 ) -> None:
     try:
         async for message in upstream:
             if isinstance(message, str):
-                _remember_call_items(message, call_items)
+                recorder.note_response(message)
                 await websocket.send_text(message)
             else:
                 await websocket.send_bytes(message)
     except (ConnectionClosed, RuntimeError, WebSocketDisconnect):
         return
-
-
-async def _try_send_routed_response(
-    websocket: WebSocket,
-    raw_msg: str,
-    route_frame: Callable[[str, Mapping[str, str]], Awaitable[list[str] | None]] | None,
-    headers: Mapping[str, str],
-    call_items: dict[str, JsonObject],
-) -> bool:
-    if route_frame is None:
-        return False
-    routed_messages = await route_frame(_with_cached_call_items(raw_msg, call_items), headers)
-    if routed_messages is None:
-        return False
-    for message in routed_messages:
-        _remember_call_items(message, call_items)
-        await websocket.send_text(message)
-    return True
-
-
-def _with_cached_call_items(raw_msg: str, call_items: Mapping[str, JsonObject]) -> str:
-    if not call_items:
-        return raw_msg
-    body = response_create_to_http_body(raw_msg)
-    if body is None:
-        return raw_msg
-    input_items = body.get("input")
-    if not isinstance(input_items, list):
-        return raw_msg
-    expanded = _inject_missing_call_items(cast("JsonArray", input_items), call_items)
-    if expanded == input_items:
-        return raw_msg
-    routed_body = {**body, "input": expanded}
-    return json.dumps(
-        {"type": "response.create", "response": routed_body},
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-
-
-def _inject_missing_call_items(items: JsonArray, call_items: Mapping[str, JsonObject]) -> JsonArray:
-    known = _known_call_ids(items)
-    expanded: JsonArray = []
-    for item in items:
-        if isinstance(item, dict):
-            call_id = item.get("call_id")
-            if item.get("type") in {"function_call_output", "custom_tool_call_output"}:
-                cached = call_items.get(str(call_id))
-                if cached is not None and str(call_id) not in known:
-                    expanded.append(cached)
-                    known.add(str(call_id))
-        expanded.append(item)
-    return expanded
-
-
-def _known_call_ids(items: JsonArray) -> set[str]:
-    known: set[str] = set()
-    for item in items:
-        if isinstance(item, dict) and item.get("type") in {"function_call", "custom_tool_call"}:
-            call_id = item.get("call_id")
-            if call_id:
-                known.add(str(call_id))
-    return known
-
-
-def _remember_call_items(raw_msg: str, call_items: dict[str, JsonObject]) -> None:
-    try:
-        parsed = cast("JsonValue", json.loads(raw_msg))
-    except json.JSONDecodeError:
-        return
-    _remember_call_items_from_value(parsed, call_items)
-
-
-def _remember_call_items_from_value(value: JsonValue, call_items: dict[str, JsonObject]) -> None:
-    if isinstance(value, dict):
-        call_item = _call_item(value)
-        if call_item is not None:
-            call_items[str(call_item["call_id"])] = call_item
-        for child in value.values():
-            _remember_call_items_from_value(child, call_items)
-    elif isinstance(value, list):
-        for child in value:
-            _remember_call_items_from_value(child, call_items)
-
-
-def _call_item(value: JsonObject) -> JsonObject | None:
-    if value.get("type") not in {"function_call", "custom_tool_call"}:
-        return None
-    call_id = value.get("call_id")
-    name = value.get("name")
-    if not call_id or not name:
-        return None
-    return dict(value)
 
 
 def _forwardable_headers(headers: Mapping[str, str]) -> list[tuple[str, str]]:

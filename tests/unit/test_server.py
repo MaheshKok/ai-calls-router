@@ -56,8 +56,9 @@ ROUTED_BODY: JsonObject = {
 }
 
 
-def test_route_table_unchanged() -> None:
+def test_route_table_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Route registration order and handlers must survive server splits."""
+    monkeypatch.setenv("ACR_HOME", str(tmp_path))
     routes = [
         (
             route.path,

@@ -5,20 +5,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from starlette.applications import Starlette
-from starlette.responses import Response
 from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from ai_calls_router._lib.types import JsonObject
 from ai_calls_router.accounting import metrics
-from ai_calls_router.proxy import route_dispatch, server, websocket_passthrough
-from ai_calls_router.routing.adapters.base import ClientAdapter
+from ai_calls_router.proxy import server, websocket_passthrough
 
 if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
@@ -56,14 +52,6 @@ class _FakeConnect:
 
     async def __aexit__(self, *exc: object) -> None:
         await self.upstream.close()
-
-
-class _SendOnlyWebSocket:
-    def __init__(self) -> None:
-        self.sent: list[str] = []
-
-    async def send_text(self, message: str) -> None:
-        self.sent.append(message)
 
 
 class _HangingWebSocket:
@@ -112,214 +100,174 @@ def test_response_create_to_http_body_ignores_non_create_frames(raw_msg: str) ->
     assert websocket_passthrough.response_create_to_http_body(raw_msg) is None
 
 
-def test_codex_websocket_routed_response_short_circuits_upstream(monkeypatch) -> None:
-    captures: list[JsonObject] = []
-    raw_captures: list[bytes] = []
-    m = metrics.Metrics()
-
-    async def _fake_try_route(
-        body_bytes: bytes,
-        *,
-        adapter: ClientAdapter,
-        group: str,
-        request_path: str,
-        request_headers: Mapping[str, str],
-        user_agent: str = "",
-        agent: str = "",
-        session: str | None = None,
-        routes_loader: Callable[[], JsonObject],
-    ) -> route_dispatch.RouteAttempt:
-        del routes_loader
-        raw_captures.append(body_bytes)
-        captures.append(json.loads(body_bytes))
-        sse = b'event: response.completed\ndata: {"type":"response.completed"}\n\ndata: [DONE]\n\n'
-        return route_dispatch.RouteAttempt(
-            response=Response(sse, media_type="text/event-stream"),
-            tier="codex_fast",
-            reason="routed",
-            model="gpt-5",
-            tool_names=["exec_command"],
-            input_tokens=11,
-            output_tokens=3,
-            cache_read_tokens=7,
-            duration=0.25,
-        )
-
-    def _connect(uri: str, **kwargs: object) -> _FakeConnect:
-        pytest.fail("routed response.create should not open upstream websocket")
-
-    monkeypatch.setattr(server, "_load_assembled_routes", lambda: {})
-    monkeypatch.setattr(route_dispatch, "try_route", _fake_try_route)
-    monkeypatch.setattr(route_dispatch.metrics, "get_metrics", lambda: m)
-    monkeypatch.setattr(websocket_passthrough, "connect", _connect)
-    app = Starlette(routes=[WebSocketRoute("/v1/responses", server.responses_ws)])
-
-    with (
-        TestClient(app) as client,
-        client.websocket_connect(
-            "/v1/responses",
-            headers={
-                "chatgpt-account-id": "acct_123",
-                "user-agent": "codex_cli_rs/0.0.0",
-            },
-        ) as websocket,
-    ):
-        websocket.send_text(
-            json.dumps(
-                {
-                    "type": "response.create",
-                    "response": {
-                        "model": "gpt-5",
-                        "metadata": {"z": 1, "a": 2},
-                        "input": [{"z": 1, "a": "Ω"}],
-                    },
-                }
-            )
-        )
-        assert websocket.receive_text() == '{"type":"response.completed"}'
-
-    assert captures == [
-        {
-            "model": "gpt-5",
-            "metadata": {"z": 1, "a": 2},
-            "input": [{"z": 1, "a": "Ω"}],
-            "stream": True,
-        }
-    ]
-    assert raw_captures == [
-        '{"input":[{"a":"Ω","z":1}],"metadata":{"a":2,"z":1},"model":"gpt-5","stream":true}'.encode()
-    ]
-    snapshot = m.snapshot()
-    assert snapshot["requests"] == {
-        "total": 1,
-        "routed": 1,
-        "passthrough": 0,
-        "errors": 0,
-        "escalated": 0,
-        "fallback": 0,
+def test_usage_from_response_reports_cache_miss_separately_from_cache_read() -> None:
+    usage = {
+        "input_tokens": 11702,
+        "output_tokens": 165,
+        "input_tokens_details": {"cached_tokens": 2432},
     }
-    latest = snapshot["last_requests"][0]
-    assert latest["method"] == "WS"
-    assert latest["path"] == "/v1/responses"
-    assert latest["status"] == 101
-    assert latest["route"] == "routed"
-    assert latest["tier"] == "codex_fast"
-    assert latest["model"] == "gpt-5"
-    assert latest["tool_names"] == ["exec_command"]
-    assert latest["input_tokens"] == 11
-    assert latest["output_tokens"] == 3
-    assert latest["cache_read_tokens"] == 7
-    assert latest["duration_ms"] == 250
 
-
-def test_codex_websocket_routes_later_output_with_cached_call(monkeypatch) -> None:
-    upstream = _FakeUpstream(
-        json.dumps(
-            {
-                "type": "response.output_item.done",
-                "item": {
-                    "type": "function_call",
-                    "call_id": "call_exec",
-                    "name": "exec_command",
-                    "arguments": '{"cmd":"pwd"}',
-                },
-            }
-        )
+    cache_miss, output, cache_read, cache_create = websocket_passthrough._usage_from_response(
+        {"usage": usage}
     )
-    captures: list[JsonObject] = []
 
-    async def _fake_try_route(
-        body_bytes: bytes,
-        *,
-        adapter: ClientAdapter,
-        group: str,
-        request_path: str,
-        request_headers: Mapping[str, str],
-        user_agent: str = "",
-        agent: str = "",
-        session: str | None = None,
-        routes_loader: Callable[[], JsonObject],
-    ) -> route_dispatch.RouteAttempt:
-        del routes_loader
-        captures.append(json.loads(body_bytes))
-        sse = b'event: response.completed\ndata: {"type":"response.completed"}\n\ndata: [DONE]\n\n'
-        return route_dispatch.RouteAttempt(response=Response(sse, media_type="text/event-stream"))
+    assert cache_miss == 9270
+    assert output == 165
+    assert cache_read == 2432
+    assert cache_create == 0
+
+
+def test_usage_from_response_returns_zeros_when_usage_absent() -> None:
+    assert websocket_passthrough._usage_from_response({}) == (0, 0, 0, 0)
+    assert websocket_passthrough._usage_from_response({"usage": None}) == (0, 0, 0, 0)
+
+
+def test_usage_from_response_clamps_cache_read_above_total() -> None:
+    usage = {"input_tokens": 5, "input_tokens_details": {"cached_tokens": 9}}
+
+    cache_miss, _output, cache_read, _create = websocket_passthrough._usage_from_response(
+        {"usage": usage}
+    )
+
+    assert cache_miss == 0
+    assert cache_read == 9
+
+
+@pytest.mark.parametrize("value", [True, False, -3, "7", None, 1.5])
+def test_non_negative_int_rejects_non_int_and_negative(value: object) -> None:
+    assert websocket_passthrough._non_negative_int(cast("object", value)) == 0
+
+
+def test_non_negative_int_passes_through_positive_int() -> None:
+    assert websocket_passthrough._non_negative_int(42) == 42
+
+
+def test_tool_names_from_items_dedupes_and_keeps_order() -> None:
+    items = [
+        {"type": "function_call", "name": "exec_command", "call_id": "a"},
+        {"type": "reasoning", "name": "ignored"},
+        {"type": "custom_tool_call", "name": "search_graph", "call_id": "b"},
+        {"type": "function_call", "name": "exec_command", "call_id": "c"},
+        {"type": "function_call", "call_id": "no-name"},
+    ]
+
+    assert websocket_passthrough._tool_names_from_items(items) == ["exec_command", "search_graph"]
+
+
+def test_recorder_ignores_non_terminal_frames() -> None:
+    m = metrics.Metrics()
+    recorder = websocket_passthrough._UsageRecorder("codex-tui/0.141.0")
+    recorder._record = lambda *a, **k: pytest.fail(  # type: ignore[method-assign]
+        "non-terminal frame must not record"
+    )
+
+    recorder.note_response('{"type":"response.output_item.done"}')
+    recorder.note_response("not-json")
+    recorder.note_response("[]")
+
+    assert m.snapshot()["requests"]["total"] == 0
+
+
+def test_passthrough_records_real_usage_from_completed_frame(monkeypatch) -> None:
+    m = metrics.Metrics()
+    completed = json.dumps(
+        {
+            "type": "response.completed",
+            "response": {
+                "model": "gpt-5.4-mini",
+                "usage": {
+                    "input_tokens": 11702,
+                    "output_tokens": 165,
+                    "input_tokens_details": {"cached_tokens": 2432},
+                },
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call_1",
+                        "arguments": "{}",
+                    }
+                ],
+            },
+        }
+    )
+    upstream = _FakeUpstream(completed)
 
     def _connect(uri: str, **kwargs: object) -> _FakeConnect:
         return _FakeConnect(upstream)
 
-    monkeypatch.setattr(server, "_load_assembled_routes", lambda: {})
-    monkeypatch.setattr(route_dispatch, "try_route", _fake_try_route)
     monkeypatch.setattr(websocket_passthrough, "connect", _connect)
+    monkeypatch.setattr(websocket_passthrough.metrics, "get_metrics", lambda: m)
     app = Starlette(routes=[WebSocketRoute("/v1/responses", server.responses_ws)])
 
     with (
         TestClient(app) as client,
         client.websocket_connect(
             "/v1/responses",
-            headers={
-                "chatgpt-account-id": "acct_123",
-                "user-agent": "codex_cli_rs/0.0.0",
-            },
+            headers={"chatgpt-account-id": "acct_123", "user-agent": "codex-tui/0.141.0"},
         ) as websocket,
     ):
-        websocket.send_text('{"type":"ping"}')
-        assert json.loads(websocket.receive_text())["type"] == "response.output_item.done"
         websocket.send_text(
             json.dumps(
                 {
                     "type": "response.create",
-                    "response": {
-                        "model": "gpt-5",
-                        "input": [
-                            {
-                                "type": "function_call_output",
-                                "call_id": "call_exec",
-                                "output": "/tmp/repo",
-                            }
-                        ],
-                    },
+                    "response": {"model": "gpt-5.4-mini", "input": "hello"},
                 }
             )
         )
-        assert websocket.receive_text() == '{"type":"response.completed"}'
+        assert json.loads(websocket.receive_text())["type"] == "response.completed"
 
-    assert upstream.sent == ['{"type":"ping"}']
-    assert captures == [
-        {
-            "model": "gpt-5",
-            "input": [
-                {
-                    "type": "function_call",
-                    "call_id": "call_exec",
-                    "name": "exec_command",
-                    "arguments": '{"cmd":"pwd"}',
-                },
-                {
-                    "type": "function_call_output",
-                    "call_id": "call_exec",
-                    "output": "/tmp/repo",
-                },
-            ],
-            "stream": True,
-        }
+    assert upstream.sent == [
+        json.dumps(
+            {"type": "response.create", "response": {"model": "gpt-5.4-mini", "input": "hello"}}
+        )
     ]
+    snapshot = m.snapshot()
+    assert snapshot["requests"]["total"] == 1
+    assert snapshot["requests"]["passthrough"] == 1
+    assert snapshot["requests"]["routed"] == 0
+    latest = snapshot["last_requests"][0]
+    assert latest["method"] == "WS"
+    assert latest["path"] == "/v1/responses"
+    assert latest["status"] == 200
+    assert latest["route"] == "passthrough"
+    assert latest["model"] == "gpt-5.4-mini"
+    assert latest["tool_names"] == ["exec_command"]
+    assert latest["input_tokens"] == 9270
+    assert latest["cache_read_tokens"] == 2432
+    assert latest["output_tokens"] == 165
+    assert latest["agent"] == metrics.identify_agent("codex-tui/0.141.0")
+    assert latest["decision_reason"] == "codex_passthrough"
 
 
-async def test_try_send_routed_response_declines_without_routed_messages() -> None:
-    websocket = _SendOnlyWebSocket()
-    call_items: dict[str, JsonObject] = {}
-
-    async def _decline(raw_msg: str, headers: dict[str, str]) -> list[str] | None:
-        return None
-
-    assert not await websocket_passthrough._try_send_routed_response(
-        cast("WebSocket", websocket), "{}", None, {}, call_items
+def test_passthrough_records_failed_response_as_error_status(monkeypatch) -> None:
+    m = metrics.Metrics()
+    upstream = _FakeUpstream(
+        json.dumps({"type": "response.failed", "response": {"model": "gpt-5.4-mini"}})
     )
-    assert not await websocket_passthrough._try_send_routed_response(
-        cast("WebSocket", websocket), "{}", _decline, {}, call_items
-    )
-    assert websocket.sent == []
+
+    def _connect(uri: str, **kwargs: object) -> _FakeConnect:
+        return _FakeConnect(upstream)
+
+    monkeypatch.setattr(websocket_passthrough, "connect", _connect)
+    monkeypatch.setattr(websocket_passthrough.metrics, "get_metrics", lambda: m)
+    app = Starlette(routes=[WebSocketRoute("/v1/responses", server.responses_ws)])
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/responses",
+            headers={"chatgpt-account-id": "acct_123", "user-agent": "codex-tui/0.141.0"},
+        ) as websocket,
+    ):
+        websocket.send_text(
+            json.dumps({"type": "response.create", "response": {"model": "gpt-5.4-mini"}})
+        )
+        assert json.loads(websocket.receive_text())["type"] == "response.failed"
+
+    latest = m.snapshot()["last_requests"][0]
+    assert latest["status"] == 400
+    assert latest["route"] == "passthrough"
 
 
 @pytest.mark.asyncio
@@ -335,119 +283,10 @@ async def test_relay_awaits_cancelled_client_task_and_closes_upstream(
     await websocket_passthrough._relay_both(
         cast("WebSocket", _HangingWebSocket()),
         cast("ClientConnection", upstream),
-        route_frame=None,
-        headers={},
-        call_items={},
+        recorder=websocket_passthrough._UsageRecorder(""),
     )
 
     assert upstream.closed
-
-
-def test_cached_call_helpers_ignore_non_matching_shapes() -> None:
-    call_items: dict[str, JsonObject] = {}
-    websocket_passthrough._remember_call_items("not-json", call_items)
-    websocket_passthrough._remember_call_items(
-        json.dumps({"item": {"type": "function_call", "call_id": "missing-name"}}),
-        call_items,
-    )
-    assert call_items == {}
-
-    websocket_passthrough._remember_call_items(
-        json.dumps(
-            {
-                "item": {
-                    "type": "function_call",
-                    "call_id": "call_exec",
-                    "name": "exec_command",
-                    "arguments": "{}",
-                }
-            }
-        ),
-        call_items,
-    )
-
-    assert websocket_passthrough._with_cached_call_items('{"type":"ping"}', call_items) == (
-        '{"type":"ping"}'
-    )
-    assert websocket_passthrough._with_cached_call_items(
-        json.dumps({"type": "response.create", "response": {"input": "hi"}}),
-        call_items,
-    ) == json.dumps({"type": "response.create", "response": {"input": "hi"}})
-
-    existing = json.dumps(
-        {
-            "type": "response.create",
-            "response": {
-                "input": [
-                    {
-                        "type": "function_call",
-                        "call_id": "call_exec",
-                        "name": "exec_command",
-                        "arguments": "{}",
-                    },
-                    {"type": "function_call_output", "call_id": "call_exec", "output": "ok"},
-                ]
-            },
-        }
-    )
-    assert websocket_passthrough._with_cached_call_items(existing, call_items) == existing
-
-
-async def test_ws_route_returns_none_when_routed_core_declines(monkeypatch) -> None:
-    m = metrics.Metrics()
-
-    async def _fake_try_route(
-        body_bytes: bytes,
-        *,
-        adapter: ClientAdapter,
-        group: str,
-        request_path: str,
-        request_headers: Mapping[str, str],
-        user_agent: str = "",
-        agent: str = "",
-        session: str | None = None,
-        routes_loader: Callable[[], JsonObject],
-    ) -> route_dispatch.RouteAttempt:
-        del routes_loader
-        return route_dispatch.RouteAttempt(
-            tier="codex_fast",
-            reason="routed_fallback",
-            model="gpt-5",
-            tool_names=["exec_command"],
-        )
-
-    monkeypatch.setattr(server, "_load_assembled_routes", lambda: {})
-    monkeypatch.setattr(route_dispatch, "try_route", _fake_try_route)
-    monkeypatch.setattr(route_dispatch.metrics, "get_metrics", lambda: m)
-
-    result = await route_dispatch.try_route_ws_response_create(
-        json.dumps({"type": "response.create", "response": {"model": "gpt-5", "input": "hi"}}),
-        {"chatgpt-account-id": "acct_123"},
-        routes_loader=lambda: {},
-    )
-
-    assert result is None
-    snapshot = m.snapshot()
-    assert snapshot["requests"]["fallback"] == 1
-    latest = snapshot["last_requests"][0]
-    assert latest["method"] == "WS"
-    assert latest["path"] == "/v1/responses"
-    assert latest["status"] == 0
-    assert latest["route"] == "passthrough"
-    assert latest["decision_reason"] == "routed_fallback"
-
-
-async def test_ws_route_errors_fail_open(monkeypatch) -> None:
-    def _fail_load_routes() -> JsonObject:
-        raise RuntimeError("broken config")
-
-    result = await route_dispatch.try_route_ws_response_create(
-        json.dumps({"type": "response.create", "response": {"model": "gpt-5", "input": "hi"}}),
-        {"chatgpt-account-id": "acct_123"},
-        routes_loader=_fail_load_routes,
-    )
-
-    assert result is None
 
 
 def test_codex_websocket_relays_chatgpt_oauth(monkeypatch) -> None:

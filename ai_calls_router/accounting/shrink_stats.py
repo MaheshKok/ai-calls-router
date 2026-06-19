@@ -1,14 +1,14 @@
 """Read-only measurement of how much a shrink pass removed from a request body.
 
-This module counts the tool_result characters in a request body and packages a
+This module counts tool-output characters in a request body and packages a
 before/after measurement (``ShrinkStats``) so the engine can report compression
 savings to logs, the savings ledger, and the metrics snapshot without changing
-what is sent. The router no longer runs a shrink pass of its own -- token
-reduction is delegated to the upstream Headroom layer -- so the engine currently
-feeds an unchanged body as both before and after and the stats report a no-op
-(path "none", zero chars saved). The plumbing is retained so upstream Headroom
-compression can be measured here later. Counting walks the Anthropic body shape,
-never mutates it, and treats any non-tool_result content as zero.
+what is sent. The router no longer runs a shrink pass of its own on native
+direct paths -- token reduction is delegated to the upstream Headroom layer --
+so those paths usually feed an unchanged body as both before and after and the
+stats report a no-op (path "none", zero chars saved). Counting walks Anthropic
+tool_result and OpenAI Responses function_call_output shapes, never mutates the
+body, and treats any non-tool-output content as zero.
 """
 
 from __future__ import annotations
@@ -71,13 +71,30 @@ def _message_tool_result_chars(message: JsonValue) -> int:
     )
 
 
-def tool_result_chars(body: JsonObject) -> int:
-    """Sum the character length of every tool_result text in a request body.
+def _responses_tool_output_chars(item: JsonValue) -> int:
+    """Count OpenAI Responses tool-output characters in one input item."""
+    if not isinstance(item, dict):
+        return 0
+    if item.get("type") not in {"function_call_output", "custom_tool_call_output"}:
+        return 0
+    return _content_chars(item.get("output"))
 
-    Walks all messages and counts only tool_result content -- the bytes the
-    shrink passes target. Non-tool_result content, malformed messages, and a
-    missing or non-list ``messages`` field all contribute 0. The body is never
-    mutated.
+
+def _responses_input_tool_output_chars(body: JsonObject) -> int:
+    """Count OpenAI Responses tool-output characters in a request body."""
+    input_value = body.get("input")
+    if not isinstance(input_value, list):
+        return 0
+    return sum(_responses_tool_output_chars(item) for item in input_value)
+
+
+def tool_result_chars(body: JsonObject) -> int:
+    """Sum the character length of every tool-output text in a request body.
+
+    Walks Anthropic ``messages`` and OpenAI Responses ``input`` and counts only
+    tool-output content -- the bytes the shrink passes target. Non-tool-output
+    content, malformed messages, and missing containers all contribute 0. The
+    body is never mutated.
 
     Args:
         body: Anthropic-format request body.
@@ -86,9 +103,12 @@ def tool_result_chars(body: JsonObject) -> int:
         Total tool_result characters in the body (0 when there are none).
     """
     messages = body.get("messages")
-    if not isinstance(messages, list):
-        return 0
-    return sum(_message_tool_result_chars(message) for message in messages)
+    message_chars = (
+        sum(_message_tool_result_chars(message) for message in messages)
+        if isinstance(messages, list)
+        else 0
+    )
+    return message_chars + _responses_input_tool_output_chars(body)
 
 
 @dataclass(frozen=True)
