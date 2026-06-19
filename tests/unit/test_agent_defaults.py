@@ -33,7 +33,14 @@ def test_every_group_has_non_empty_tool_map() -> None:
 
 
 def test_every_referenced_tier_exists_in_example_config() -> None:
-    known_tiers = set(_example_config()["tiers"]) | {"premium"}
+    example = _example_config()
+    agents = example["agents"]
+    known_tiers = {
+        tier
+        for agent in agents.values()
+        if isinstance(agent, dict)
+        for tier in (agent.get("tiers") or {})
+    } | {"premium"}
     referenced = {tier for tools in AGENT_DEFAULT_TOOLS.values() for tier in tools.values()}
     assert referenced <= known_tiers
 

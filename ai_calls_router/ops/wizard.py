@@ -20,6 +20,10 @@ import yaml
 
 from ai_calls_router._lib import config
 from ai_calls_router.ops import bootstrap
+from ai_calls_router.routing.agent_defaults import (
+    AGENT_DEFAULT_PREMIUM_TOOLS,
+    AGENT_DEFAULT_TOOLS,
+)
 
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonObject
@@ -103,12 +107,10 @@ def _router_config() -> JsonObject:
         "endpoint_defaults": {
             "/v1/messages": "claude_code",
             "/v1/chat/completions": "hermes",
-            "/v1/responses": "codex",
         },
         "user_agent_map": [
             {"contains": "claude", "group": "claude_code"},
             {"contains": "hermes", "group": "hermes"},
-            {"contains": "codex", "group": "codex"},
         ],
         "fallback": None,
     }
@@ -191,14 +193,41 @@ def _build_config(*, port: int, models: dict[str, str], key_env: str, provider: 
         LiteLLM's pricing table is the only cost source.
     """
     prices = PRESET_PRICES.get(provider, {})
-    tiers = {
+    claude_tiers = {
         tier: {
+            "provider": provider,
             "model": models[tier],
-            "key_env": key_env,
+            "auth": {"mode": "api_key_env", "key_env": key_env},
             "max_tokens": TIER_MAX_TOKENS[tier],
             **prices.get(tier, {}),
         }
         for tier in TIER_MAX_TOKENS
+    }
+    hermes_tiers = {
+        "fast": {
+            "provider": "codex",
+            "model": "gpt-5.4-mini",
+            "auth": {"mode": "oauth"},
+            "max_tokens": 8192,
+        },
+        "code": {
+            "provider": "codex",
+            "model": "gpt-5.3-codex-spark",
+            "auth": {"mode": "oauth"},
+            "max_tokens": 8192,
+        },
+        "crud": {
+            "provider": "codex",
+            "model": "gpt-5.3-codex-spark",
+            "auth": {"mode": "oauth"},
+            "max_tokens": 4096,
+        },
+        "structured": {
+            "provider": "codex",
+            "model": "gpt-5.3-codex-spark",
+            "auth": {"mode": "oauth"},
+            "max_tokens": 8192,
+        },
     }
     return cast(
         "JsonObject",
@@ -214,7 +243,20 @@ def _build_config(*, port: int, models: dict[str, str], key_env: str, provider: 
                 "tier_precedence": ["premium", "structured", "code", "fast", "crud"],
                 "escalate_on_premium_tools": True,
             },
-            "tiers": tiers,
+            "agents": {
+                "claude_code": {
+                    "upstream": config.DEFAULT_UPSTREAM,
+                    "tools": dict(AGENT_DEFAULT_TOOLS["claude_code"]),
+                    "premium_tools": list(AGENT_DEFAULT_PREMIUM_TOOLS["claude_code"]),
+                    "tiers": claude_tiers,
+                },
+                "hermes": {
+                    "upstream": "https://chatgpt.com/backend-api/codex",
+                    "tools": dict(AGENT_DEFAULT_TOOLS["hermes"]),
+                    "premium_tools": list(AGENT_DEFAULT_PREMIUM_TOOLS["hermes"]),
+                    "tiers": hermes_tiers,
+                },
+            },
         },
     )
 

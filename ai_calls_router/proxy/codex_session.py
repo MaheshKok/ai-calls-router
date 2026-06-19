@@ -13,7 +13,9 @@ by issuing its own response ids and mapping each to the full ordered item list a
 of that response. Reconstructing the next turn is then history-plus-delta, which
 restores the ``function_call``/``function_call_output`` pairing the stateless
 backend requires (a missing pair is the original 400 "No tool output found for
-function call"). One instance lives per WebSocket connection; state dies with it.
+function call"). Codex pools its WebSocket connections, so one instance is shared
+across every connection of a single ChatGPT account (the router keys the store by
+account id) and lives until the daemon restarts.
 """
 
 from __future__ import annotations
@@ -26,6 +28,26 @@ if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonArray
 
 logger = logging.getLogger("acr.codex_session")
+
+VIRTUAL_ID_PREFIX = "resp_acr_"
+
+
+def is_virtual_id(response_id: str | None) -> bool:
+    """Return whether a response id was issued by the router (not the upstream).
+
+    Router-served turns are recorded under ids carrying ``VIRTUAL_ID_PREFIX``.
+    The upstream ChatGPT WebSocket never knows them, so a turn chaining from such
+    an id must be served over HTTP and never forwarded upstream. The prefix is
+    self-describing, so an id stays recognizable even after a daemon restart has
+    cleared the in-memory store.
+
+    Args:
+        response_id: A response id, typically an incoming ``previous_response_id``.
+
+    Returns:
+        True when ``response_id`` is non-None and router-issued.
+    """
+    return response_id is not None and response_id.startswith(VIRTUAL_ID_PREFIX)
 
 
 class CodexSession:
@@ -89,7 +111,7 @@ class CodexSession:
         Returns:
             The response id the snapshot was stored under.
         """
-        key = response_id if response_id is not None else f"resp_acr_{uuid.uuid4().hex}"
+        key = response_id if response_id is not None else f"{VIRTUAL_ID_PREFIX}{uuid.uuid4().hex}"
         self._history[key] = [*full_input, *output]
         return key
 

@@ -189,6 +189,155 @@ def responses_input_to_anthropic_messages(input_items: JsonValue) -> list[JsonOb
     return messages
 
 
+def _sanitize_tool_adjacency(messages: list[JsonObject]) -> list[JsonObject]:
+    """Drop Anthropic tool blocks DeepSeek rejects as orphaned history."""
+    coalesced = _coalesce_tool_use_turns(messages)
+    sanitized: list[JsonObject] = []
+    index = 0
+    while index < len(coalesced):
+        message = coalesced[index]
+        content = message.get("content")
+        blocks = cast("JsonArray", content) if isinstance(content, list) else cast("JsonArray", [])
+        if message.get("role") == "assistant":
+            next_index = _append_safe_assistant_turn(sanitized, coalesced, index, blocks)
+            index = next_index
+            continue
+        if message.get("role") == "user" and blocks:
+            safe_blocks = _without_tool_results(blocks)
+            if safe_blocks:
+                sanitized.append({**message, "content": safe_blocks})
+            index += 1
+            continue
+        sanitized.append(dict(message))
+        index += 1
+    return sanitized
+
+
+def _contains_tool_output(input_items: JsonValue) -> bool:
+    """Return whether Responses input contains tool output items."""
+    if not isinstance(input_items, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("type") in {"function_call_output", "custom_tool_call_output"}
+        for item in input_items
+    )
+
+
+def _coalesce_tool_use_turns(messages: list[JsonObject]) -> list[JsonObject]:
+    """Merge adjacent tool-use-only assistant messages into one Anthropic turn."""
+    coalesced: list[JsonObject] = []
+    pending: JsonArray = []
+    for message in messages:
+        content = message.get("content")
+        blocks = cast("JsonArray", content) if isinstance(content, list) else cast("JsonArray", [])
+        if message.get("role") == "assistant" and _only_tool_use_blocks(blocks):
+            pending.extend(blocks)
+            continue
+        if pending:
+            coalesced.append({"role": "assistant", "content": pending})
+            pending = []
+        coalesced.append(dict(message))
+    if pending:
+        coalesced.append({"role": "assistant", "content": pending})
+    return coalesced
+
+
+def _only_tool_use_blocks(blocks: JsonArray) -> bool:
+    """Return whether content is a non-empty tool_use-only block list."""
+    return bool(blocks) and all(
+        isinstance(block, dict) and block.get("type") == "tool_use" for block in blocks
+    )
+
+
+def _append_safe_assistant_turn(
+    sanitized: list[JsonObject],
+    messages: list[JsonObject],
+    index: int,
+    blocks: JsonArray,
+) -> int:
+    """Append one assistant turn with only immediately matched tool pairs."""
+    tool_ids = _tool_use_ids(blocks)
+    if not tool_ids:
+        sanitized.append(dict(messages[index]))
+        return index + 1
+
+    next_message = messages[index + 1] if index + 1 < len(messages) else None
+    next_blocks = _user_blocks(next_message)
+    matched_ids = tool_ids & _tool_result_ids(next_blocks)
+    safe_assistant_blocks = _without_unmatched_tool_uses(blocks, matched_ids)
+    if safe_assistant_blocks:
+        sanitized.append({**messages[index], "content": safe_assistant_blocks})
+    if matched_ids and isinstance(next_message, dict):
+        sanitized.append(
+            {**next_message, "content": _matched_user_blocks(next_blocks, matched_ids)}
+        )
+        return index + 2
+    return index + 1
+
+
+def _user_blocks(message: JsonObject | None) -> JsonArray:
+    """Return user content blocks when the next turn can answer tool uses."""
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return []
+    content = message.get("content")
+    return cast("JsonArray", content) if isinstance(content, list) else []
+
+
+def _tool_use_ids(blocks: JsonArray) -> set[str]:
+    """Collect tool_use ids from Anthropic content blocks."""
+    return {
+        str(block["id"])
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id")
+    }
+
+
+def _tool_result_ids(blocks: JsonArray) -> set[str]:
+    """Collect tool_result ids from Anthropic content blocks."""
+    return {
+        str(block["tool_use_id"])
+        for block in blocks
+        if isinstance(block, dict)
+        and block.get("type") == "tool_result"
+        and block.get("tool_use_id")
+    }
+
+
+def _without_unmatched_tool_uses(blocks: JsonArray, matched_ids: set[str]) -> JsonArray:
+    """Return assistant blocks with orphaned tool_use entries removed."""
+    return [
+        block
+        for block in blocks
+        if not (
+            isinstance(block, dict)
+            and block.get("type") == "tool_use"
+            and str(block.get("id", "")) not in matched_ids
+        )
+    ]
+
+
+def _without_tool_results(blocks: JsonArray) -> JsonArray:
+    """Return user blocks with orphaned tool_result entries removed."""
+    return [
+        block
+        for block in blocks
+        if not (isinstance(block, dict) and block.get("type") == "tool_result")
+    ]
+
+
+def _matched_user_blocks(blocks: JsonArray, matched_ids: set[str]) -> JsonArray:
+    """Return matched tool results plus ordinary user blocks."""
+    matched_results = [
+        block
+        for block in blocks
+        if isinstance(block, dict)
+        and block.get("type") == "tool_result"
+        and str(block.get("tool_use_id", "")) in matched_ids
+    ]
+    return [*matched_results, *_without_tool_results(blocks)]
+
+
 def responses_tool_to_anthropic(tool: JsonObject) -> JsonObject:
     """Convert a Responses tool definition to Anthropic format."""
     tool_type = tool.get("type")
@@ -245,6 +394,20 @@ def _tool_choice_to_anthropic(choice: JsonValue) -> JsonObject:
     return {"type": "auto"}
 
 
+def _anthropic_tool_choice_to_responses(choice: JsonValue) -> JsonValue:
+    """Convert Anthropic tool_choice to Responses shape."""
+    if not isinstance(choice, dict):
+        return None
+    choice_type = choice.get("type")
+    if choice_type == "any":
+        return "required"
+    if choice_type == "tool" and isinstance(choice.get("name"), str):
+        return {"type": "function", "name": choice["name"]}
+    if choice_type in {"auto", "none"}:
+        return choice_type
+    return None
+
+
 def _system_from_input(input_items: JsonValue) -> str | None:
     """Extract system message text from Responses input."""
     if not isinstance(input_items, list):
@@ -258,6 +421,34 @@ def _system_from_input(input_items: JsonValue) -> str | None:
     ]
     kept = [part for part in parts if part]
     return "\n".join(kept) if kept else None
+
+
+def _messages_from_responses_body(body: JsonObject) -> list[JsonObject]:
+    """Return Anthropic messages from a validated Responses request."""
+    raw_input = body["input"]
+    if not isinstance(raw_input, str | list):  # pyrefly: ignore[implicit-any-type-argument]
+        raise ValueError("Responses input must be a string or list")  # noqa: TRY004
+    messages = responses_input_to_anthropic_messages(raw_input)
+    if _contains_tool_output(raw_input):
+        return _sanitize_tool_adjacency(messages)
+    return messages
+
+
+def _copy_optional_request_fields(source: JsonObject, target: JsonObject) -> None:
+    """Copy optional Responses request fields to Anthropic shape."""
+    if "tools" in source:
+        converted_tools = _routable_tools_to_anthropic(source["tools"])
+        if converted_tools:
+            target["tools"] = converted_tools
+    if "tool_choice" in source:
+        target["tool_choice"] = _tool_choice_to_anthropic(source["tool_choice"])
+    if "max_output_tokens" in source:
+        target["max_tokens"] = source["max_output_tokens"]
+    for key in ("temperature", "top_p"):
+        if key in source:
+            target[key] = source[key]
+    if "stop" in source:
+        target["stop_sequences"] = source["stop"]
 
 
 def responses_request_to_anthropic(body: JsonObject) -> JsonObject:
@@ -279,25 +470,122 @@ def responses_request_to_anthropic(body: JsonObject) -> JsonObject:
     ]
     if system_parts:
         converted = {"model": converted["model"], "system": "\n".join(system_parts), "messages": []}
-    raw_input = body["input"]
-    if isinstance(raw_input, str | list):  # pyrefly: ignore[implicit-any-type-argument]
-        converted["messages"] = cast("JsonArray", responses_input_to_anthropic_messages(raw_input))
-    else:
-        raise ValueError("Responses input must be a string or list")  # noqa: TRY004
+    converted["messages"] = cast("JsonArray", _messages_from_responses_body(body))
+    _copy_optional_request_fields(body, converted)
+    return converted
 
-    if "tools" in body:
-        converted_tools = _routable_tools_to_anthropic(body["tools"])
-        if converted_tools:
-            converted["tools"] = converted_tools
-    if "tool_choice" in body:
-        converted["tool_choice"] = _tool_choice_to_anthropic(body["tool_choice"])
-    if "max_output_tokens" in body:
-        converted["max_tokens"] = body["max_output_tokens"]
+
+def _responses_text_part(text: str, *, role: str) -> JsonObject:
+    """Build one Responses text content part."""
+    part_type = "output_text" if role == "assistant" else "input_text"
+    return {"type": part_type, "text": text}
+
+
+def _anthropic_content_to_responses_input(message: JsonObject) -> list[JsonObject]:
+    """Convert one Anthropic message into Responses input items."""
+    role = message.get("role")
+    content = message.get("content")
+    blocks = cast("JsonArray", content) if isinstance(content, list) else cast("JsonArray", [])
+    if not isinstance(role, str):
+        return []
+    items: list[JsonObject] = []
+    text_parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            text_parts.append(str(block.get("text", "")))
+            continue
+        if text_parts:
+            items.append(
+                {
+                    "type": "message",
+                    "role": role,
+                    "content": [_responses_text_part("\n".join(text_parts), role=role)],
+                }
+            )
+            text_parts = []
+        if block_type == "tool_use":
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": str(block.get("id", "")),
+                    "name": str(block.get("name", "")),
+                    "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
+                }
+            )
+        elif block_type == "tool_result":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(block.get("tool_use_id", "")),
+                    "output": str(block.get("content", "")),
+                }
+            )
+    if text_parts:
+        items.append(
+            {
+                "type": "message",
+                "role": role,
+                "content": [_responses_text_part("\n".join(text_parts), role=role)],
+            }
+        )
+    if not blocks and isinstance(content, str):
+        items.append(
+            {
+                "type": "message",
+                "role": role,
+                "content": [_responses_text_part(content, role=role)],
+            }
+        )
+    return items
+
+
+def _anthropic_tool_to_responses(tool: JsonObject) -> JsonObject:
+    """Convert Anthropic tool definition to Responses function tool."""
+    converted: JsonObject = {
+        "type": "function",
+        "name": str(tool.get("name", "")),
+        "parameters": tool.get("input_schema", {"type": "object"}),
+    }
+    description = tool.get("description")
+    if isinstance(description, str) and description:
+        converted["description"] = description
+    return converted
+
+
+def anthropic_request_to_responses(body: JsonObject) -> JsonObject:
+    """Convert an Anthropic canonical routed request into Responses JSON."""
+    converted: JsonObject = {"model": str(body.get("model", "")), "input": []}
+    system = body.get("system")
+    if isinstance(system, str) and system:
+        converted["instructions"] = system
+    input_items: list[JsonObject] = []
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for message in cast("JsonArray", messages):
+            if isinstance(message, dict):
+                input_items.extend(_anthropic_content_to_responses_input(message))
+    converted["input"] = cast("JsonArray", input_items)
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        converted["tools"] = cast(
+            "JsonArray",
+            [
+                _anthropic_tool_to_responses(tool)
+                for tool in cast("JsonArray", tools)
+                if isinstance(tool, dict)
+            ],
+        )
+    choice = _anthropic_tool_choice_to_responses(body.get("tool_choice"))
+    if choice is not None:
+        converted["tool_choice"] = choice
+    if "max_tokens" in body:
+        converted["max_output_tokens"] = body["max_tokens"]
     for key in ("temperature", "top_p"):
         if key in body:
             converted[key] = body[key]
-    if "stop" in body:
-        converted["stop_sequences"] = body["stop"]
     return converted
 
 
@@ -359,6 +647,63 @@ def _output_items(anthropic_response: JsonObject) -> list[JsonObject]:
     if text_parts:
         output.append(_text_output_item(text_parts))
     return output
+
+
+def _anthropic_content_from_responses(output_items: JsonArray) -> list[JsonObject]:
+    """Convert Responses output items to Anthropic content blocks."""
+    content: list[JsonObject] = []
+    for item in output_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "message":
+            content.extend(_text_blocks_from_response_message(item))
+        elif item.get("type") == "function_call":
+            content.append(_tool_use_block_from_response_call(item))
+    return content
+
+
+def _text_blocks_from_response_message(item: JsonObject) -> list[JsonObject]:
+    """Return Anthropic text blocks from one Responses message item."""
+    blocks: list[JsonObject] = []
+    for part in cast("JsonArray", item.get("content", [])):
+        if isinstance(part, dict) and isinstance(part.get("text"), str):
+            blocks.append({"type": "text", "text": part["text"]})
+    return blocks
+
+
+def _tool_use_block_from_response_call(item: JsonObject) -> JsonObject:
+    """Return an Anthropic tool_use block from one Responses function call."""
+    return {
+        "type": "tool_use",
+        "id": str(item.get("call_id") or item.get("id", "")),
+        "name": str(item.get("name", "")),
+        "input": parse_tool_arguments(item.get("arguments", "{}")),
+    }
+
+
+def responses_to_anthropic_response(response: JsonObject, model: str) -> JsonObject:
+    """Convert a Responses object into Anthropic Messages response JSON."""
+    output = response.get("output")
+    output_items = cast("JsonArray", output) if isinstance(output, list) else cast("JsonArray", [])
+    content = _anthropic_content_from_responses(output_items)
+    usage = response.get("usage")
+    usage_obj = usage if isinstance(usage, dict) else cast("JsonObject", {})
+    has_tool = any(block.get("type") == "tool_use" for block in content)
+    return cast(
+        "JsonObject",
+        {
+            "id": str(response.get("id", "msg_routed")),
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": content,
+            "stop_reason": "tool_use" if has_tool else "end_turn",
+            "usage": {
+                "input_tokens": jsonnum.int_value(usage_obj.get("input_tokens", 0)),
+                "output_tokens": jsonnum.int_value(usage_obj.get("output_tokens", 0)),
+            },
+        },
+    )
 
 
 def anthropic_to_responses(anthropic_response: JsonObject, model: str) -> JsonObject:

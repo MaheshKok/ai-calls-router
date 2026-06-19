@@ -38,12 +38,20 @@ class _SchemaModel(BaseModel):
     model_config = ConfigDict(extra="allow", strict=True)
 
 
+class TierAuthConfig(_SchemaModel):
+    """Schema for one tier auth declaration."""
+
+    mode: Literal["api_key_env", "oauth"]
+    key_env: str | None = Field(default=None, min_length=1)
+
+
 class TierConfig(_SchemaModel):
     """Schema for one cheap-tier entry."""
 
     model: str = Field(min_length=1)
     provider: str | None = Field(default=None, min_length=1)
     key_env: str | None = Field(default=None, min_length=1)
+    auth: TierAuthConfig | None = None
     max_tokens: int | None = Field(default=None, gt=0)
 
 
@@ -69,6 +77,7 @@ class AgentConfig(_SchemaModel):
 
     tools: dict[str, str] | None = None
     premium_tools: list[str] | None = None
+    tiers: dict[str, TierConfig] | None = None
     upstream: str | None = Field(default=None, min_length=1)
     premium: dict[str, str] | None = None
 
@@ -120,7 +129,7 @@ def _contains_forbidden_key_env(value: JsonValue, path: tuple[str, ...] = ()) ->
     if isinstance(value, dict):
         for key, child in value.items():
             child_path = (*path, str(key))
-            if key == "key_env" and child_path != ("auth", "key_env"):
+            if key == "key_env" and child_path[-2:] != ("auth", "key_env"):
                 return True
             if _contains_forbidden_key_env(child, child_path):
                 return True

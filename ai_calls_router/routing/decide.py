@@ -232,6 +232,20 @@ def agent_upstream(routes: JsonObject, group: str) -> str:
     return config.server_settings(routes).upstream
 
 
+def agent_tier_config(routes: JsonObject, group: str, tier: str) -> JsonObject | None:
+    """Resolve an agent-local tier config, if one is configured."""
+    try:
+        tiers = _agent_config(routes, group).get("tiers")
+        if not isinstance(tiers, dict):
+            return None
+        tier_cfg = tiers.get(tier)
+        if isinstance(tier_cfg, dict):
+            return dict(tier_cfg)
+    except Exception as exc:
+        logger.warning("acr: agent tier lookup failed (%s); using global tiers", exc, exc_info=True)
+    return None
+
+
 def _premium_aliases(settings: JsonObject) -> dict[str, str]:
     """Derive accepted aliases from the configured premium tool list.
 
@@ -467,6 +481,25 @@ def resolve_api_key(tier_cfg: JsonObject, settings: JsonObject) -> str | None:
     return None
 
 
+def _auth_key_env(tier_cfg: JsonObject) -> str | None:
+    """Return flat or nested api-key env var name for a tier."""
+    auth = tier_cfg.get("auth")
+    if isinstance(auth, dict) and auth.get("mode") == "api_key_env":
+        key_env = auth.get("key_env")
+        return key_env if isinstance(key_env, str) and key_env else None
+    key_env = tier_cfg.get("key_env")
+    return key_env if isinstance(key_env, str) and key_env else None
+
+
+def _auth_mode(tier_cfg: JsonObject) -> str:
+    """Return nested tier auth mode."""
+    auth = tier_cfg.get("auth")
+    if isinstance(auth, dict):
+        mode = auth.get("mode")
+        return mode if isinstance(mode, str) else ""
+    return ""
+
+
 def resolve_tier_credential(tier_cfg: JsonObject, settings: JsonObject) -> TierCredential | None:
     """Resolve a tier credential and auth mode.
 
@@ -482,9 +515,11 @@ def resolve_tier_credential(tier_cfg: JsonObject, settings: JsonObject) -> TierC
     except ConfigSchemaError as exc:
         logger.warning("acr: tier schema validation failed (%s); passing through", exc)
         return None
-    if parsed.key_env == CODEX_OAUTH_SENTINEL and is_codex_tier(tier_cfg):
+    if _auth_mode(tier_cfg) == "oauth" or (
+        parsed.key_env == CODEX_OAUTH_SENTINEL and is_codex_tier(tier_cfg)
+    ):
         return TierCredential(value=CODEX_OAUTH_SENTINEL, auth_mode="oauth")
-    credential = resolve_api_key(tier_cfg, settings)
+    credential = resolve_api_key({**tier_cfg, "key_env": _auth_key_env(tier_cfg)}, settings)
     if credential:
         return TierCredential(value=credential, auth_mode="api_key")
     if is_codex_tier(tier_cfg):

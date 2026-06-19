@@ -106,6 +106,37 @@ def _validate_provider_payload(group: str, payload: JsonObject) -> None:
         raise ProviderConfigError("provider config endpoints mismatch", group=group)
 
 
+def _configured_groups(routes: JsonObject, provider_files: dict[str, JsonObject]) -> set[str]:
+    """Return agent groups explicitly referenced by config."""
+    groups = {group for group in provider_files if group in KNOWN_GROUPS}
+    agents = routes.get("agents")
+    if isinstance(agents, dict):
+        groups.update(group for group in agents if isinstance(group, str) and group in KNOWN_GROUPS)
+    router = router_map(routes)
+    if router is None:
+        return groups or set(KNOWN_GROUPS)
+    endpoint_defaults = router.get("endpoint_defaults")
+    if isinstance(endpoint_defaults, dict):
+        groups.update(
+            group
+            for group in endpoint_defaults.values()
+            if isinstance(group, str) and group in KNOWN_GROUPS
+        )
+    user_agent_map = router.get("user_agent_map")
+    if isinstance(user_agent_map, list):
+        groups.update(
+            item["group"]
+            for item in user_agent_map
+            if isinstance(item, dict)
+            and isinstance(item.get("group"), str)
+            and item["group"] in KNOWN_GROUPS
+        )
+    fallback = router.get("fallback")
+    if isinstance(fallback, str) and fallback in KNOWN_GROUPS:
+        groups.add(fallback)
+    return groups
+
+
 def assemble_routes(base: JsonObject, *, provider_files: dict[str, JsonObject]) -> JsonObject:
     """Merge provider-file payloads into a new canonical routes dict.
 
@@ -128,7 +159,7 @@ def assemble_routes(base: JsonObject, *, provider_files: dict[str, JsonObject]) 
     result = copy.deepcopy(compat)
     existing_agents = result.get("agents")
     agents: JsonObject = dict(existing_agents) if isinstance(existing_agents, dict) else {}
-    for group in sorted(KNOWN_GROUPS):
+    for group in sorted(_configured_groups(compat, provider_files)):
         payload = provider_files.get(group)
         if payload is None:
             agents.setdefault(

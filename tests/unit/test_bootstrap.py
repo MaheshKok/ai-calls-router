@@ -17,8 +17,9 @@ from ai_calls_router.routing import provider_config
 from ai_calls_router.routing.adapters.base import (
     AGENT_GROUP_ENDPOINTS,
     AGENT_GROUP_WIRES,
-    KNOWN_GROUPS,
 )
+
+ACTIVE_GROUPS = {"claude_code", "hermes"}
 
 
 def _base_routes() -> dict[str, object]:
@@ -29,7 +30,6 @@ def _base_routes() -> dict[str, object]:
             "endpoint_defaults": {
                 "/v1/messages": "claude_code",
                 "/v1/chat/completions": "hermes",
-                "/v1/responses": "codex",
             },
             "fallback": None,
         },
@@ -43,7 +43,7 @@ def _has_forbidden_key_env(value: object, path: tuple[str, ...] = ()) -> bool:
     if isinstance(value, dict):
         for key, child in value.items():
             child_path = (*path, str(key))
-            if key == "key_env" and child_path != ("auth", "key_env"):
+            if key == "key_env" and child_path[-2:] != ("auth", "key_env"):
                 return True
             if _has_forbidden_key_env(child, child_path):
                 return True
@@ -65,25 +65,24 @@ def test_all_absent_creates_known_provider_configs(acr_home: Path) -> None:
 
     assert {path.name for path in created} == {
         "claude-code.yaml",
-        "codex.yaml",
         "hermes.yaml",
     }
     loaded = provider_config.load_provider_files()
-    assert set(loaded) == set(KNOWN_GROUPS)
+    assert set(loaded) == ACTIVE_GROUPS
     assembled = provider_config.assemble_routes(_base_routes(), provider_files=loaded)
-    assert set(assembled["agents"]) == set(KNOWN_GROUPS)
+    assert set(assembled["agents"]) == ACTIVE_GROUPS
 
 
 def test_existing_edited_file_is_left_byte_identical(acr_home: Path) -> None:
     config.provider_config_dir().mkdir(parents=True)
-    existing = config.provider_config_path("codex")
-    original = "group: codex\nupstream: https://edited.example\nwire: openai_responses\n"
+    existing = config.provider_config_path("hermes")
+    original = "group: hermes\nupstream: https://edited.example\nwire: openai_chat\n"
     existing.write_text(original, encoding="utf-8")
 
     created = bootstrap.ensure_provider_configs()
 
     assert existing.read_text(encoding="utf-8") == original
-    assert {path.name for path in created} == {"claude-code.yaml", "hermes.yaml"}
+    assert {path.name for path in created} == {"claude-code.yaml"}
 
 
 def test_second_run_is_noop(acr_home: Path) -> None:
@@ -100,19 +99,19 @@ def test_templates_carry_no_cheap_key_env_and_pass_validation(acr_home: Path) ->
         assert not _has_forbidden_key_env(payload)
 
     assembled = provider_config.assemble_routes(_base_routes(), provider_files=loaded)
-    assert assembled["agents"]["codex"]["wire"] == "openai_responses"
+    assert assembled["agents"]["hermes"]["tiers"]["fast"]["auth"]["mode"] == "oauth"
 
 
 def test_templates_label_reserved_fields(acr_home: Path) -> None:
     bootstrap.ensure_provider_configs()
 
-    body = config.provider_config_path("codex").read_text(encoding="utf-8")
+    body = config.provider_config_path("hermes").read_text(encoding="utf-8")
     assert "Runtime fields: upstream, tools, premium_tools." in body
     assert "Reserved/validated fields:" in body
 
 
 def test_group_wire_endpoint_tables_match_bootstrap_templates() -> None:
-    assert set(AGENT_GROUP_WIRES) == set(KNOWN_GROUPS)
-    assert set(AGENT_GROUP_ENDPOINTS) == set(KNOWN_GROUPS)
-    for group in KNOWN_GROUPS:
+    assert ACTIVE_GROUPS.issubset(set(AGENT_GROUP_WIRES))
+    assert ACTIVE_GROUPS.issubset(set(AGENT_GROUP_ENDPOINTS))
+    for group in ACTIVE_GROUPS:
         provider_config._validate_provider_payload(group, bootstrap._provider_template(group))

@@ -1,4 +1,4 @@
-"""Streaming reverse proxy to the premium Anthropic upstream.
+"""Streaming reverse proxy to the selected premium upstream.
 
 forward relays a client request to the upstream with headers preserved
 (minus hop-by-hop ones; accept-encoding is forced to identity so the body
@@ -20,6 +20,7 @@ import httpx
 from starlette.responses import Response, StreamingResponse
 
 from ai_calls_router._lib import jsonnum
+from ai_calls_router.proxy import websocket_passthrough
 
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonObject, JsonValue
@@ -38,6 +39,7 @@ FRAMING_RESPONSE_HEADERS = frozenset(
 )
 
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
+CHATGPT_CODEX_UPSTREAM = "https://chatgpt.com/backend-api/codex"
 
 _USAGE_KEYS = (
     "input_tokens",
@@ -77,6 +79,29 @@ def filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     """
     return {
         key: value for key, value in headers.items() if key.lower() not in FRAMING_RESPONSE_HEADERS
+    }
+
+
+def _is_chatgpt_codex_upstream(upstream: str) -> bool:
+    return upstream.rstrip("/") == CHATGPT_CODEX_UPSTREAM
+
+
+def _upstream_path(upstream: str, path: str) -> str:
+    if _is_chatgpt_codex_upstream(upstream) and path == "/v1/responses":
+        return "/responses"
+    return path
+
+
+def _request_headers_for_upstream(upstream: str, headers: Mapping[str, str]) -> dict[str, str]:
+    if not _is_chatgpt_codex_upstream(upstream):
+        return filter_request_headers(headers)
+    codex_headers = websocket_passthrough.codex_chatgpt_headers(headers)
+    if codex_headers is None:
+        return filter_request_headers(headers)
+    return {
+        key: value
+        for key, value in codex_headers
+        if key.lower() not in HOP_BY_HOP_REQUEST_HEADERS and not key.lower().startswith("x-acr-")
     }
 
 
@@ -251,7 +276,8 @@ async def forward(
         client: Shared httpx client (connection pooling).
         upstream: Upstream base URL without trailing slash.
         method: HTTP method of the client request.
-        path: Request path (forwarded unchanged).
+        path: Request path. Forwarded unchanged except ChatGPT Codex Responses
+            passthrough, where `/v1/responses` maps to `/responses`.
         headers: Raw client request headers.
         body: Raw client request body bytes.
         query: Raw query string without the leading "?".
@@ -262,10 +288,10 @@ async def forward(
         A StreamingResponse relaying the upstream answer, or a 502 Response
         when the upstream cannot be reached.
     """
-    url = f"{upstream}{path}"
+    url = f"{upstream}{_upstream_path(upstream, path)}"
     if query:
         url = f"{url}?{query}"
-    request_headers = filter_request_headers(headers)
+    request_headers = _request_headers_for_upstream(upstream, headers)
     request_headers["accept-encoding"] = "identity"
 
     request = client.build_request(method, url, headers=request_headers, content=body)

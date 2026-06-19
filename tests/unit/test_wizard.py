@@ -49,6 +49,11 @@ def _written_config(path: Path) -> dict[str, object]:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _claude_tiers(written: dict[str, object]) -> dict[str, dict[str, object]]:
+    """Return generated Claude Code local tiers."""
+    return written["agents"]["claude_code"]["tiers"]
+
+
 class TestDefaults:
     def test_all_defaults_write_deepseek_preset(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk([]))
@@ -56,9 +61,9 @@ class TestDefaults:
         written = _written_config(path)
         assert written["server"]["port"] == config.DEFAULT_PORT
         for tier in ("fast", "structured", "code", "crud"):
-            tier_cfg = written["tiers"][tier]
+            tier_cfg = _claude_tiers(written)[tier]
             assert tier_cfg["model"].startswith("deepseek/")
-            assert tier_cfg["key_env"] == "DEEPSEEK_API_KEY"
+            assert tier_cfg["auth"] == {"mode": "api_key_env", "key_env": "DEEPSEEK_API_KEY"}
 
     def test_generated_config_passes_v1_validation(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk([]))
@@ -74,9 +79,9 @@ class TestDefaults:
 
     def test_generated_config_contains_all_agent_groups(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk([]))
-        assert "agents" not in _written_config(path)
+        assert set(_written_config(path)["agents"]) == {"claude_code", "hermes"}
         loaded = provider_config.load_provider_files()
-        assert set(loaded) == {"claude_code", "hermes", "codex"}
+        assert set(loaded) == {"claude_code", "hermes"}
         for cfg in loaded.values():
             assert cfg["tools"]
             assert cfg["premium_tools"]
@@ -89,7 +94,6 @@ class TestDefaults:
             provider_files=provider_config.load_provider_files(),
         )
         assert decide.tier_for_tools(["Bash"], routes, group="claude_code") == "fast"
-        assert decide.tier_for_tools(["exec_command"], routes, group="codex") == "fast"
         assert decide.tier_for_tools(["terminal"], routes, group="hermes") == "fast"
 
     def test_default_tools_route_cheap_to_tiers_and_editing_to_premium(
@@ -115,7 +119,7 @@ class TestDefaults:
         path = wizard.run_wizard(ask=_ScriptedAsk([]))
         written = _written_config(path)
         settings = written["settings"]
-        assert written["router"]["endpoint_defaults"]["/v1/responses"] == "codex"
+        assert "/v1/responses" not in written["router"]["endpoint_defaults"]
         assert written["router"]["fallback"] is None
         assert settings["escalate_on_premium_tools"] is True
         assert settings["tier_precedence"][0] == "premium"
@@ -143,19 +147,19 @@ class TestAnswers:
     def test_unknown_provider_falls_back_to_default_preset(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk(["no-such-provider", "", ""]))
         written = _written_config(path)
-        assert written["tiers"]["fast"]["model"].startswith("deepseek/")
+        assert _claude_tiers(written)["fast"]["model"].startswith("deepseek/")
 
     def test_custom_key_env_overrides_preset(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "MY_KEY", ""]))
         written = _written_config(path)
         for tier in ("fast", "code", "crud"):
-            assert written["tiers"][tier]["key_env"] == "MY_KEY"
+            assert _claude_tiers(written)[tier]["auth"]["key_env"] == "MY_KEY"
 
     def test_groq_preset_uses_groq_models_and_key(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk(["groq", "", ""]))
         written = _written_config(path)
-        assert written["tiers"]["fast"]["model"].startswith("groq/")
-        assert written["tiers"]["fast"]["key_env"] == "GROQ_API_KEY"
+        assert _claude_tiers(written)["fast"]["model"].startswith("groq/")
+        assert _claude_tiers(written)["fast"]["auth"]["key_env"] == "GROQ_API_KEY"
 
 
 class TestCustomProvider:
@@ -171,11 +175,12 @@ class TestCustomProvider:
         ]
         path = wizard.run_wizard(ask=_ScriptedAsk(answers))
         written = _written_config(path)
-        assert written["tiers"]["fast"]["model"] == "openrouter/qwen/qwen3-coder"
-        assert written["tiers"]["structured"]["model"] == "openrouter/qwen/qwen3-coder"
-        assert written["tiers"]["code"]["model"] == "openrouter/moonshotai/kimi-k2"
-        assert written["tiers"]["crud"]["model"] == "openrouter/qwen/qwen3-coder"
-        assert written["tiers"]["fast"]["key_env"] == "OPENROUTER_API_KEY"
+        tiers = _claude_tiers(written)
+        assert tiers["fast"]["model"] == "openrouter/qwen/qwen3-coder"
+        assert tiers["structured"]["model"] == "openrouter/qwen/qwen3-coder"
+        assert tiers["code"]["model"] == "openrouter/moonshotai/kimi-k2"
+        assert tiers["crud"]["model"] == "openrouter/qwen/qwen3-coder"
+        assert tiers["fast"]["auth"]["key_env"] == "OPENROUTER_API_KEY"
         assert written["server"]["port"] == 8800
 
     def test_custom_tiers_carry_no_fabricated_prices(self, acr_home: Path) -> None:
@@ -183,9 +188,9 @@ class TestCustomProvider:
         path = wizard.run_wizard(ask=_ScriptedAsk(answers))
         written = _written_config(path)
         for tier in ("fast", "structured", "code", "crud"):
-            assert "input_cost_per_1m" not in written["tiers"][tier]
-            assert "input_cached_cost_per_1m" not in written["tiers"][tier]
-            assert "output_cost_per_1m" not in written["tiers"][tier]
+            assert "input_cost_per_1m" not in _claude_tiers(written)[tier]
+            assert "input_cached_cost_per_1m" not in _claude_tiers(written)[tier]
+            assert "output_cost_per_1m" not in _claude_tiers(written)[tier]
 
 
 class TestPresetPricing:
@@ -195,7 +200,7 @@ class TestPresetPricing:
 
     def test_deepseek_preset_writes_cache_aware_prices(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""]))
-        tiers = _written_config(path)["tiers"]
+        tiers = _claude_tiers(_written_config(path))
         for tier in ("fast", "structured", "code", "crud"):
             cfg = tiers[tier]
             miss = cfg["input_cost_per_1m"]
@@ -212,7 +217,9 @@ class TestPresetPricing:
     def test_deepseek_code_tier_pricier_than_fast_tier(self, acr_home: Path) -> None:
         # The code tier runs the pro model; it must not be cheaper than fast,
         # which would mean the flash/pro prices were transposed.
-        tiers = _written_config(wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""])))["tiers"]
+        tiers = _claude_tiers(
+            _written_config(wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""])))
+        )
         assert tiers["code"]["input_cost_per_1m"] >= tiers["fast"]["input_cost_per_1m"]
 
     def test_deepseek_prices_match_example_config(self, acr_home: Path) -> None:
@@ -231,11 +238,14 @@ class TestPresetPricing:
         )
         for tier in ("fast", "structured", "code", "crud"):
             for key in price_keys:
-                assert written["tiers"][tier][key] == example["tiers"][tier][key]
+                assert (
+                    _claude_tiers(written)[tier][key]
+                    == example["agents"]["claude_code"]["tiers"][tier][key]
+                )
 
     def test_groq_preset_carries_no_price_overrides(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk(["groq", "", ""]))
-        tiers = _written_config(path)["tiers"]
+        tiers = _claude_tiers(_written_config(path))
         for tier in ("fast", "structured", "code", "crud"):
             assert "input_cost_per_1m" not in tiers[tier]
             assert "input_cached_cost_per_1m" not in tiers[tier]

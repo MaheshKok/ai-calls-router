@@ -268,6 +268,29 @@ class TestWrap:
         assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9321"
         assert writes == []
 
+    def test_wrap_hermes_patches_persistent_config(
+        self, acr_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(daemon, "start", lambda: 4242)
+        writes: list[str] = []
+        runs: list[tuple[list[str], dict[str, str]]] = []
+
+        def _run(
+            cmd: list[str], env: dict[str, str], **kwargs: object
+        ) -> subprocess.CompletedProcess[int]:
+            runs.append((cmd, env))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(wrap, "enable_hermes_config", writes.append)
+        monkeypatch.setattr(subprocess, "run", _run)
+
+        assert cli.main(["wrap", "hermes", "-z", "hi"]) == 0
+        cmd, env = runs[0]
+        assert writes == ["http://127.0.0.1:9321"]
+        assert cmd == ["hermes", "-z", "hi"]
+        assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:9321/v1"
+        assert env["HERMES_CODEX_BASE_URL"] == "http://127.0.0.1:9321/v1"
+
     def test_unwrap_codex_restores_config(
         self,
         *,
@@ -280,6 +303,21 @@ class TestWrap:
         monkeypatch.setattr(wrap, "disable_codex_config", lambda: restored)
 
         assert cli.main(["unwrap", "codex"]) == 0
+
+        assert str(restored) in capsys.readouterr().out
+
+    def test_unwrap_hermes_restores_config(
+        self,
+        *,
+        acr_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        restored = tmp_path / "config.yaml"
+        monkeypatch.setattr(wrap, "disable_hermes_config", lambda: restored)
+
+        assert cli.main(["unwrap", "hermes"]) == 0
 
         assert str(restored) in capsys.readouterr().out
 

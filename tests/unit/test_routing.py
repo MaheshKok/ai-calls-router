@@ -266,6 +266,25 @@ class TestTierForTools:
     def test_empty_config_uses_requested_group_defaults(self) -> None:
         assert routing.tier_for_tools(["exec_command"], {}, group="codex") == "fast"
 
+    def test_agent_local_tier_config_can_reuse_semantic_tier_names(self) -> None:
+        routes = {
+            "agents": {
+                "claude_code": {
+                    "tiers": {"fast": {"provider": "deepseek", "model": "deepseek/fast"}}
+                },
+                "hermes": {"tiers": {"fast": {"provider": "codex", "model": "gpt-fast"}}},
+            }
+        }
+
+        assert routing.agent_tier_config(routes, "claude_code", "fast") == {
+            "provider": "deepseek",
+            "model": "deepseek/fast",
+        }
+        assert routing.agent_tier_config(routes, "hermes", "fast") == {
+            "provider": "codex",
+            "model": "gpt-fast",
+        }
+
     def test_malformed_agent_config_falls_back_to_group_defaults(self) -> None:
         routes = {"agents": {"claude_code": {"tools": "broken", "premium_tools": "broken"}}}
         assert routing.agent_tools(routes, "claude_code") == AGENT_DEFAULT_TOOLS["claude_code"]
@@ -393,7 +412,7 @@ class TestResolveApiKey:
         )
         assert key == routing.TierCredential(value="openai-key", auth_mode="api_key")
 
-    def test_codex_oauth_sentinel_is_codex_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_oauth_auth_mode_and_flat_codex_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("oauth", raising=False)
 
         assert routing.resolve_tier_credential(
@@ -411,6 +430,22 @@ class TestResolveApiKey:
             )
             is None
         )
+        assert routing.resolve_tier_credential(
+            {"model": "gpt-5.4-mini", "provider": "codex", "auth": {"mode": "oauth"}},
+            {},
+        ) == routing.TierCredential(value="oauth", auth_mode="oauth")
+
+    def test_nested_api_key_env_resolves_like_flat_key_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ACR_TEST_KEY", "tier-key")
+        assert routing.resolve_tier_credential(
+            {
+                "model": "deepseek/deepseek-v4-flash",
+                "auth": {"mode": "api_key_env", "key_env": "ACR_TEST_KEY"},
+            },
+            {},
+        ) == routing.TierCredential(value="tier-key", auth_mode="api_key")
 
     def test_invalid_tier_schema_has_no_credential(self) -> None:
         assert routing.resolve_tier_credential({"model": ""}, {}) is None

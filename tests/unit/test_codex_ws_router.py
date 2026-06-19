@@ -20,6 +20,8 @@ from ai_calls_router.accounting import shrink_stats
 from ai_calls_router.proxy import codex_ws_router
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from ai_calls_router._lib.types import JsonArray, JsonObject
 
 _ROUTES: JsonObject = {
@@ -158,6 +160,14 @@ def _install_mocks(monkeypatch: pytest.MonkeyPatch, responses: list[JsonObject |
     return bodies, outcomes
 
 
+@pytest.fixture(autouse=True)
+def _clear_sessions() -> Iterator[None]:
+    """Reset the cross-connection session store so tests stay independent."""
+    codex_ws_router._SESSIONS.clear()
+    yield
+    codex_ws_router._SESSIONS.clear()
+
+
 def test_parse_response_create_reads_flat_and_nested_and_rejects_others() -> None:
     flat = _create_frame([{"type": "message"}], previous_response_id="resp_x")
     assert codex_ws_router.parse_response_create(flat) == {
@@ -250,8 +260,10 @@ async def test_first_turn_passes_through_then_routes_with_paired_history(
 async def test_routed_turn_synthesizes_router_id_for_next_chaining(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The id in the synthesized completed frame is what the client echoes next;
-    # the session must be recorded under that id so the chain resolves.
+    # The id in the synthesized completed frame is what the client echoes next.
+    # The router issues its OWN virtual id (not the cheap provider's id, which the
+    # upstream also does not know), so the next turn chaining from it is recognized
+    # as router-served and never forwarded upstream.
     _install_mocks(monkeypatch, [_routed_response("resp_routed_1", "ok")])
     client = _FakeClient([_create_frame(_exec_result_turn())])
     upstream = _FakeUpstream([])
@@ -266,7 +278,9 @@ async def test_routed_turn_synthesizes_router_id_for_next_chaining(
 
     completed = json.loads(client.sent_text[-1])
     assert completed["type"] == "response.completed"
-    assert completed["response"]["id"] == "resp_routed_1"
+    synth_id = completed["response"]["id"]
+    assert synth_id.startswith("resp_acr_")
+    assert synth_id != "resp_routed_1"
     assert upstream.sent == []
 
 
@@ -275,8 +289,9 @@ async def test_sticky_route_serves_later_premium_turn_over_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Once routed, the session cannot return to the upstream WS. A later turn
-    # with no routable tools is still served over HTTP (premium fallback), never
-    # forwarded upstream.
+    # with no routable tools that chains from a router-issued (virtual) id is
+    # still served over HTTP (premium fallback), never forwarded upstream.
+    # Stickiness is driven by the virtual-id chain, not a per-connection flag.
     bodies, _ = _install_mocks(
         monkeypatch,
         [_routed_response("resp_routed_1", "a"), _routed_response("resp_routed_2", "b")],
@@ -286,7 +301,7 @@ async def test_sticky_route_serves_later_premium_turn_over_http(
             _create_frame(_exec_result_turn()),
             _create_frame(
                 [{"type": "message", "role": "user", "content": "more"}],
-                previous_response_id="resp_routed_1",
+                previous_response_id="resp_acr_prior",
             ),
         ]
     )
@@ -382,3 +397,115 @@ async def test_routed_turn_raises_when_dispatch_fails(monkeypatch: pytest.Monkey
             chatgpt_headers=None,
             routes_loader=_routes,
         )
+
+
+_ACCOUNT_HEADERS: list[tuple[str, str]] = [("ChatGPT-Account-ID", "acct-123")]
+
+
+@pytest.mark.asyncio
+async def test_routable_turn_reconstructs_history_from_prior_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Codex pools WebSocket connections: a decision turn streaming a function_call
+    # can arrive on connection 1, and the turn answering it on connection 2. The
+    # session is keyed by account, so connection 2 must reconstruct the FULL input
+    # (function_call from connection 1 + its output) -- otherwise the stateless
+    # backend 400s with "No tool output found" (the regression, across the pool).
+    bodies, _ = _install_mocks(monkeypatch, [_routed_response("resp_routed_1", "done")])
+
+    client1 = _FakeClient([_create_frame([{"type": "message", "role": "user", "content": "go"}])])
+    upstream1 = _FakeUpstream(
+        [_item_done(_function_call("c1", "exec_command")), _completed("resp_up_1")]
+    )
+    await codex_ws_router.run_hybrid_relay(
+        client1,
+        upstream1,
+        recorder=_NullRecorder(),
+        chatgpt_headers=_ACCOUNT_HEADERS,
+        routes_loader=_routes,
+    )
+
+    client2 = _FakeClient([_create_frame([_call_output("c1")], previous_response_id="resp_up_1")])
+    upstream2 = _FakeUpstream([])
+    await codex_ws_router.run_hybrid_relay(
+        client2,
+        upstream2,
+        recorder=_NullRecorder(),
+        chatgpt_headers=_ACCOUNT_HEADERS,
+        routes_loader=_routes,
+    )
+
+    # Connection 1 passed through; connection 2 routed over HTTP with paired input.
+    assert upstream2.sent == []
+    assert len(bodies) == 1
+    routed_input = bodies[0]["input"]
+    assert _function_call("c1", "exec_command") in routed_input
+    assert _call_output("c1") in routed_input
+
+
+@pytest.mark.asyncio
+async def test_virtual_chain_turn_never_forwarded_upstream_across_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Connection 1 routes a turn and hands the client a router-issued (virtual) id.
+    # A later decision turn on connection 2 chains from that id. The upstream does
+    # not know virtual ids, so it must be served over HTTP and NEVER forwarded --
+    # forwarding it is what made Codex hang ("Unsupported parameter:
+    # previous_response_id") under the per-connection store.
+    bodies, _ = _install_mocks(
+        monkeypatch,
+        [_routed_response("resp_routed_1", "a"), _routed_response("resp_routed_2", "b")],
+    )
+
+    client1 = _FakeClient([_create_frame(_exec_result_turn())])
+    upstream1 = _FakeUpstream([])
+    await codex_ws_router.run_hybrid_relay(
+        client1,
+        upstream1,
+        recorder=_NullRecorder(),
+        chatgpt_headers=_ACCOUNT_HEADERS,
+        routes_loader=_routes,
+    )
+    virtual_id = json.loads(client1.sent_text[-1])["response"]["id"]
+    assert virtual_id.startswith("resp_acr_")
+
+    client2 = _FakeClient(
+        [
+            _create_frame(
+                [{"type": "message", "role": "user", "content": "more"}],
+                previous_response_id=virtual_id,
+            )
+        ]
+    )
+    upstream2 = _FakeUpstream([])
+    await codex_ws_router.run_hybrid_relay(
+        client2,
+        upstream2,
+        recorder=_NullRecorder(),
+        chatgpt_headers=_ACCOUNT_HEADERS,
+        routes_loader=_routes,
+    )
+
+    assert upstream2.sent == []
+    assert len(bodies) == 2
+
+
+@pytest.mark.asyncio
+async def test_missing_account_id_isolates_sessions_per_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Without an account id the session cannot be shared safely, so each relay
+    # gets an ephemeral session and the module store stays empty.
+    _install_mocks(monkeypatch, [_routed_response("resp_routed_1", "a")])
+    client = _FakeClient([_create_frame(_exec_result_turn())])
+    upstream = _FakeUpstream([])
+
+    await codex_ws_router.run_hybrid_relay(
+        client,
+        upstream,
+        recorder=_NullRecorder(),
+        chatgpt_headers=[("Authorization", "Bearer t")],
+        routes_loader=_routes,
+    )
+
+    assert codex_ws_router._SESSIONS == {}

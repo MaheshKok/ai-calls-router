@@ -43,51 +43,128 @@ settings:
   # when headroom-ai is not installed. Default: true.
   compress_routed: true
 
-# Cheap serving tiers. `model` is any LiteLLM-supported id; `key_env` names the
-# environment variable holding that provider's API key (never the Anthropic
-# credential). `max_tokens` caps the routed completion.
+# Agent-local serving tiers. `tools` maps each agent's tool vocabulary to a
+# semantic tier name; `agents.<group>.tiers.<tier>` decides the actual model for
+# that agent. This lets Claude Code `fast` route to DeepSeek while Hermes `fast`
+# routes to a GPT model, without inventing names like `claude_fast`.
 #
-# input_cost_per_1m / output_cost_per_1m are price overrides in USD per one
-# million tokens; input_cached_cost_per_1m is the cheaper rate a provider bills
-# for prompt tokens served from its prefix cache. Supply prices when LiteLLM
-# does not already price the model (the `acr savings` ledger uses LiteLLM's own
-# table first). The DeepSeek tiers below route through DeepSeek's native
-# Anthropic endpoint -- bypassing LiteLLM entirely so consecutive turns keep
-# byte-identical prefixes for the provider's cache -- so their ids are not in
-# LiteLLM's table and the ledger depends on these overrides: cache hits bill at
-# input_cached_cost_per_1m, misses at input_cost_per_1m. The values are
-# PLACEHOLDERS -- verify against each provider's published rates before trusting
-# the savings report. An unpriced model is never guessed at: it is simply
-# omitted from the ledger.
-tiers:
-  fast:
-    model: deepseek/deepseek-v4-flash
-    key_env: DEEPSEEK_API_KEY
-    max_tokens: 8192
-    input_cost_per_1m: 0.14            # cache miss -- placeholder, verify
-    input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
-    output_cost_per_1m: 0.28           # placeholder, verify
-  structured:
-    model: deepseek/deepseek-v4-flash
-    key_env: DEEPSEEK_API_KEY
-    max_tokens: 8192
-    input_cost_per_1m: 0.14            # cache miss -- placeholder, verify
-    input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
-    output_cost_per_1m: 0.28           # placeholder, verify
-  code:
-    model: deepseek/deepseek-v4-pro
-    key_env: DEEPSEEK_API_KEY
-    max_tokens: 8192
-    input_cost_per_1m: 0.435           # cache miss -- placeholder, verify
-    input_cached_cost_per_1m: 0.003625 # cache hit  -- placeholder, verify
-    output_cost_per_1m: 0.87           # placeholder, verify
-  crud:
-    model: deepseek/deepseek-v4-flash
-    key_env: DEEPSEEK_API_KEY
-    max_tokens: 4096
-    input_cost_per_1m: 0.14            # cache miss -- placeholder, verify
-    input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
-    output_cost_per_1m: 0.28           # placeholder, verify
+# Auth:
+#   auth.mode: api_key_env uses auth.key_env from process env or settings.env_file.
+#   auth.mode: oauth uses ChatGPT/OpenAI OAuth headers from the wrapped client
+#   request. The token is not stored in YAML.
+agents:
+  claude_code:
+    upstream: https://api.anthropic.com
+    tools:
+      Bash: fast
+      BashOutput: fast
+      KillShell: fast
+      WebFetch: fast
+      WebSearch: fast
+      Read: code
+      Grep: code
+      Glob: code
+      LSP: code
+      TodoWrite: crud
+      TaskList: crud
+      TaskGet: crud
+      Edit: premium
+      Write: premium
+      MultiEdit: premium
+      NotebookEdit: premium
+      Task: premium
+      ExitPlanMode: premium
+      AskUserQuestion: premium
+    premium_tools: [Edit, Write, MultiEdit, NotebookEdit, Task, ExitPlanMode, AskUserQuestion]
+    tiers:
+      fast:
+        provider: deepseek
+        model: deepseek/deepseek-v4-flash
+        auth:
+          mode: api_key_env
+          key_env: DEEPSEEK_API_KEY
+        max_tokens: 8192
+        input_cost_per_1m: 0.14
+        input_cached_cost_per_1m: 0.0028
+        output_cost_per_1m: 0.28
+      code:
+        provider: deepseek
+        model: deepseek/deepseek-v4-pro
+        auth:
+          mode: api_key_env
+          key_env: DEEPSEEK_API_KEY
+        max_tokens: 8192
+        input_cost_per_1m: 0.435
+        input_cached_cost_per_1m: 0.003625
+        output_cost_per_1m: 0.87
+      crud:
+        provider: deepseek
+        model: deepseek/deepseek-v4-flash
+        auth:
+          mode: api_key_env
+          key_env: DEEPSEEK_API_KEY
+        max_tokens: 4096
+        input_cost_per_1m: 0.14
+        input_cached_cost_per_1m: 0.0028
+        output_cost_per_1m: 0.28
+      structured:
+        provider: deepseek
+        model: deepseek/deepseek-v4-flash
+        auth:
+          mode: api_key_env
+          key_env: DEEPSEEK_API_KEY
+        max_tokens: 8192
+        input_cost_per_1m: 0.14
+        input_cached_cost_per_1m: 0.0028
+        output_cost_per_1m: 0.28
+
+  hermes:
+    upstream: https://chatgpt.com/backend-api/codex
+    tools:
+      terminal: fast
+      process: fast
+      read_file: code
+      search_files: code
+      execute_code: code
+      skill_view: code
+      todo: crud
+      memory: crud
+      session_search: crud
+      skills_list: crud
+      write_file: structured
+      skill_manage: structured
+      cronjob: structured
+      patch: premium
+      clarify: premium
+      delegate_task: premium
+      browser_vision: premium
+      browser_*: premium
+    premium_tools: [patch, clarify, delegate_task]
+    tiers:
+      fast:
+        provider: codex
+        model: gpt-5.4-mini
+        auth:
+          mode: oauth
+        max_tokens: 8192
+      code:
+        provider: codex
+        model: gpt-5.3-codex-spark
+        auth:
+          mode: oauth
+        max_tokens: 8192
+      crud:
+        provider: codex
+        model: gpt-5.3-codex-spark
+        auth:
+          mode: oauth
+        max_tokens: 4096
+      structured:
+        provider: codex
+        model: gpt-5.3-codex-spark
+        auth:
+          mode: oauth
+        max_tokens: 8192
 
 # Agent identity routing. `x-acr-agent` wins, then user-agent contains rules,
 # then endpoint defaults, then fallback. `fallback: null` deliberately fails
@@ -96,18 +173,15 @@ router:
   endpoint_defaults:
     /v1/messages: claude_code
     /v1/chat/completions: hermes
-    /v1/responses: codex
   user_agent_map:
     - contains: claude
       group: claude_code
     - contains: hermes
       group: hermes
-    - contains: codex
-      group: codex
   fallback: null
 
-# Per-provider config now lives in separate files under
-# ~/.ai-calls-router/config/{claude-code,codex,hermes}.yaml. `acr init` and
+# Per-provider config may also live in separate files under
+# ~/.ai-calls-router/config/{claude-code,hermes}.yaml. `acr init` and
 # server startup create missing files without overwriting edits.
 #
 # Runtime-consumed provider fields:

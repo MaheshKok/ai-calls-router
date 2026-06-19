@@ -1,15 +1,22 @@
 """Agent launcher helpers for routing local CLIs through acr.
 
-Codex needs a persistent `~/.codex/config.toml` override because ChatGPT
-subscription auth ignores `OPENAI_BASE_URL` in some flows. Claude and Hermes
-only need environment overrides, so this module keeps their handling transient.
+Codex and Hermes need persistent local config overrides because subscription
+auth ignores `OPENAI_BASE_URL` in some flows. `unwrap` restores the byte-for-byte
+backups when the user wants to return each agent to its original upstream.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+import yaml
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject, JsonValue
 
 
 class WrapError(RuntimeError):
@@ -26,6 +33,8 @@ _CODEX_START_MARKER = "# >>> ai-calls-router codex wrap >>>"
 _CODEX_END_MARKER = "# <<< ai-calls-router codex wrap <<<"
 _CODEX_BACKUP_SUFFIX = ".acr-backup"
 _CODEX_TOP_LEVEL_OVERRIDES = ("model_provider", "openai_base_url")
+_HERMES_START_MARKER = "# >>> ai-calls-router hermes wrap >>>"
+_HERMES_BACKUP_SUFFIX = ".acr-backup"
 
 
 def codex_config_path() -> Path:
@@ -48,6 +57,54 @@ def codex_backup_path(config_file: Path | None = None) -> Path:
     """
     target = codex_config_path() if config_file is None else config_file
     return target.with_name(f"{target.name}{_CODEX_BACKUP_SUFFIX}")
+
+
+def hermes_config_path() -> Path:
+    """Return the Hermes CLI config path.
+
+    Returns:
+        The user's `~/.hermes/config.yaml` path.
+    """
+    return Path.home() / ".hermes" / "config.yaml"
+
+
+def hermes_backup_path(config_file: Path | None = None) -> Path:
+    """Return the byte-for-byte backup path for a Hermes config file.
+
+    Args:
+        config_file: Optional Hermes config path override.
+
+    Returns:
+        The backup path used by `unwrap hermes`.
+    """
+    target = hermes_config_path() if config_file is None else config_file
+    return target.with_name(f"{target.name}{_HERMES_BACKUP_SUFFIX}")
+
+
+def hermes_auth_path(config_file: Path | None = None) -> Path:
+    """Return the Hermes auth store path paired with a config file.
+
+    Args:
+        config_file: Optional Hermes config path override.
+
+    Returns:
+        The `auth.json` file used by that Hermes home.
+    """
+    target = hermes_config_path() if config_file is None else config_file
+    return target.with_name("auth.json")
+
+
+def hermes_auth_backup_path(auth_file: Path | None = None) -> Path:
+    """Return the byte-for-byte backup path for a Hermes auth store.
+
+    Args:
+        auth_file: Optional Hermes auth store path override.
+
+    Returns:
+        The backup path used by `unwrap hermes`.
+    """
+    target = hermes_auth_path() if auth_file is None else auth_file
+    return target.with_name(f"{target.name}{_HERMES_BACKUP_SUFFIX}")
 
 
 def enable_codex_config(proxy_url: str, config_file: Path | None = None) -> Path:
@@ -107,6 +164,76 @@ def disable_codex_config(config_file: Path | None = None) -> Path:
     return target
 
 
+def enable_hermes_config(
+    proxy_url: str,
+    config_file: Path | None = None,
+    *,
+    auth_file: Path | None = None,
+) -> Path:
+    """Point Hermes openai-codex traffic at acr until `unwrap hermes`.
+
+    Args:
+        proxy_url: Base acr listen URL without `/v1`.
+        config_file: Optional Hermes config path override for tests.
+        auth_file: Optional Hermes auth store override for tests.
+
+    Returns:
+        The config path that was written.
+
+    Raises:
+        WrapError: When the config cannot be parsed or written.
+    """
+    target = hermes_config_path() if config_file is None else config_file
+    backup = hermes_backup_path(target)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _snapshot_original(target, backup)
+        payload = _read_yaml_mapping(target)
+        target.write_text(_hermes_config_content(payload, proxy_url), encoding="utf-8")
+        _enable_hermes_auth(proxy_url, hermes_auth_path(target) if auth_file is None else auth_file)
+    except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise WrapError(f"could not update Hermes config: {exc}") from exc
+    return target
+
+
+def disable_hermes_config(
+    config_file: Path | None = None,
+    *,
+    auth_file: Path | None = None,
+) -> Path:
+    """Restore or remove acr's transient Hermes config change.
+
+    Args:
+        config_file: Optional Hermes config path override for tests.
+        auth_file: Optional Hermes auth store override for tests.
+
+    Returns:
+        The config path that was restored or cleaned.
+
+    Raises:
+        WrapError: When the config cannot be restored.
+    """
+    target = hermes_config_path() if config_file is None else config_file
+    backup = hermes_backup_path(target)
+    auth_target = hermes_auth_path(target) if auth_file is None else auth_file
+    try:
+        if backup.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(backup), str(target))
+            _disable_hermes_auth(auth_target)
+            return target
+        if not target.exists():
+            _disable_hermes_auth(auth_target)
+            return target
+        content = target.read_text(encoding="utf-8")
+        if _HERMES_START_MARKER in content:
+            target.unlink()
+        _disable_hermes_auth(auth_target)
+    except OSError as exc:
+        raise WrapError(f"could not restore Hermes config: {exc}") from exc
+    return target
+
+
 def launch_env(agent: str, proxy_url: str) -> dict[str, str]:
     """Build the environment for one wrapped agent.
 
@@ -120,6 +247,9 @@ def launch_env(agent: str, proxy_url: str) -> dict[str, str]:
     env = dict(os.environ)
     if agent == "claude":
         env["ANTHROPIC_BASE_URL"] = proxy_url
+    elif agent == "hermes":
+        env["OPENAI_BASE_URL"] = f"{proxy_url}/v1"
+        env["HERMES_CODEX_BASE_URL"] = f"{proxy_url}/v1"
     else:
         env["OPENAI_BASE_URL"] = f"{proxy_url}/v1"
     return env
@@ -175,6 +305,75 @@ def _is_top_level_override(stripped_line: str) -> bool:
         stripped_line.startswith(f"{key} ") or stripped_line.startswith(f"{key}=")
         for key in _CODEX_TOP_LEVEL_OVERRIDES
     )
+
+
+def _read_yaml_mapping(path: Path) -> JsonObject:
+    if not path.exists():
+        return {}
+    content = path.read_text(encoding="utf-8")
+    loaded = cast("JsonValue", yaml.safe_load(content) or {})
+    if not isinstance(loaded, dict):
+        raise WrapError("Hermes config must be a YAML mapping")
+    return loaded
+
+
+def _hermes_config_content(payload: JsonObject, proxy_url: str) -> str:
+    updated: JsonObject = dict(payload)
+    model_value = updated.get("model")
+    model: JsonObject = {}
+    if isinstance(model_value, dict):
+        model.update(model_value)
+    model["base_url"] = f"{proxy_url}/v1"
+    headers_value = model.get("default_headers")
+    default_headers: JsonObject = {}
+    if isinstance(headers_value, dict):
+        default_headers.update(headers_value)
+    default_headers["x-acr-agent"] = "hermes"
+    model["default_headers"] = default_headers
+    updated["model"] = model
+    dumped = yaml.safe_dump(updated, sort_keys=False)
+    return f"{_HERMES_START_MARKER}\n{dumped}"
+
+
+def _enable_hermes_auth(proxy_url: str, auth_file: Path) -> None:
+    if not auth_file.exists():
+        return
+    backup = hermes_auth_backup_path(auth_file)
+    _snapshot_original(auth_file, backup)
+    payload = _read_json_mapping(auth_file)
+    _set_hermes_auth_base_url(payload, f"{proxy_url}/v1")
+    auth_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _disable_hermes_auth(auth_file: Path) -> None:
+    backup = hermes_auth_backup_path(auth_file)
+    if backup.exists():
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(backup), str(auth_file))
+
+
+def _read_json_mapping(path: Path) -> JsonObject:
+    loaded = cast("JsonValue", json.loads(path.read_text(encoding="utf-8")))
+    if not isinstance(loaded, dict):
+        raise WrapError("Hermes auth store must be a JSON mapping")
+    return loaded
+
+
+def _set_hermes_auth_base_url(payload: JsonObject, base_url: str) -> None:
+    providers = payload.get("providers")
+    if isinstance(providers, dict):
+        provider = providers.get("openai-codex")
+        if isinstance(provider, dict):
+            provider["base_url"] = base_url
+    credential_pool = payload.get("credential_pool")
+    if not isinstance(credential_pool, dict):
+        return
+    entries = credential_pool.get("openai-codex")
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if isinstance(entry, dict):
+            entry["base_url"] = base_url
 
 
 def _codex_config_content(user_content: str, proxy_url: str) -> str:

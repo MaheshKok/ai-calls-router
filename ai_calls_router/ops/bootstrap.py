@@ -7,6 +7,7 @@ files are never overwritten.
 
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING, cast
 
 import yaml
@@ -15,7 +16,6 @@ from ai_calls_router._lib import config
 from ai_calls_router.routing.adapters.base import (
     AGENT_GROUP_ENDPOINTS,
     AGENT_GROUP_WIRES,
-    KNOWN_GROUPS,
 )
 from ai_calls_router.routing.agent_defaults import (
     AGENT_DEFAULT_PREMIUM_TOOLS,
@@ -30,8 +30,74 @@ if TYPE_CHECKING:
 
 _UPSTREAM_BY_GROUP: dict[str, str] = {
     "claude_code": config.DEFAULT_UPSTREAM,
-    "codex": "https://api.openai.com",
     "hermes": config.DEFAULT_UPSTREAM,
+}
+_BOOTSTRAP_GROUPS: tuple[str, ...] = ("claude_code", "hermes")
+_TIERS_BY_GROUP: dict[str, JsonObject] = {
+    "claude_code": {
+        "fast": {
+            "provider": "deepseek",
+            "model": "deepseek/deepseek-v4-flash",
+            "auth": {"mode": "api_key_env", "key_env": "DEEPSEEK_API_KEY"},
+            "max_tokens": 8192,
+            "input_cost_per_1m": 0.14,
+            "input_cached_cost_per_1m": 0.0028,
+            "output_cost_per_1m": 0.28,
+        },
+        "code": {
+            "provider": "deepseek",
+            "model": "deepseek/deepseek-v4-pro",
+            "auth": {"mode": "api_key_env", "key_env": "DEEPSEEK_API_KEY"},
+            "max_tokens": 8192,
+            "input_cost_per_1m": 0.435,
+            "input_cached_cost_per_1m": 0.003625,
+            "output_cost_per_1m": 0.87,
+        },
+        "crud": {
+            "provider": "deepseek",
+            "model": "deepseek/deepseek-v4-flash",
+            "auth": {"mode": "api_key_env", "key_env": "DEEPSEEK_API_KEY"},
+            "max_tokens": 4096,
+            "input_cost_per_1m": 0.14,
+            "input_cached_cost_per_1m": 0.0028,
+            "output_cost_per_1m": 0.28,
+        },
+        "structured": {
+            "provider": "deepseek",
+            "model": "deepseek/deepseek-v4-flash",
+            "auth": {"mode": "api_key_env", "key_env": "DEEPSEEK_API_KEY"},
+            "max_tokens": 8192,
+            "input_cost_per_1m": 0.14,
+            "input_cached_cost_per_1m": 0.0028,
+            "output_cost_per_1m": 0.28,
+        },
+    },
+    "hermes": {
+        "fast": {
+            "provider": "codex",
+            "model": "gpt-5.4-mini",
+            "auth": {"mode": "oauth"},
+            "max_tokens": 8192,
+        },
+        "code": {
+            "provider": "codex",
+            "model": "gpt-5.3-codex-spark",
+            "auth": {"mode": "oauth"},
+            "max_tokens": 8192,
+        },
+        "crud": {
+            "provider": "codex",
+            "model": "gpt-5.3-codex-spark",
+            "auth": {"mode": "oauth"},
+            "max_tokens": 4096,
+        },
+        "structured": {
+            "provider": "codex",
+            "model": "gpt-5.3-codex-spark",
+            "auth": {"mode": "oauth"},
+            "max_tokens": 8192,
+        },
+    },
 }
 
 _TEMPLATE_HEADER = """# Runtime fields: upstream, tools, premium_tools.
@@ -56,6 +122,7 @@ def _provider_template(group: str) -> JsonObject:
             "reasoning": "strip",
             "tools": dict(AGENT_DEFAULT_TOOLS[group]),
             "premium_tools": list(AGENT_DEFAULT_PREMIUM_TOOLS[group]),
+            "tiers": copy.deepcopy(_TIERS_BY_GROUP[group]),
             "fallback": "passthrough",
         },
     )
@@ -73,7 +140,7 @@ def ensure_provider_configs(*, ask: Callable[[str], str] | None = None) -> list[
     del ask
     created: list[Path] = []
     config.provider_config_dir().mkdir(parents=True, exist_ok=True)
-    for group in sorted(KNOWN_GROUPS):
+    for group in sorted(_BOOTSTRAP_GROUPS):
         path = config.provider_config_path(group)
         if path.exists():
             continue

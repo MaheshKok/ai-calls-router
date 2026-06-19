@@ -153,7 +153,7 @@ def _chatgpt_oauth_headers(
     """Return ChatGPT OAuth headers from already-resolved OAuth mode."""
     if chatgpt_headers is None:
         return None
-    headers = dict(chatgpt_headers)
+    headers = {key: value for key, value in chatgpt_headers if key.lower() != "content-type"}
     headers["Content-Type"] = "application/json"
     return headers
 

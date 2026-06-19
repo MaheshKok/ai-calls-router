@@ -73,6 +73,48 @@ def test_function_call_output_links_to_tool_result_id() -> None:
     ]
 
 
+def test_request_conversion_drops_orphaned_tool_history_for_anthropic_direct() -> None:
+    converted = responses_request_to_anthropic(
+        {
+            "model": "gpt-5-codex",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_keep",
+                    "name": "search_files",
+                    "arguments": '{"query":"x"}',
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_drop",
+                    "name": "read_file",
+                    "arguments": '{"path":"missing"}',
+                },
+                {"type": "function_call_output", "call_id": "call_keep", "output": "ok"},
+                {"type": "function_call_output", "call_id": "orphan", "output": "stale"},
+            ],
+        }
+    )
+
+    assert converted["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_keep",
+                    "name": "search_files",
+                    "input": {"query": "x"},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "call_keep", "content": "ok"}],
+        },
+    ]
+
+
 def test_message_content_variants_and_image_url_convert() -> None:
     messages = responses_input_to_anthropic_messages(
         [

@@ -11,8 +11,10 @@ Responses stream events back as WebSocket frames.
 Because a router-issued response id is unknown to the upstream WebSocket, a
 session that has routed once stays on the HTTP path for the rest of its life
 (sticky route): later turns -- including premium-tier turns -- are served over
-HTTP as well. The relay is turn-sequential, matching Codex's request/response
-cadence.
+HTTP as well. Codex pools its WebSocket connections, so session state is shared
+per ChatGPT account (keyed by account id) rather than per socket; both the sticky
+route and history reconstruction therefore span connections. The relay is
+turn-sequential, matching Codex's request/response cadence.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from starlette.websockets import WebSocketDisconnect
 
 from ai_calls_router._lib import logging_setup
-from ai_calls_router.proxy.codex_session import CodexSession
+from ai_calls_router.proxy.codex_session import CodexSession, is_virtual_id
 from ai_calls_router.routing import codex_direct
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
@@ -47,6 +49,12 @@ _TERMINAL_RESPONSE_TYPES = frozenset(
     {"response.completed", "response.failed", "response.incomplete"}
 )
 _ADAPTER = OpenAIResponsesAdapter()
+
+# ponytail: unbounded per-account store, no lock; a daemon restart clears it. Add
+# TTL/LRU eviction and a per-account asyncio.Lock only if memory growth or pooled
+# concurrent-connection interleaving shows up in practice (experimental flag,
+# single user today).
+_SESSIONS: dict[str, CodexSession] = {}
 
 
 class _ClientSocket(Protocol):
@@ -168,15 +176,15 @@ async def run_hybrid_relay(
         client: Accepted client WebSocket.
         upstream: Open upstream connection to the ChatGPT Codex backend.
         recorder: Passthrough metrics recorder for non-routed turns.
-        chatgpt_headers: Forwardable ChatGPT OAuth headers for routed HTTP calls.
+        chatgpt_headers: Forwardable ChatGPT OAuth headers for routed HTTP calls;
+            also the source of the account id that keys the shared session store.
         routes_loader: Callable returning the assembled routes config.
         group: Agent group for tier resolution.
         http_client: Optional shared HTTP client (tests inject a mock transport).
         user_agent: Client User-Agent, for routed metrics.
         agent: Identified agent label, for routed metrics.
     """
-    session = CodexSession()
-    routed = False
+    session = _session_for(chatgpt_headers)
     while True:
         try:
             raw = await client.receive_text()
@@ -186,14 +194,17 @@ async def run_hybrid_relay(
         if body is None:
             await upstream.send(raw)
             continue
+        previous_id = _previous_id(body)
         full_input = _reconstruct(session, body)
         decision = decide_ws_turn(full_input, routes=routes_loader(), group=group)
-        if not routed and not decision.routable:
+        # Passthrough only when the turn is non-routable AND chains from an id the
+        # upstream knows. A virtual (router-issued) previous id forces the HTTP
+        # path: forwarding it would make the upstream reject previous_response_id.
+        if not decision.routable and not is_virtual_id(previous_id):
             recorder.note_request(raw)
             await upstream.send(raw)
             await _observe_passthrough_turn(upstream, client, recorder, session, full_input)
             continue
-        routed = True
         await _serve_routed_turn(
             client,
             session,
@@ -211,9 +222,49 @@ def _reconstruct(session: CodexSession, body: JsonObject) -> JsonArray:
     """Return the full stateless input for a turn from session history plus delta."""
     delta = body.get("input")
     delta_items: JsonArray = delta if isinstance(delta, list) else []
+    return session.reconstruct_input(_previous_id(body), delta_items)
+
+
+def _previous_id(body: JsonObject) -> str | None:
+    """Return the turn's ``previous_response_id`` string, or None when absent."""
     previous = body.get("previous_response_id")
-    previous_id = previous if isinstance(previous, str) else None
-    return session.reconstruct_input(previous_id, delta_items)
+    return previous if isinstance(previous, str) else None
+
+
+def _account_key(chatgpt_headers: list[tuple[str, str]] | None) -> str | None:
+    """Return the ChatGPT account id from forwarded headers, or None when absent."""
+    if not chatgpt_headers:
+        return None
+    for name, value in chatgpt_headers:
+        if name.lower() == "chatgpt-account-id" and value:
+            return value
+    return None
+
+
+def _session_for(chatgpt_headers: list[tuple[str, str]] | None) -> CodexSession:
+    """Return the shared session for a ChatGPT account (Codex pools connections).
+
+    Codex opens multiple WebSocket connections for one conversation, so session
+    state must be keyed by account rather than by socket: a tool-result turn can
+    arrive on a different connection than the decision turn that preceded it.
+    Without an account id (tests, or a malformed handshake) the session is
+    ephemeral, since it cannot be shared safely.
+
+    Args:
+        chatgpt_headers: Forwardable ChatGPT OAuth headers carrying the account id.
+
+    Returns:
+        The account's shared session, or a fresh ephemeral one when no account id
+        is available.
+    """
+    key = _account_key(chatgpt_headers)
+    if key is None:
+        return CodexSession()
+    session = _SESSIONS.get(key)
+    if session is None:
+        session = CodexSession()
+        _SESSIONS[key] = session
+    return session
 
 
 async def _observe_passthrough_turn(
@@ -277,9 +328,10 @@ async def _serve_routed_turn(
     duration = time.monotonic() - started
     output = response_body.get("output")
     output_items: JsonArray = output if isinstance(output, list) else []
-    recorded_id = session.record_response(
-        full_input=full_input, output=output_items, response_id=_response_id(response_body)
-    )
+    # Record under a router-issued (virtual) id, never the cheap provider's id:
+    # the upstream knows neither, so the client must chain from a virtual id that
+    # the route gate recognizes and keeps on the HTTP path.
+    recorded_id = session.record_response(full_input=full_input, output=output_items)
     frames_response = {**response_body, "id": recorded_id}
     for frame in synthesize_response_object_frames(frames_response):
         await client.send_text(json.dumps(frame, ensure_ascii=False))
