@@ -29,6 +29,13 @@ repos:
         additional_dependencies: [".[toml]"]
   - repo: local
     hooks:
+      - id: pyrefly
+        name: pyrefly type checking
+        entry: .venv/bin/python -m pyrefly check
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
       - id: cognitive-complexity
         name: cognitive complexity check (≤15, matches PyCharm)
         entry: .venv/bin/python scripts/check-cognitive-complexity.py
