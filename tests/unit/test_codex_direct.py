@@ -56,6 +56,42 @@ def test_prepare_responses_body_keeps_reasoning_drops_state_without_mutating() -
     assert body["previous_response_id"] == "resp_old"
 
 
+def test_prepare_responses_body_strips_image_generation_tool() -> None:
+    # gpt-5.3-codex-spark returns 400 for the image_generation hosted tool; routed
+    # tiers must drop it while keeping the real function tools in original order.
+    body = {
+        "model": "gpt-5-codex",
+        "input": [],
+        "tools": [
+            {"type": "function", "name": "exec_command"},
+            {"type": "image_generation"},
+            {"type": "function", "name": "read_file"},
+        ],
+    }
+
+    routed = codex_direct.prepare_responses_body(body, _tier())
+
+    assert routed["tools"] == [
+        {"type": "function", "name": "exec_command"},
+        {"type": "function", "name": "read_file"},
+    ]
+    assert len(body["tools"]) == 3
+
+
+def test_prepare_responses_body_without_tools_adds_no_tools_key() -> None:
+    routed = codex_direct.prepare_responses_body({"model": "m", "input": []}, _tier())
+
+    assert "tools" not in routed
+
+
+def test_prepare_responses_body_keeps_tools_when_none_unsupported() -> None:
+    body = {"model": "m", "input": [], "tools": [{"type": "function", "name": "shell"}]}
+
+    routed = codex_direct.prepare_responses_body(body, _tier())
+
+    assert routed["tools"] == [{"type": "function", "name": "shell"}]
+
+
 def test_unpaired_function_call_ids_flags_only_unanswered_calls() -> None:
     # Paired call+output is safe; an unanswered call is the 400 trigger.
     assert codex_direct.unpaired_function_call_ids({"input": "hello"}) == []

@@ -41,6 +41,9 @@ _SENSITIVE_FIELD_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+# Hosted tools the routed Codex models reject. gpt-5.3-codex-spark returns 400
+# for image_generation, so routed tiers drop it; premium passthrough keeps it.
+_UNSUPPORTED_ROUTED_TOOLS = frozenset({"image_generation"})
 
 
 def native_model_id(tier_cfg: JsonObject) -> str:
@@ -50,6 +53,11 @@ def native_model_id(tier_cfg: JsonObject) -> str:
         if model.startswith(prefix):
             return model[len(prefix) :]
     return model
+
+
+def _is_unsupported_routed_tool(tool: JsonValue) -> bool:
+    """Return whether a tool entry is a hosted tool routed Codex tiers must drop."""
+    return isinstance(tool, dict) and tool.get("type") in _UNSUPPORTED_ROUTED_TOOLS
 
 
 def prepare_responses_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
@@ -62,7 +70,8 @@ def prepare_responses_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject
     their ``function_call`` and the backend needs them to pair the call with its
     ``function_call_output`` (dropping them triggers a 400 "No tool output found
     for function call"). The model id and ``max_output_tokens`` are normalized to
-    the tier.
+    the tier, and hosted tools the routed models reject (``image_generation``)
+    are stripped so they do not 400 the request.
 
     Args:
         body: Original OpenAI Responses request body from the client.
@@ -87,6 +96,9 @@ def prepare_responses_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject
         )
         if over_limit:
             routed["max_output_tokens"] = parsed.max_tokens
+    tools = routed.get("tools")
+    if isinstance(tools, list):
+        routed["tools"] = [tool for tool in tools if not _is_unsupported_routed_tool(tool)]
     return routed
 
 
