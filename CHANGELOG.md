@@ -8,6 +8,35 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 from [Conventional Commit](https://www.conventionalcommits.org/) messages, so new
 entries are added here when a release pull request is merged.
 
+## [Unreleased]
+
+### Added
+
+- Added ChatGPT-OAuth routed serving for Hermes. Decision and premium turns pass
+  through to `https://chatgpt.com/backend-api/codex` with the client's own OAuth;
+  cheap tool-result turns are served by smaller GPT models (`gpt-5.4-mini`,
+  `gpt-5.3-codex-spark`) on the same ChatGPT plan. Routing reuses the existing
+  plan quota — it changes which model serves a turn, not the billing source.
+- Added `auth.mode: oauth` tier authentication so agent-local tiers can serve on
+  the client's ChatGPT OAuth instead of an API key.
+- Added `POST /v1/responses` inbound support so Hermes can route on either the
+  OpenAI Chat Completions or the Responses wire, with conversion between the
+  Anthropic and Responses formats.
+
+### Fixed
+
+- Fixed a startup schema-validation failure (`Input should be 'api_key_env'`)
+  that rejected `auth.mode: oauth` tiers and disabled routing, forcing all
+  traffic to premium passthrough.
+
+### Notes
+
+- This branch (`codex/support-codex-hermes`) originally targeted both a
+  standalone `codex` client and Hermes. The standalone `codex` agent group and
+  its experimental ChatGPT WebSocket transport were dropped before release; only
+  Hermes ships and all routing is HTTP-only. The Responses serving that codex
+  used is folded into the `hermes` group.
+
 ## [0.5.0] - 2026-06-17
 
 ### Added
