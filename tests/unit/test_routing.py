@@ -176,17 +176,14 @@ class TestTierForTools:
                 "tools": {"Bash": "fast", "Read": "code", "TodoWrite": "crud", "Edit": "premium"},
                 "premium_tools": ["Edit"],
             },
-            "codex": {
+            "hermes": {
                 "tools": {
-                    "exec_command": "fast",
-                    "ctx_shell": "fast",
-                    "ctx_read": "code",
-                    "search_graph": "code",
-                    "update_plan": "crud",
-                    "initial_instructions": "crud",
-                    "apply_patch": "premium",
+                    "terminal": "fast",
+                    "read_file": "code",
+                    "todo": "crud",
+                    "patch": "premium",
                 },
-                "premium_tools": ["apply_patch"],
+                "premium_tools": ["patch"],
             },
         },
     }
@@ -226,15 +223,11 @@ class TestTierForTools:
         routes = {"agents": {"claude_code": {"tools": {"Bash": "fast"}}}}
         assert routing.tier_for_tools(["Bash"], routes, group="claude_code") == "fast"
 
-    def test_codex_group_resolves_codex_tool_names(self) -> None:
-        assert routing.tier_for_tools(["exec_command"], self.ROUTES, group="codex") == "fast"
-        assert routing.tier_for_tools(["ctx_shell"], self.ROUTES, group="codex") == "fast"
-        assert routing.tier_for_tools(["ctx_read"], self.ROUTES, group="codex") == "code"
-        assert routing.tier_for_tools(["search_graph"], self.ROUTES, group="codex") == "code"
-        assert routing.tier_for_tools(["update_plan"], self.ROUTES, group="codex") == "crud"
-        assert (
-            routing.tier_for_tools(["initial_instructions"], self.ROUTES, group="codex") == "crud"
-        )
+    def test_hermes_group_resolves_hermes_tool_names(self) -> None:
+        assert routing.tier_for_tools(["terminal"], self.ROUTES, group="hermes") == "fast"
+        assert routing.tier_for_tools(["read_file"], self.ROUTES, group="hermes") == "code"
+        assert routing.tier_for_tools(["todo"], self.ROUTES, group="hermes") == "crud"
+        assert routing.tier_for_tools(["patch"], self.ROUTES, group="hermes") == "premium"
 
     def test_claude_code_group_matches_default_behavior(self) -> None:
         routes = {"agents": {"claude_code": {"tools": AGENT_DEFAULT_TOOLS["claude_code"]}}}
@@ -264,7 +257,7 @@ class TestTierForTools:
         assert routes == before
 
     def test_empty_config_uses_requested_group_defaults(self) -> None:
-        assert routing.tier_for_tools(["exec_command"], {}, group="codex") == "fast"
+        assert routing.tier_for_tools(["terminal"], {}, group="hermes") == "fast"
 
     def test_agent_local_tier_config_can_reuse_semantic_tier_names(self) -> None:
         routes = {
@@ -272,7 +265,7 @@ class TestTierForTools:
                 "claude_code": {
                     "tiers": {"fast": {"provider": "deepseek", "model": "deepseek/fast"}}
                 },
-                "hermes": {"tiers": {"fast": {"provider": "codex", "model": "gpt-fast"}}},
+                "hermes": {"tiers": {"fast": {"provider": "openai", "model": "gpt-fast"}}},
             }
         }
 
@@ -281,7 +274,7 @@ class TestTierForTools:
             "model": "deepseek/fast",
         }
         assert routing.agent_tier_config(routes, "hermes", "fast") == {
-            "provider": "codex",
+            "provider": "openai",
             "model": "gpt-fast",
         }
 
@@ -301,34 +294,36 @@ class TestTierForTools:
 
     def test_agent_lookup_exceptions_fail_open_to_defaults(self) -> None:
         routes = _ExplodingRoutes()
-        assert routing.agent_tools(routes, "codex") == AGENT_DEFAULT_TOOLS["codex"]
-        assert routing.agent_premium_tools(routes, "codex") == AGENT_DEFAULT_PREMIUM_TOOLS["codex"]
+        assert routing.agent_tools(routes, "hermes") == AGENT_DEFAULT_TOOLS["hermes"]
+        assert (
+            routing.agent_premium_tools(routes, "hermes") == AGENT_DEFAULT_PREMIUM_TOOLS["hermes"]
+        )
 
 
 class TestAgentUpstream:
     def test_explicit_agent_upstream_is_returned_without_trailing_slash(self) -> None:
         routes = {
             "server": {"upstream": "https://premium.example"},
-            "agents": {"codex": {"upstream": "https://api.openai.com/"}},
+            "agents": {"hermes": {"upstream": "https://api.openai.com/"}},
         }
-        assert routing.agent_upstream(routes, "codex") == "https://api.openai.com"
+        assert routing.agent_upstream(routes, "hermes") == "https://api.openai.com"
 
     def test_missing_agent_upstream_uses_premium_default(self) -> None:
         routes = {
             "server": {"upstream": "https://premium.example/"},
-            "agents": {"codex": {"tools": {}}},
+            "agents": {"hermes": {"tools": {}}},
         }
-        assert routing.agent_upstream(routes, "codex") == "https://premium.example"
+        assert routing.agent_upstream(routes, "hermes") == "https://premium.example"
 
     def test_malformed_agent_upstream_warns_and_uses_premium_default(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         routes = {
             "server": {"upstream": "https://premium.example"},
-            "agents": {"codex": {"upstream": 7}},
+            "agents": {"hermes": {"upstream": 7}},
         }
         with caplog.at_level("WARNING", logger="acr.routing"):
-            assert routing.agent_upstream(routes, "codex") == "https://premium.example"
+            assert routing.agent_upstream(routes, "hermes") == "https://premium.example"
         assert "malformed agent upstream" in caplog.text
 
     def test_legacy_flat_config_resolves_claude_code_to_server_upstream(self) -> None:
@@ -338,7 +333,7 @@ class TestAgentUpstream:
     def test_unknown_group_uses_premium_default(self) -> None:
         routes = {
             "server": {"upstream": "https://premium.example"},
-            "agents": {"codex": {"upstream": "https://api.openai.com"}},
+            "agents": {"hermes": {"upstream": "https://api.openai.com"}},
         }
         assert routing.agent_upstream(routes, "unknown") == "https://premium.example"
 
@@ -401,39 +396,6 @@ class TestResolveApiKey:
         env_file.write_text("ACR_TEST_KEY=\n", encoding="utf-8")
         key = routing.resolve_api_key({"key_env": "ACR_TEST_KEY"}, {"env_file": str(env_file)})
         assert key is None
-
-    def test_codex_tier_uses_openai_api_key_by_default(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-        key = routing.resolve_tier_credential(
-            {"model": "codex/gpt-5-codex-spark", "provider": "codex"},
-            {},
-        )
-        assert key == routing.TierCredential(value="openai-key", auth_mode="api_key")
-
-    def test_oauth_auth_mode_and_flat_codex_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("oauth", raising=False)
-
-        assert routing.resolve_tier_credential(
-            {
-                "model": "codex/gpt-5-codex-spark",
-                "provider": "codex",
-                "key_env": "oauth",
-            },
-            {},
-        ) == routing.TierCredential(value="oauth", auth_mode="oauth")
-        assert (
-            routing.resolve_tier_credential(
-                {"model": "deepseek/deepseek-v4-flash", "key_env": "oauth"},
-                {},
-            )
-            is None
-        )
-        assert routing.resolve_tier_credential(
-            {"model": "gpt-5.4-mini", "provider": "codex", "auth": {"mode": "oauth"}},
-            {},
-        ) == routing.TierCredential(value="oauth", auth_mode="oauth")
 
     def test_nested_api_key_env_resolves_like_flat_key_env(
         self, monkeypatch: pytest.MonkeyPatch

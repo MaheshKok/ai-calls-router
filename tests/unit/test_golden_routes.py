@@ -1,4 +1,4 @@
-"""Golden routing decisions for representative OpenAI-compatible requests."""
+"""Golden routing decisions for representative supported requests."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from ai_calls_router._lib.types import JsonObject
 from ai_calls_router.proxy import route_dispatch
 from ai_calls_router.routing import provider_config
 from ai_calls_router.routing.adapters import adapter_for_path
-from ai_calls_router.routing.config_schema import is_codex_tier
 
 
 @dataclass(frozen=True)
@@ -27,22 +26,13 @@ class GoldenRoute:
     expected_tier: str
     expected_model: str | None
     expected_auth_mode: str | None
-    expected_codex_direct: bool
 
 
 def _routes() -> JsonObject:
     """Return the fixed config used by the golden route table."""
     return {
         "settings": {
-            "tier_precedence": [
-                "premium",
-                "codex_fast",
-                "structured",
-                "code",
-                "fast",
-                "crud",
-                "no_key",
-            ]
+            "tier_precedence": ["premium", "structured", "code", "fast", "crud", "no_key"]
         },
         "tiers": {
             "fast": {"model": "deepseek/deepseek-chat", "key_env": "FAST_KEY"},
@@ -52,18 +42,12 @@ def _routes() -> JsonObject:
                 "model": "deepseek/deepseek-structured",
                 "key_env": "STRUCTURED_KEY",
             },
-            "codex_fast": {
-                "provider": "openai-codex",
-                "model": "gpt-5.3-codex-spark",
-                "key_env": "oauth",
-            },
             "no_key": {"model": "deepseek/no-key"},
         },
         "router": {
             "endpoint_defaults": {
                 "/v1/messages": "claude_code",
                 "/v1/chat/completions": "hermes",
-                "/v1/responses": "codex",
             },
             "fallback": None,
         },
@@ -87,15 +71,6 @@ def _routes() -> JsonObject:
                     "patch": "premium",
                 },
                 "premium_tools": ["patch"],
-                "upstream": "https://api.openai.com",
-            },
-            "codex": {
-                "tools": {
-                    "exec_command": "codex_fast",
-                    "update_plan": "crud",
-                    "apply_patch": "premium",
-                },
-                "premium_tools": ["apply_patch"],
                 "upstream": "https://api.openai.com",
             },
         },
@@ -139,22 +114,6 @@ def _chat_tool_result(tool_name: str) -> JsonObject:
     }
 
 
-def _responses_tool_result(tool_name: str) -> JsonObject:
-    """Build an OpenAI Responses completed tool-result turn."""
-    return {
-        "model": "gpt-5",
-        "input": [
-            {
-                "type": "function_call",
-                "call_id": "call_1",
-                "name": tool_name,
-                "arguments": "{}",
-            },
-            {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
-        ],
-    }
-
-
 GOLDEN_ROUTES = [
     GoldenRoute(
         name="claude-fast",
@@ -166,7 +125,6 @@ GOLDEN_ROUTES = [
         expected_tier="fast",
         expected_model="deepseek/deepseek-chat",
         expected_auth_mode="api_key",
-        expected_codex_direct=False,
     ),
     GoldenRoute(
         name="claude-code",
@@ -178,7 +136,6 @@ GOLDEN_ROUTES = [
         expected_tier="code",
         expected_model="deepseek/deepseek-coder",
         expected_auth_mode="api_key",
-        expected_codex_direct=False,
     ),
     GoldenRoute(
         name="claude-crud",
@@ -190,7 +147,6 @@ GOLDEN_ROUTES = [
         expected_tier="crud",
         expected_model="deepseek/deepseek-crud",
         expected_auth_mode="api_key",
-        expected_codex_direct=False,
     ),
     GoldenRoute(
         name="hermes-structured",
@@ -202,7 +158,6 @@ GOLDEN_ROUTES = [
         expected_tier="structured",
         expected_model="deepseek/deepseek-structured",
         expected_auth_mode="api_key",
-        expected_codex_direct=False,
     ),
     GoldenRoute(
         name="claude-premium-guard",
@@ -214,7 +169,6 @@ GOLDEN_ROUTES = [
         expected_tier="premium",
         expected_model=None,
         expected_auth_mode=None,
-        expected_codex_direct=False,
     ),
     GoldenRoute(
         name="claude-missing-credential-fallback",
@@ -226,19 +180,6 @@ GOLDEN_ROUTES = [
         expected_tier="no_key",
         expected_model=None,
         expected_auth_mode=None,
-        expected_codex_direct=False,
-    ),
-    GoldenRoute(
-        name="codex-direct-oauth",
-        path="/v1/responses",
-        headers={},
-        body=_responses_tool_result("exec_command"),
-        expected_group="codex",
-        expected_tools=["exec_command"],
-        expected_tier="codex_fast",
-        expected_model="gpt-5.3-codex-spark",
-        expected_auth_mode="oauth",
-        expected_codex_direct=True,
     ),
 ]
 
@@ -268,6 +209,3 @@ def test_golden_route_decisions(monkeypatch: pytest.MonkeyPatch, case: GoldenRou
     assert tier == case.expected_tier
     assert (tier_cfg.get("model") if tier_cfg is not None else None) == case.expected_model
     assert (credential.auth_mode if credential is not None else None) == case.expected_auth_mode
-    assert (
-        is_codex_tier(tier_cfg) if tier_cfg is not None else False
-    ) is case.expected_codex_direct

@@ -50,8 +50,6 @@ settings:
 #
 # Auth:
 #   auth.mode: api_key_env uses auth.key_env from process env or settings.env_file.
-#   auth.mode: oauth uses ChatGPT/OpenAI OAuth headers from the wrapped client
-#   request. The token is not stored in YAML.
 agents:
   claude_code:
     upstream: https://api.anthropic.com
@@ -119,7 +117,7 @@ agents:
         output_cost_per_1m: 0.28
 
   hermes:
-    upstream: https://chatgpt.com/backend-api/codex
+    upstream: https://api.openai.com
     tools:
       terminal: fast
       process: fast
@@ -142,28 +140,32 @@ agents:
     premium_tools: [patch, clarify, delegate_task]
     tiers:
       fast:
-        provider: codex
-        model: gpt-5.4-mini
+        provider: openai
+        model: gpt-4.1-mini
         auth:
-          mode: oauth
+          mode: api_key_env
+          key_env: OPENAI_API_KEY
         max_tokens: 8192
       code:
-        provider: codex
-        model: gpt-5.3-codex-spark
+        provider: openai
+        model: gpt-4.1
         auth:
-          mode: oauth
+          mode: api_key_env
+          key_env: OPENAI_API_KEY
         max_tokens: 8192
       crud:
-        provider: codex
-        model: gpt-5.3-codex-spark
+        provider: openai
+        model: gpt-4.1-mini
         auth:
-          mode: oauth
+          mode: api_key_env
+          key_env: OPENAI_API_KEY
         max_tokens: 4096
       structured:
-        provider: codex
-        model: gpt-5.3-codex-spark
+        provider: openai
+        model: gpt-4.1
         auth:
-          mode: oauth
+          mode: api_key_env
+          key_env: OPENAI_API_KEY
         max_tokens: 8192
 
 # Agent identity routing. `x-acr-agent` wins, then user-agent contains rules,

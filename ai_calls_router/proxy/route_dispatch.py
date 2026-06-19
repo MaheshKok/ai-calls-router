@@ -9,28 +9,14 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 from starlette.responses import JSONResponse, Response
 
-from ai_calls_router._lib import logging_setup
-from ai_calls_router._lib.responses_inbound import (
-    anthropic_request_to_responses,
-    responses_to_anthropic_response,
-)
 from ai_calls_router.accounting import savings, shrink_stats
-from ai_calls_router.proxy import websocket_passthrough
-from ai_calls_router.routing import codex_direct
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
-from ai_calls_router.routing.config_schema import (
-    ConfigSchemaError,
-    is_codex_tier,
-    parse_tier_config,
-)
-from ai_calls_router.routing.synthesis_responses import synthesize_response_object_sse
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -128,266 +114,6 @@ def routed_fallback_attempt(
     )
 
 
-async def try_codex_direct_route(
-    *,
-    body: JsonObject,
-    tier: str,
-    tier_cfg: JsonObject,
-    credential: routing.TierCredential,
-    request_headers: Mapping[str, str],
-    streaming: bool,
-    requested_model: str,
-    names: list[str],
-    premium_tools: list[str],
-    request_path: str,
-    user_agent: str,
-    agent: str,
-    session: str,
-    client: httpx.AsyncClient | None = None,
-) -> RouteAttempt | None:
-    """Serve a Codex Responses request through the direct Codex provider path."""
-    if request_path != "/v1/responses":
-        return None
-    try:
-        tier_model = parse_tier_config(tier_cfg).model
-        if not is_codex_tier(tier_cfg):
-            return None
-    except ConfigSchemaError:
-        return None
-    started = time.monotonic()
-    result = await codex_direct.responses_call(
-        body=body,
-        tier_cfg=tier_cfg,
-        credential=credential.value,
-        auth_mode=credential.auth_mode,
-        chatgpt_headers=websocket_passthrough.codex_chatgpt_headers(request_headers),
-        client=client,
-    )
-    duration = time.monotonic() - started
-    if result is None:
-        return routed_fallback_attempt(
-            response_guard_tools=[],
-            requested_model=requested_model,
-            names=names,
-            tier=tier,
-        )
-    response_body, usage_values, shrink = result
-    response_guard_tools = routed_call.premium_tool_names_from_responses(
-        response_body, {}, premium_tools=premium_tools
-    )
-    if response_guard_tools:
-        return routed_fallback_attempt(
-            response_guard_tools=response_guard_tools,
-            requested_model=requested_model,
-            names=names,
-            tier=tier,
-        )
-    usage = routed_call.RouteUsage(
-        input_tokens=usage_values[0],
-        output_tokens=usage_values[1],
-        cache_read_tokens=usage_values[2],
-        cache_creation_tokens=usage_values[3],
-    )
-    await routed_call.record_route_outcome(
-        routed_call.RouteOutcome(
-            premium_model=requested_model,
-            routed_model=tier_model,
-            tier_name=tier,
-            tier_cfg=tier_cfg,
-            tool_names=names,
-            usage=usage,
-            request_path=request_path,
-            route="direct",
-            user_agent=user_agent,
-            agent=agent,
-            session_id=session,
-            elapsed=duration,
-            shrink=shrink,
-            request_id=logging_setup.current_request_id(),
-        )
-    )
-    client_body = {**response_body, "model": requested_model} if requested_model else response_body
-    response = (
-        Response(
-            b"".join(synthesize_response_object_sse(client_body)),
-            media_type="text/event-stream",
-        )
-        if streaming
-        else JSONResponse(client_body)
-    )
-    return RouteAttempt(
-        response=response,
-        tier=tier,
-        reason="routed",
-        model=tier_model,
-        premium_model=requested_model,
-        tool_names=names,
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        cache_read_tokens=usage.cache_read_tokens,
-        cache_creation_tokens=usage.cache_creation_tokens,
-        duration=duration,
-        shrink=shrink,
-    )
-
-
-async def try_oauth_responses_route(
-    *,
-    anthropic_body: JsonObject,
-    adapter: ClientAdapter,
-    tier: str,
-    tier_cfg: JsonObject,
-    credential: routing.TierCredential,
-    request_headers: Mapping[str, str],
-    streaming: bool,
-    requested_model: str,
-    names: list[str],
-    premium_tools: list[str],
-    request_path: str,
-    user_agent: str,
-    agent: str,
-    session: str,
-    client: httpx.AsyncClient | None = None,
-) -> RouteAttempt | None:
-    """Serve any agent group through a ChatGPT OAuth Responses tier."""
-    if credential.auth_mode != "oauth":
-        return None
-    started = time.monotonic()
-    responses_body = anthropic_request_to_responses(anthropic_body)
-    result = await codex_direct.responses_call(
-        body=responses_body,
-        tier_cfg=tier_cfg,
-        credential=credential.value,
-        auth_mode=credential.auth_mode,
-        chatgpt_headers=websocket_passthrough.codex_chatgpt_headers(request_headers),
-        client=client,
-    )
-    duration = time.monotonic() - started
-    if result is None:
-        return routed_fallback_attempt(
-            response_guard_tools=[],
-            requested_model=requested_model,
-            names=names,
-            tier=tier,
-        )
-    response_body, usage_values, shrink = result
-    response_guard_tools = routed_call.premium_tool_names_from_responses(
-        response_body, {}, premium_tools=premium_tools
-    )
-    if response_guard_tools:
-        return routed_fallback_attempt(
-            response_guard_tools=response_guard_tools,
-            requested_model=requested_model,
-            names=names,
-            tier=tier,
-        )
-    tier_model = codex_direct.native_model_id(tier_cfg)
-    usage = routed_call.RouteUsage(
-        input_tokens=usage_values[0],
-        output_tokens=usage_values[1],
-        cache_read_tokens=usage_values[2],
-        cache_creation_tokens=usage_values[3],
-    )
-    await routed_call.record_route_outcome(
-        routed_call.RouteOutcome(
-            premium_model=requested_model,
-            routed_model=tier_model,
-            tier_name=tier,
-            tier_cfg=tier_cfg,
-            tool_names=names,
-            usage=usage,
-            request_path=request_path,
-            route="oauth_responses",
-            user_agent=user_agent,
-            agent=agent,
-            session_id=session,
-            elapsed=duration,
-            shrink=shrink,
-            request_id=logging_setup.current_request_id(),
-        )
-    )
-    anthropic_response = responses_to_anthropic_response(response_body, requested_model)
-    response = (
-        Response(
-            b"".join(adapter.to_client_sse(anthropic_response)),
-            media_type="text/event-stream",
-        )
-        if streaming
-        else JSONResponse(adapter.to_client_response(anthropic_response))
-    )
-    return RouteAttempt(
-        response=response,
-        tier=tier,
-        reason="routed",
-        model=tier_model,
-        premium_model=requested_model,
-        tool_names=names,
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        cache_read_tokens=usage.cache_read_tokens,
-        cache_creation_tokens=usage.cache_creation_tokens,
-        duration=duration,
-        shrink=shrink,
-    )
-
-
-async def try_native_or_oauth_route(
-    *,
-    body: JsonObject,
-    anthropic_body: JsonObject,
-    adapter: ClientAdapter,
-    tier: str,
-    tier_cfg: JsonObject,
-    credential: routing.TierCredential,
-    request_headers: Mapping[str, str],
-    streaming: bool,
-    requested_model: str,
-    names: list[str],
-    premium_tools: list[str],
-    request_path: str,
-    user_agent: str,
-    agent: str,
-    session: str,
-    client: httpx.AsyncClient | None = None,
-) -> RouteAttempt | None:
-    """Try native Codex and generic OAuth Responses routing."""
-    codex_attempt = await try_codex_direct_route(
-        body=body,
-        tier=tier,
-        tier_cfg=tier_cfg,
-        credential=credential,
-        request_headers=request_headers,
-        streaming=streaming,
-        requested_model=requested_model,
-        names=names,
-        premium_tools=premium_tools,
-        request_path=request_path,
-        user_agent=user_agent,
-        agent=agent,
-        session=session,
-        client=client,
-    )
-    if codex_attempt is not None:
-        return codex_attempt
-    return await try_oauth_responses_route(
-        anthropic_body=anthropic_body,
-        adapter=adapter,
-        tier=tier,
-        tier_cfg=tier_cfg,
-        credential=credential,
-        request_headers=request_headers,
-        streaming=streaming,
-        requested_model=requested_model,
-        names=names,
-        premium_tools=premium_tools,
-        request_path=request_path,
-        user_agent=user_agent,
-        agent=agent,
-        session=session,
-        client=client,
-    )
-
-
 async def try_route(  # noqa: PLR0911 - pure move of fail-open routing branches.
     body_bytes: bytes,
     *,
@@ -398,10 +124,10 @@ async def try_route(  # noqa: PLR0911 - pure move of fail-open routing branches.
     routes_loader: Callable[[], JsonObject],
     client: httpx.AsyncClient | None = None,
     user_agent: str = "",
-    agent: str = "",
     session: str | None = None,
 ) -> RouteAttempt:
     """Attempt to serve an adapter request on a routed tier."""
+    del request_headers
     requested_model = ""
     names: list[str] = []
     try:
@@ -434,26 +160,6 @@ async def try_route(  # noqa: PLR0911 - pure move of fail-open routing branches.
         settings_value = routes.get("settings")
         settings_cfg: JsonObject = settings_value if isinstance(settings_value, dict) else {}
         premium_tools = routing.agent_premium_tools(routes, group)
-        route_attempt = await try_native_or_oauth_route(
-            body=body,
-            anthropic_body=anthropic_body,
-            adapter=adapter,
-            tier=tier,
-            tier_cfg=tier_cfg,
-            credential=credential,
-            request_headers=request_headers,
-            streaming=streaming,
-            requested_model=requested_model,
-            names=names,
-            premium_tools=premium_tools,
-            request_path=request_path,
-            user_agent=user_agent,
-            agent=agent,
-            session=session or "",
-            client=client,
-        )
-        if route_attempt is not None:
-            return route_attempt
         response_guard_tools: list[str] = []
 
         result = await routed_call.routed_call(

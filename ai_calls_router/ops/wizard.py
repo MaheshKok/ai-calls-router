@@ -205,27 +205,27 @@ def _build_config(*, port: int, models: dict[str, str], key_env: str, provider: 
     }
     hermes_tiers = {
         "fast": {
-            "provider": "codex",
-            "model": "gpt-5.4-mini",
-            "auth": {"mode": "oauth"},
+            "provider": "openai",
+            "model": "gpt-4.1-mini",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
             "max_tokens": 8192,
         },
         "code": {
-            "provider": "codex",
-            "model": "gpt-5.3-codex-spark",
-            "auth": {"mode": "oauth"},
+            "provider": "openai",
+            "model": "gpt-4.1",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
             "max_tokens": 8192,
         },
         "crud": {
-            "provider": "codex",
-            "model": "gpt-5.3-codex-spark",
-            "auth": {"mode": "oauth"},
+            "provider": "openai",
+            "model": "gpt-4.1-mini",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
             "max_tokens": 4096,
         },
         "structured": {
-            "provider": "codex",
-            "model": "gpt-5.3-codex-spark",
-            "auth": {"mode": "oauth"},
+            "provider": "openai",
+            "model": "gpt-4.1",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
             "max_tokens": 8192,
         },
     }
@@ -251,7 +251,7 @@ def _build_config(*, port: int, models: dict[str, str], key_env: str, provider: 
                     "tiers": claude_tiers,
                 },
                 "hermes": {
-                    "upstream": "https://chatgpt.com/backend-api/codex",
+                    "upstream": "https://api.openai.com",
                     "tools": dict(AGENT_DEFAULT_TOOLS["hermes"]),
                     "premium_tools": list(AGENT_DEFAULT_PREMIUM_TOOLS["hermes"]),
                     "tiers": hermes_tiers,

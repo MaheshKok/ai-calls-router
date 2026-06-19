@@ -1,8 +1,8 @@
-"""End-to-end smoke tests for the OpenAI compatibility routing surface.
+"""End-to-end smoke tests for supported routing surfaces.
 
-These tests drive each public endpoint through the Starlette app with Phase 7
-provider YAML files on disk. They mock only HTTP boundaries: the premium
-passthrough upstream and the DeepSeek direct endpoint.
+These tests drive each public routed endpoint through the Starlette app with
+provider YAML files on disk. They mock only HTTP boundaries: premium passthrough
+upstream and the DeepSeek direct endpoint.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from ai_calls_router.routing.agent_defaults import (
 )
 from tests.acr_testkit import Upstream
 
-_ORIGINAL_ASYNC_CLIENT = httpx.AsyncClient
 _ROUTED_MODEL = "deepseek/deepseek-v4-pro"
 _CLIENT_AUTH = "Bearer client-token-for-test"
 _ROUTED_TEXT_BODY: dict[str, object] = {
@@ -40,7 +39,6 @@ _ROUTED_TEXT_BODY: dict[str, object] = {
 }
 _UPSTREAMS = {
     "claude_code": "https://api.anthropic.com",
-    "codex": "https://api.openai.com",
     "hermes": "https://hermes.internal.example",
 }
 
@@ -58,14 +56,6 @@ class _DirectProvider:
             200,
             json=_ROUTED_TEXT_BODY,
             headers={"content-type": "application/json"},
-        )
-
-    def client(self, *args: object, **kwargs: object) -> httpx.AsyncClient:
-        """Return an AsyncClient wired to this mock provider transport."""
-        return _ORIGINAL_ASYNC_CLIENT(
-            *args,
-            transport=httpx.MockTransport(self.handler),
-            **kwargs,
         )
 
 
@@ -117,7 +107,6 @@ def _write_global_config(tmp_path: Path) -> None:
                     "endpoint_defaults": {
                         "/v1/messages": "claude_code",
                         "/v1/chat/completions": "hermes",
-                        "/v1/responses": "codex",
                     },
                     "fallback": None,
                 },
@@ -181,28 +170,6 @@ def _claude_premium_body() -> dict[str, object]:
         "max_tokens": 1000,
         "messages": [{"role": "user", "content": "decide"}],
     }
-
-
-def _codex_tool_result_body() -> dict[str, object]:
-    """Return a Codex Responses turn processing an exec_command result."""
-    return {
-        "model": "gpt-5-codex",
-        "stream": True,
-        "input": [
-            {
-                "type": "function_call",
-                "call_id": "call_exec",
-                "name": "exec_command",
-                "arguments": '{"cmd":"pwd"}',
-            },
-            {"type": "function_call_output", "call_id": "call_exec", "output": "/tmp"},
-        ],
-    }
-
-
-def _codex_premium_body() -> dict[str, object]:
-    """Return a Codex decision turn with no pending tool result."""
-    return {"model": "gpt-5-codex", "stream": True, "input": "decide"}
 
 
 def _hermes_tool_result_body() -> dict[str, object]:
@@ -295,7 +262,6 @@ def _exercise_group(
     *,
     client: TestClient,
     upstream: Upstream,
-    monkeypatch: pytest.MonkeyPatch,
     path: str,
     tool_name: str,
     cheap_body: dict[str, object],
@@ -304,7 +270,6 @@ def _exercise_group(
 ) -> None:
     """Drive one group through routed direct and premium passthrough paths."""
     direct_provider = _DirectProvider()
-    del monkeypatch
     client.app.state.direct_provider = direct_provider
 
     routed_response = _post_json_bytes(client=client, path=path, body=cheap_body)
@@ -325,12 +290,10 @@ def test_claude_code_messages_smoke(
     *,
     client: TestClient,
     upstream: Upstream,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _exercise_group(
         client=client,
         upstream=upstream,
-        monkeypatch=monkeypatch,
         path="/v1/messages",
         tool_name="Bash",
         cheap_body=_claude_tool_result_body(),
@@ -339,34 +302,14 @@ def test_claude_code_messages_smoke(
     )
 
 
-def test_codex_responses_smoke(
-    *,
-    client: TestClient,
-    upstream: Upstream,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _exercise_group(
-        client=client,
-        upstream=upstream,
-        monkeypatch=monkeypatch,
-        path="/v1/responses",
-        tool_name="exec_command",
-        cheap_body=_codex_tool_result_body(),
-        premium_body=_codex_premium_body(),
-        premium_host="api.openai.com",
-    )
-
-
 def test_hermes_chat_completions_smoke(
     *,
     client: TestClient,
     upstream: Upstream,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _exercise_group(
         client=client,
         upstream=upstream,
-        monkeypatch=monkeypatch,
         path="/v1/chat/completions",
         tool_name="terminal",
         cheap_body=_hermes_tool_result_body(),

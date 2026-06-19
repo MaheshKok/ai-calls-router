@@ -29,7 +29,6 @@ dependencies = [
     "starlette>=0.40",
     "typing-extensions>=4.15.0",
     "uvicorn>=0.30",
-    "websockets>=12",
 ]
 
 [tool.pyrefly.errors]

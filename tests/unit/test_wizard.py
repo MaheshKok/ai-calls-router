@@ -119,7 +119,10 @@ class TestDefaults:
         path = wizard.run_wizard(ask=_ScriptedAsk([]))
         written = _written_config(path)
         settings = written["settings"]
-        assert "/v1/responses" not in written["router"]["endpoint_defaults"]
+        assert written["router"]["endpoint_defaults"] == {
+            "/v1/messages": "claude_code",
+            "/v1/chat/completions": "hermes",
+        }
         assert written["router"]["fallback"] is None
         assert settings["escalate_on_premium_tools"] is True
         assert settings["tier_precedence"][0] == "premium"

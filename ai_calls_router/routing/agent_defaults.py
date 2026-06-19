@@ -50,27 +50,6 @@ AGENT_DEFAULT_TOOLS: dict[str, dict[str, str]] = {
         "browser_vision": "premium",
         "browser_*": "premium",
     },
-    "codex": {
-        "exec_command": "fast",
-        "local_shell": "fast",
-        "shell": "fast",
-        "shell_command": "fast",
-        "write_stdin": "fast",
-        "ctx_shell": "fast",
-        "update_plan": "crud",
-        "get_context_remaining": "crud",
-        "initial_instructions": "crud",
-        "index_status": "crud",
-        "ctx_read": "code",
-        "ctx_search": "code",
-        "ctx_tree": "code",
-        "search_graph": "code",
-        "get_code_snippet": "code",
-        "apply_patch": "premium",
-        "spawn_agent": "premium",
-        "request_user_input": "premium",
-        "request_plugin_install": "premium",
-    },
 }
 
 AGENT_DEFAULT_PREMIUM_TOOLS: dict[str, list[str]] = {
@@ -84,10 +63,4 @@ AGENT_DEFAULT_PREMIUM_TOOLS: dict[str, list[str]] = {
         "AskUserQuestion",
     ],
     "hermes": ["patch", "clarify", "delegate_task"],
-    "codex": [
-        "apply_patch",
-        "spawn_agent",
-        "request_user_input",
-        "request_plugin_install",
-    ],
 }

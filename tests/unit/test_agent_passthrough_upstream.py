@@ -25,14 +25,11 @@ router:
   endpoint_defaults:
     /v1/messages: claude_code
     /v1/chat/completions: hermes
-    /v1/responses: codex
   user_agent_map:
     - contains: claude
       group: claude_code
     - contains: hermes
       group: hermes
-    - contains: codex
-      group: codex
   fallback: null
 agents:
   claude_code:
@@ -43,14 +40,6 @@ agents:
     tools:
       Bash: fast
       Edit: premium
-  codex:
-    upstream: https://api.openai.com
-    premium:
-      provider: anthropic
-    premium_tools: [apply_patch]
-    tools:
-      exec_command: fast
-      apply_patch: premium
   hermes:
     upstream: https://hermes.internal.example/
     premium:
@@ -88,13 +77,8 @@ def _messages_opener() -> dict[str, object]:
     }
 
 
-def _responses_opener() -> dict[str, object]:
-    """Return a Responses opener with no pending tool results."""
-    return {"model": "gpt-5-codex", "input": "hello", "stream": True}
-
-
 def _chat_opener() -> dict[str, object]:
-    """Return a Chat Completions opener with no pending tool results."""
+    """Return a Chat Completions opener with no pending tool result."""
     return {"model": "gpt-hermes", "messages": [{"role": "user", "content": "hello"}]}
 
 
@@ -104,14 +88,6 @@ def test_claude_code_passthrough_targets_anthropic_upstream(
     response = client.post("/v1/messages", json=_messages_opener())
     assert response.json() == {"marker": "upstream"}
     assert upstream.requests[0].url.host == "api.anthropic.com"
-
-
-def test_codex_passthrough_targets_openai_upstream(
-    *, client: TestClient, upstream: Upstream
-) -> None:
-    response = client.post("/v1/responses", json=_responses_opener())
-    assert response.json() == {"marker": "upstream"}
-    assert upstream.requests[0].url.host == "api.openai.com"
 
 
 def test_hermes_passthrough_targets_configured_upstream(
@@ -129,9 +105,9 @@ def test_hermes_passthrough_targets_configured_upstream(
 def test_passthrough_forwards_client_headers_without_tier_key(
     *, client: TestClient, upstream: Upstream
 ) -> None:
-    body = _responses_opener()
+    body = _chat_opener()
     client.post(
-        "/v1/responses",
+        "/v1/chat/completions",
         json=body,
         headers={"authorization": "Bearer client-secret"},
     )
@@ -162,11 +138,3 @@ def test_adapter_none_and_proxy_catchall_use_premium_default(
         "premium.default.example",
         "premium.default.example",
     ]
-
-
-def test_codex_model_list_passthrough_targets_openai_upstream(
-    *, client: TestClient, upstream: Upstream
-) -> None:
-    response = client.get("/v1/models", headers={"user-agent": "codex-tui/0.140.0"})
-    assert response.json() == {"marker": "upstream"}
-    assert upstream.requests[0].url.host == "api.openai.com"

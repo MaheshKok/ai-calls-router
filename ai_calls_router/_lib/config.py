@@ -117,20 +117,6 @@ def metrics_db_path() -> Path:
     return home_dir() / "metrics.db"
 
 
-def codex_ws_routing_enabled() -> bool:
-    """Return whether opt-in Codex WebSocket model routing is enabled.
-
-    Default off: the Codex WebSocket stays a transparent passthrough unless
-    ``ACR_CODEX_WS_ROUTING`` is set truthy ("1", "true", "yes", "on"). The flag
-    gates the stateful hybrid router so the proven passthrough is the safe
-    default and routing can be turned on per environment for testing.
-
-    Returns:
-        True when the environment opts into Codex WebSocket routing.
-    """
-    return os.environ.get("ACR_CODEX_WS_ROUTING", "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def server_settings(routes: JsonObject) -> ServerSettings:
     """Resolve the server: block, failing open to safe defaults.
 

@@ -84,7 +84,7 @@ class TestFilterRequestHeaders:
         assert filtered["content-type"] == "application/json"
 
     def test_acr_control_headers_dropped(self) -> None:
-        filtered = pt.filter_request_headers({"x-acr-agent": "codex", "authorization": "Bearer c"})
+        filtered = pt.filter_request_headers({"x-acr-agent": "hermes", "authorization": "Bearer c"})
         assert "x-acr-agent" not in {key.lower(): value for key, value in filtered.items()}
         assert filtered["authorization"] == "Bearer c"
 
@@ -141,32 +141,6 @@ class TestForward:
         assert request.headers["host"] == "upstream.example"
         assert request.headers["accept-encoding"] == "identity"
         assert request.headers["content-length"] == "2"
-
-    async def test_chatgpt_codex_upstream_uses_backend_path_and_oauth_headers(self) -> None:
-        upstream = _Upstream()
-        headers = {
-            **CLIENT_HEADERS,
-            "chatgpt-account-id": "acct_test",
-            "x-acr-agent": "hermes",
-        }
-        async with _client(upstream) as client:
-            response = await pt.forward(
-                client=client,
-                upstream=pt.CHATGPT_CODEX_UPSTREAM,
-                method="POST",
-                path="/v1/responses",
-                headers=headers,
-                body=b'{"model":"gpt-5.5"}',
-            )
-            await _drain(response)
-        request = upstream.requests[0]
-        assert request.url.path == "/backend-api/codex/responses"
-        assert request.content == b'{"model":"gpt-5.5"}'
-        assert request.headers["chatgpt-account-id"] == "acct_test"
-        assert request.headers["originator"] == "codex_cli_rs"
-        assert request.headers["authorization"] == headers["authorization"]
-        assert "x-acr-agent" not in request.headers
-        assert request.headers["accept-encoding"] == "identity"
 
     async def test_upstream_status_relayed(self) -> None:
         upstream = _Upstream(status_code=429, content=b'{"type": "error"}')

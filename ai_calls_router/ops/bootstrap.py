@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 _UPSTREAM_BY_GROUP: dict[str, str] = {
     "claude_code": config.DEFAULT_UPSTREAM,
-    "hermes": config.DEFAULT_UPSTREAM,
+    "hermes": "https://api.openai.com",
 }
 _BOOTSTRAP_GROUPS: tuple[str, ...] = ("claude_code", "hermes")
 _TIERS_BY_GROUP: dict[str, JsonObject] = {
@@ -74,27 +74,27 @@ _TIERS_BY_GROUP: dict[str, JsonObject] = {
     },
     "hermes": {
         "fast": {
-            "provider": "codex",
-            "model": "gpt-5.4-mini",
-            "auth": {"mode": "oauth"},
+            "provider": "openai",
+            "model": "gpt-4.1-mini",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
             "max_tokens": 8192,
         },
         "code": {
-            "provider": "codex",
-            "model": "gpt-5.3-codex-spark",
-            "auth": {"mode": "oauth"},
+            "provider": "openai",
+            "model": "gpt-4.1",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
             "max_tokens": 8192,
         },
         "crud": {
-            "provider": "codex",
-            "model": "gpt-5.3-codex-spark",
-            "auth": {"mode": "oauth"},
+            "provider": "openai",
+            "model": "gpt-4.1-mini",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
             "max_tokens": 4096,
         },
         "structured": {
-            "provider": "codex",
-            "model": "gpt-5.3-codex-spark",
-            "auth": {"mode": "oauth"},
+            "provider": "openai",
+            "model": "gpt-4.1",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
             "max_tokens": 8192,
         },
     },

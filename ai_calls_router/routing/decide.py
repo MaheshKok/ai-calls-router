@@ -28,9 +28,7 @@ import yaml
 from ai_calls_router._lib import config
 from ai_calls_router.routing.agent_defaults import AGENT_DEFAULT_PREMIUM_TOOLS, AGENT_DEFAULT_TOOLS
 from ai_calls_router.routing.config_schema import (
-    CODEX_OAUTH_SENTINEL,
     ConfigSchemaError,
-    is_codex_tier,
     parse_tier_config,
     validate_routes_payload,
 )
@@ -511,19 +509,14 @@ def resolve_tier_credential(tier_cfg: JsonObject, settings: JsonObject) -> TierC
         The resolved credential metadata, or None when unavailable.
     """
     try:
-        parsed = parse_tier_config(tier_cfg)
+        parse_tier_config(tier_cfg)
     except ConfigSchemaError as exc:
         logger.warning("acr: tier schema validation failed (%s); passing through", exc)
         return None
-    if _auth_mode(tier_cfg) == "oauth" or (
-        parsed.key_env == CODEX_OAUTH_SENTINEL and is_codex_tier(tier_cfg)
-    ):
-        return TierCredential(value=CODEX_OAUTH_SENTINEL, auth_mode="oauth")
     credential = resolve_api_key({**tier_cfg, "key_env": _auth_key_env(tier_cfg)}, settings)
     if credential:
         return TierCredential(value=credential, auth_mode="api_key")
-    if is_codex_tier(tier_cfg):
-        openai_key = os.environ.get("OPENAI_API_KEY")
-        if openai_key:
-            return TierCredential(value=openai_key, auth_mode="api_key")
+    auth_mode = _auth_mode(tier_cfg)
+    if auth_mode:
+        logger.warning("acr: unsupported tier auth mode %r; passing through", auth_mode)
     return None

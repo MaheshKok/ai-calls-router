@@ -20,7 +20,6 @@ import httpx
 from starlette.responses import Response, StreamingResponse
 
 from ai_calls_router._lib import jsonnum
-from ai_calls_router.proxy import websocket_passthrough
 
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonObject, JsonValue
@@ -39,7 +38,6 @@ FRAMING_RESPONSE_HEADERS = frozenset(
 )
 
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
-CHATGPT_CODEX_UPSTREAM = "https://chatgpt.com/backend-api/codex"
 
 _USAGE_KEYS = (
     "input_tokens",
@@ -82,27 +80,14 @@ def filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def _is_chatgpt_codex_upstream(upstream: str) -> bool:
-    return upstream.rstrip("/") == CHATGPT_CODEX_UPSTREAM
-
-
 def _upstream_path(upstream: str, path: str) -> str:
-    if _is_chatgpt_codex_upstream(upstream) and path == "/v1/responses":
-        return "/responses"
+    del upstream
     return path
 
 
 def _request_headers_for_upstream(upstream: str, headers: Mapping[str, str]) -> dict[str, str]:
-    if not _is_chatgpt_codex_upstream(upstream):
-        return filter_request_headers(headers)
-    codex_headers = websocket_passthrough.codex_chatgpt_headers(headers)
-    if codex_headers is None:
-        return filter_request_headers(headers)
-    return {
-        key: value
-        for key, value in codex_headers
-        if key.lower() not in HOP_BY_HOP_REQUEST_HEADERS and not key.lower().startswith("x-acr-")
-    }
+    del upstream
+    return filter_request_headers(headers)
 
 
 class _UsageCapture:
@@ -276,8 +261,7 @@ async def forward(
         client: Shared httpx client (connection pooling).
         upstream: Upstream base URL without trailing slash.
         method: HTTP method of the client request.
-        path: Request path. Forwarded unchanged except ChatGPT Codex Responses
-            passthrough, where `/v1/responses` maps to `/responses`.
+        path: Request path. Forwarded unchanged.
         headers: Raw client request headers.
         body: Raw client request body bytes.
         query: Raw query string without the leading "?".

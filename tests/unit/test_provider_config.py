@@ -37,12 +37,10 @@ def _router() -> dict[str, object]:
         "endpoint_defaults": {
             "/v1/messages": "claude_code",
             "/v1/chat/completions": "hermes",
-            "/v1/responses": "codex",
         },
         "user_agent_map": [
             {"contains": "claude", "group": "claude_code"},
             {"contains": "hermes", "group": "hermes"},
-            {"contains": "codex", "group": "codex"},
         ],
         "fallback": None,
     }
@@ -52,12 +50,10 @@ def _provider_payload(group: str, *, upstream: str | None = None) -> dict[str, o
     """Return one valid provider YAML payload."""
     wires = {
         "claude_code": "anthropic_messages",
-        "codex": "openai_responses",
         "hermes": "openai_chat",
     }
     endpoints = {
         "claude_code": ["/v1/messages"],
-        "codex": ["/v1/responses"],
         "hermes": ["/v1/chat/completions"],
     }
     return {
@@ -87,46 +83,46 @@ def test_provider_files_merge_to_hand_written_agents_block() -> None:
 
 
 def test_cheap_key_env_provider_payload_is_rejected() -> None:
-    payload = _provider_payload("codex")
+    payload = _provider_payload("hermes")
     payload["tiers"] = {"fast": {"key_env": "MUST_NOT_MOVE_HERE"}}
 
     with pytest.raises(provider_config.ProviderConfigError):
         provider_config.assemble_routes(
             _base_routes(router=_router()),
-            provider_files={"codex": payload},
+            provider_files={"hermes": payload},
         )
 
 
 def test_provider_payload_tool_map_must_be_string_to_string() -> None:
-    payload = _provider_payload("codex")
-    payload["tools"] = {"exec_command": 7}
+    payload = _provider_payload("hermes")
+    payload["tools"] = {"terminal": 7}
 
     with pytest.raises(provider_config.ProviderConfigError):
         provider_config.assemble_routes(
             _base_routes(router=_router()),
-            provider_files={"codex": payload},
+            provider_files={"hermes": payload},
         )
 
 
 def test_provider_payload_upstream_must_be_https_with_host() -> None:
-    payload = _provider_payload("codex", upstream="http://127.0.0.1:8747")
+    payload = _provider_payload("hermes", upstream="http://127.0.0.1:8747")
 
     with pytest.raises(provider_config.ProviderConfigError):
         provider_config.assemble_routes(
             _base_routes(router=_router()),
-            provider_files={"codex": payload},
+            provider_files={"hermes": payload},
         )
 
 
 def test_missing_provider_file_falls_back_without_dropping_present_groups() -> None:
     assembled = provider_config.assemble_routes(
         _base_routes(router=_router()),
-        provider_files={"codex": _provider_payload("codex")},
+        provider_files={"claude_code": _provider_payload("claude_code")},
     )
 
-    assert assembled["agents"]["codex"]["upstream"] == "https://codex.example"
     assert assembled["agents"]["hermes"]["tools"]["terminal"] == "fast"
-    assert assembled["agents"]["claude_code"]["tools"]["Bash"] == "fast"
+    assert assembled["agents"]["claude_code"]["upstream"] == "https://claude_code.example"
+    assert assembled["agents"]["claude_code"]["tools"]["tool"] == "fast"
 
 
 def test_load_provider_files_skips_missing_and_malformed_files(
@@ -137,16 +133,16 @@ def test_load_provider_files_skips_missing_and_malformed_files(
 ) -> None:
     monkeypatch.setenv("ACR_HOME", str(tmp_path))
     config.provider_config_dir().mkdir(parents=True)
-    config.provider_config_path("codex").write_text(
-        yaml.safe_dump(_provider_payload("codex")),
+    config.provider_config_path("claude_code").write_text(
+        yaml.safe_dump(_provider_payload("claude_code")),
         encoding="utf-8",
     )
     config.provider_config_path("hermes").write_text(": bad: [", encoding="utf-8")
 
     loaded = provider_config.load_provider_files()
 
-    assert set(loaded) == {"codex"}
-    assert loaded["codex"]["group"] == "codex"
+    assert set(loaded) == {"claude_code"}
+    assert loaded["claude_code"]["group"] == "claude_code"
     assert "failed to load" in caplog.text
 
 
@@ -158,7 +154,7 @@ def test_load_provider_files_skips_non_mapping_yaml(
 ) -> None:
     monkeypatch.setenv("ACR_HOME", str(tmp_path))
     config.provider_config_dir().mkdir(parents=True)
-    config.provider_config_path("codex").write_text("- not\n- mapping\n", encoding="utf-8")
+    config.provider_config_path("hermes").write_text("- not\n- mapping\n", encoding="utf-8")
 
     assert provider_config.load_provider_files() == {}
     assert "is not a mapping" in caplog.text
@@ -167,7 +163,7 @@ def test_load_provider_files_skips_non_mapping_yaml(
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
-        ({"group": "hermes"}, "group mismatch"),
+        ({"group": "claude_code"}, "group mismatch"),
         ({"upstream": ""}, "requires upstream"),
         ({"wire": "garbage"}, "wire mismatch"),
         ({"endpoints": "bad"}, "requires endpoints"),
@@ -178,51 +174,51 @@ def test_provider_payload_required_fields_are_validated(
     updates: dict[str, object],
     message: str,
 ) -> None:
-    payload = _provider_payload("codex")
+    payload = _provider_payload("hermes")
     payload.update(updates)
 
     with pytest.raises(provider_config.ProviderConfigError, match=message):
         provider_config.assemble_routes(
             _base_routes(router=_router()),
-            provider_files={"codex": payload},
+            provider_files={"hermes": payload},
         )
 
 
 def test_provider_payload_can_omit_tool_maps_and_use_defaults() -> None:
-    payload = _provider_payload("codex")
+    payload = _provider_payload("hermes")
     del payload["tools"]
     del payload["premium_tools"]
 
     assembled = provider_config.assemble_routes(
         _base_routes(router=_router()),
-        provider_files={"codex": payload},
+        provider_files={"hermes": payload},
     )
 
-    assert assembled["agents"]["codex"]["tools"]["exec_command"] == "fast"
-    assert "apply_patch" in assembled["agents"]["codex"]["premium_tools"]
+    assert assembled["agents"]["hermes"]["tools"]["terminal"] == "fast"
+    assert "patch" in assembled["agents"]["hermes"]["premium_tools"]
 
 
 def test_resolve_agent_group_precedence_header_wins() -> None:
     routes = _base_routes(router=_router())
 
     group = provider_config.resolve_agent_group(
-        path="/v1/responses",
-        headers={"x-acr-agent": "hermes", "user-agent": "Codex CLI"},
+        path="/v1/chat/completions",
+        headers={"x-acr-agent": "claude_code", "user-agent": "Hermes CLI"},
         routes=routes,
-        adapter_default="codex",
+        adapter_default="hermes",
     )
 
-    assert group == "hermes"
+    assert group == "claude_code"
 
 
 def test_resolve_agent_group_user_agent_wins_over_endpoint_case_insensitively() -> None:
     routes = _base_routes(router=_router())
 
     group = provider_config.resolve_agent_group(
-        path="/v1/responses",
+        path="/v1/messages",
         headers={"user-agent": "HERMES Desktop"},
         routes=routes,
-        adapter_default="codex",
+        adapter_default="claude_code",
     )
 
     assert group == "hermes"
@@ -230,13 +226,13 @@ def test_resolve_agent_group_user_agent_wins_over_endpoint_case_insensitively() 
 
 def test_resolve_agent_group_without_router_uses_adapter_default() -> None:
     group = provider_config.resolve_agent_group(
-        path="/v1/responses",
+        path="/v1/messages",
         headers={},
         routes=_base_routes(),
-        adapter_default="codex",
+        adapter_default="claude_code",
     )
 
-    assert group == "codex"
+    assert group == "claude_code"
 
 
 def test_resolve_agent_group_fallback_null_fails_closed() -> None:
@@ -246,7 +242,7 @@ def test_resolve_agent_group_fallback_null_fails_closed() -> None:
         path="/v1/unknown",
         headers={"user-agent": "unknown"},
         routes=routes,
-        adapter_default="codex",
+        adapter_default="claude_code",
     )
 
     assert group is None
@@ -259,7 +255,7 @@ def test_resolve_agent_group_uses_configured_fallback() -> None:
         path="/v1/unknown",
         headers={},
         routes=routes,
-        adapter_default="codex",
+        adapter_default="hermes",
     )
 
     assert group == "claude_code"
@@ -269,13 +265,13 @@ def test_resolve_agent_group_invalid_header_falls_through() -> None:
     routes = _base_routes(router=_router())
 
     group = provider_config.resolve_agent_group(
-        path="/v1/responses",
+        path="/v1/chat/completions",
         headers={"x-acr-agent": "unknown"},
         routes=routes,
-        adapter_default="codex",
+        adapter_default="hermes",
     )
 
-    assert group == "codex"
+    assert group == "hermes"
 
 
 def test_resolve_agent_group_skips_malformed_user_agent_rules() -> None:
@@ -283,7 +279,7 @@ def test_resolve_agent_group_skips_malformed_user_agent_rules() -> None:
         router={
             "user_agent_map": [
                 "bad",
-                {"contains": "codex", "group": "codex"},
+                {"contains": "hermes", "group": "hermes"},
             ],
             "fallback": None,
         }
@@ -291,12 +287,12 @@ def test_resolve_agent_group_skips_malformed_user_agent_rules() -> None:
 
     group = provider_config.resolve_agent_group(
         path="/v1/unknown",
-        headers={"user-agent": "Codex CLI"},
+        headers={"user-agent": "Hermes CLI"},
         routes=routes,
-        adapter_default="hermes",
+        adapter_default="claude_code",
     )
 
-    assert group == "codex"
+    assert group == "hermes"
 
 
 def test_resolve_agent_group_without_fallback_uses_adapter_default() -> None:
@@ -319,10 +315,10 @@ def test_resolve_agent_group_invalid_fallback_uses_adapter_default() -> None:
         path="/v1/unknown",
         headers={},
         routes=routes,
-        adapter_default="codex",
+        adapter_default="claude_code",
     )
 
-    assert group == "codex"
+    assert group == "claude_code"
 
 
 def test_assemble_routes_does_not_mutate_base() -> None:
@@ -331,7 +327,7 @@ def test_assemble_routes_does_not_mutate_base() -> None:
 
     provider_config.assemble_routes(
         base,
-        provider_files={"codex": _provider_payload("codex")},
+        provider_files={"hermes": _provider_payload("hermes")},
     )
 
     assert base == before

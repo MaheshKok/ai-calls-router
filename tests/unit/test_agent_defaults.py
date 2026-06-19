@@ -24,8 +24,8 @@ def _example_config() -> dict[str, object]:
 
 
 def test_all_required_groups_are_present() -> None:
-    assert set(AGENT_DEFAULT_TOOLS) == {"claude_code", "hermes", "codex"}
-    assert set(AGENT_DEFAULT_PREMIUM_TOOLS) == {"claude_code", "hermes", "codex"}
+    assert set(AGENT_DEFAULT_TOOLS) == {"claude_code", "hermes"}
+    assert set(AGENT_DEFAULT_PREMIUM_TOOLS) == {"claude_code", "hermes"}
 
 
 def test_every_group_has_non_empty_tool_map() -> None:

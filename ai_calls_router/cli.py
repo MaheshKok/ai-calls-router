@@ -176,9 +176,7 @@ def _cmd_wrap(args: argparse.Namespace) -> int:
     try:
         daemon.start()
         proxy_url = _listen_url()
-        if args.agent == "codex":
-            wrap.enable_codex_config(proxy_url)
-        elif args.agent == "hermes":
+        if args.agent == "hermes":
             wrap.enable_hermes_config(proxy_url)
     except (daemon.DaemonError, wrap.WrapError) as exc:
         print(str(exc), file=sys.stderr)
@@ -198,10 +196,7 @@ def _cmd_wrap(args: argparse.Namespace) -> int:
 def _cmd_unwrap(args: argparse.Namespace) -> int:
     """Remove persistent wrapper state for one supported agent."""
     try:
-        if args.agent == "codex":
-            path = wrap.disable_codex_config()
-            print(f"Restored Codex config at {path}")
-        elif args.agent == "hermes":
+        if args.agent == "hermes":
             path = wrap.disable_hermes_config()
             print(f"Restored Hermes config at {path}")
         else:

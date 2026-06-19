@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen)](https://github.com/pre-commit/pre-commit)
 
-Per-tool-result model routing proxy for Claude Code, Codex, and Hermes. It
+Per-tool-result model routing proxy for Claude Code and Hermes. It
 serves cheap tool-result-processing turns on any LiteLLM-supported model
 (DeepSeek, Groq, Kimi, OpenRouter, and others) while keeping decision-making
 turns on each agent's own premium upstream, wire format, and credential.
@@ -19,26 +19,23 @@ model, transparently, while the turns that actually require reasoning go
 straight to Anthropic untouched.
 
 It is a standalone local proxy, not a Claude Code plugin. Claude Code connects
-through `ANTHROPIC_BASE_URL`, Codex through `/v1/responses`, and Hermes through
-`/v1/chat/completions`. Routed calls are normalized into Anthropic Messages for
-the internal serving core; passthrough calls stay byte-for-byte in the client's
-native provider format.
+through `ANTHROPIC_BASE_URL`; Hermes connects through `/v1/chat/completions`.
+Routed calls are normalized into Anthropic Messages for the internal serving
+core; passthrough calls stay byte-for-byte in the client's native provider
+format.
 
 ## What it supports now
 
 - `POST /v1/messages` for Claude Code and Anthropic Messages clients.
 - `POST /v1/chat/completions` for Hermes Chat Completions sessions.
-- `POST /v1/responses` for Codex and Responses-speaking Hermes sessions.
-- Per-agent tool maps for `claude_code`, `hermes`, and `codex`.
-- Per-agent passthrough upstreams, so a non-routed Codex turn goes to OpenAI,
-  a Hermes turn goes to its configured upstream, and a Claude Code turn goes to
-  Anthropic.
+- Per-agent tool maps for `claude_code` and `hermes`.
+- Per-agent passthrough upstreams, so a Hermes turn goes to its configured
+  upstream and a Claude Code turn goes to Anthropic.
 - Provider-specific config files in
-  `~/.ai-calls-router/config/{claude-code,codex,hermes}.yaml`.
+  `~/.ai-calls-router/config/{claude-code,hermes}.yaml`.
 - Identity routing with `x-acr-agent`, `User-Agent` rules, endpoint defaults,
   and fail-closed unresolved identity.
-- Responses and Chat Completions SSE synthesis for routed OpenAI-compatible
-  clients.
+- Chat Completions response synthesis for routed OpenAI-compatible clients.
 - DeepSeek direct Anthropic-native serving for cache-stable routed calls.
 - Savings accounting, live dashboard, compression stats, and per-session
   request history.
@@ -47,7 +44,7 @@ native provider format.
 
 ```mermaid
 flowchart TD
-    CLIENT["Claude Code / Codex / Hermes"] --> SRV["acr daemon<br/>(Starlette + uvicorn)"]
+    CLIENT["Claude Code / Hermes"] --> SRV["acr daemon<br/>(Starlette + uvicorn)"]
     SRV --> ID{"endpoint + x-acr-agent<br/>resolve agent group"}
     ID --> DEC{"pending tool result?<br/>tool -> tier"}
     DEC -- "no pending tool results /<br/>premium or unknown tool /<br/>serving error" --> PASS["Passthrough to agent upstream<br/>headers untouched"]
@@ -55,7 +52,7 @@ flowchart TD
     ROUTE -- "response calls a<br/>premium tool" --> PASS
     ROUTE -- ok --> ACCT["savings.jsonl ledger<br/>(true routed model)"]
     ACCT --> MASK["mask response model to<br/>client-requested id"]
-    MASK --> OUT["client-format JSON/SSE<br/>Anthropic, Chat, or Responses"]
+    MASK --> OUT["client-format JSON/SSE<br/>Anthropic or Chat"]
 ```
 
 A request that carries `tool_result` blocks is processing the output of a tool.
@@ -71,7 +68,6 @@ that agent group's upstream.
 | --- | --- | --- |
 | `POST /v1/messages` | `claude_code` | Anthropic Messages |
 | `POST /v1/chat/completions` | `hermes` | OpenAI Chat Completions |
-| `POST /v1/responses` | `codex` | OpenAI Responses |
 
 `x-acr-agent` has highest precedence and can override the default group when a
 client family shares an endpoint. Without that header, the router uses
@@ -154,9 +150,6 @@ site-packages.
    ```bash
    # Claude Code / Anthropic Messages
    ANTHROPIC_BASE_URL=http://127.0.0.1:8747 claude
-
-   # Codex / OpenAI Responses
-   OPENAI_BASE_URL=http://127.0.0.1:8747/v1 codex
 
    # Hermes / OpenAI Chat Completions
    OPENAI_BASE_URL=http://127.0.0.1:8747/v1 hermes
@@ -245,22 +238,7 @@ If Claude seems to ignore the proxy:
   `acr serve` terminal for request logs.
 - Inspect `~/.ai-calls-router/acr.log` to see which proxy received traffic.
 
-## How to point Codex and Hermes at the proxy
-
-Codex should use the local OpenAI-compatible base URL with its own OpenAI
-credential and send `POST /v1/responses` traffic to the router:
-
-```bash
-export OPENAI_API_KEY=your-openai-key
-OPENAI_BASE_URL=http://127.0.0.1:8747/v1 codex
-```
-
-Codex passthrough turns go to `https://api.openai.com` by default, and the
-client's own `Authorization` header authenticates that call. Routed turns do
-not forward that header; they use only the cheap tier key named in
-`config.yaml`. Codex uses the `codex` agent group by default on
-`/v1/responses`; add `x-acr-agent: codex` only when a client or wrapper hides
-its identity.
+## How to point Hermes at the proxy
 
 Hermes Chat Completions traffic should target the same local OpenAI-compatible
 base and send `POST /v1/chat/completions`:
@@ -271,13 +249,10 @@ OPENAI_BASE_URL=http://127.0.0.1:8747/v1 hermes
 ```
 
 Hermes defaults to the `hermes` agent group on `/v1/chat/completions`.
-Responses-speaking Hermes sessions can still use `/v1/responses`; send
-`x-acr-agent: hermes` so the router uses the Hermes tool map instead of the
-Codex map.
 
 If a client cannot be identified by endpoint or `User-Agent`, send
-`x-acr-agent: codex`, `x-acr-agent: hermes`, or `x-acr-agent: claude_code`.
-That header wins over every router rule.
+`x-acr-agent: hermes` or `x-acr-agent: claude_code`. That header wins over
+every router rule.
 
 ## Commands
 
@@ -315,7 +290,7 @@ a number.
 
 The global config lives at `~/.ai-calls-router/config.yaml` (override with
 `$ACR_CONFIG`). Per-provider files live under
-`~/.ai-calls-router/config/{claude-code,codex,hermes}.yaml`. All are reloaded by
+`~/.ai-calls-router/config/{claude-code,hermes}.yaml`. All are reloaded by
 mtime on each request, so edits apply without a restart. The global sections:
 
 ```text
@@ -323,7 +298,6 @@ mtime on each request, so edits apply without a restart. The global sections:
 ├── config.yaml
 ├── config/
 │   ├── claude-code.yaml
-│   ├── codex.yaml
 │   └── hermes.yaml
 ├── .env
 ├── acr.log
@@ -350,12 +324,9 @@ router:
   endpoint_defaults:
     /v1/messages: claude_code
     /v1/chat/completions: hermes
-    /v1/responses: codex
   user_agent_map:
     - contains: claude
       group: claude_code
-    - contains: codex
-      group: codex
     - contains: hermes
       group: hermes
   fallback: null
@@ -376,23 +347,19 @@ credentials live only in global `tiers.*.key_env`.
 Example provider file:
 
 ```yaml
-group: codex
+group: hermes
 upstream: https://api.openai.com
 auth:
   mode: oauth_passthrough
-wire: responses
+wire: openai_chat
 endpoints:
-  - /v1/responses
+  - /v1/chat/completions
 tools:
-  exec_command: fast
-  write_stdin: fast
-  update_plan: crud
-  apply_patch: premium
+  terminal: fast
+  read_file: code
+  patch: premium
 premium_tools:
-  - apply_patch
-  - spawn_agent
-  - request_user_input
-  - request_plugin_install
+  - patch
 fallback: passthrough
 ```
 
@@ -476,9 +443,6 @@ confirmed `claude-real` is the original Desktop-managed binary.
   time-to-first-token on a routed turn equals the cheap completion latency.
 - Passthrough supports each configured agent upstream in that agent's native
   format. The router does not translate passthrough bodies.
-- Azure/OpenAI server-side Responses state is intentionally not implemented.
-  Codex/OpenAI requests must be self-contained; unsupported stateful turns should
-  passthrough instead of being routed.
 - Claude Desktop support requires the optional embedded Claude Code shim above;
   plain shell environment variables are not enough for Desktop-launched sessions.
 

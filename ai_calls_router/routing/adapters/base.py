@@ -1,8 +1,8 @@
 """Define the client-adapter protocol used by routed requests.
 
 Adapters isolate client-facing wire formats from the internal Anthropic Messages representation.
-Phase 1 only installs the protocol and shared identity vocabulary; later phases add
-non-Anthropic client formats.
+Phase 1 installs the protocol and shared identity vocabulary for supported
+client formats.
 """
 
 from __future__ import annotations
@@ -14,17 +14,15 @@ if TYPE_CHECKING:
 
     from ai_calls_router._lib.types import JsonObject
 
-KNOWN_GROUPS: frozenset[str] = frozenset({"claude_code", "codex", "hermes"})
+KNOWN_GROUPS: frozenset[str] = frozenset({"claude_code", "hermes"})
 
 AGENT_GROUP_WIRES: dict[str, str] = {
     "claude_code": "anthropic_messages",
-    "codex": "openai_responses",
     "hermes": "openai_chat",
 }
 
 AGENT_GROUP_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "claude_code": ("/v1/messages",),
-    "codex": ("/v1/responses",),
     "hermes": ("/v1/chat/completions",),
 }
 
