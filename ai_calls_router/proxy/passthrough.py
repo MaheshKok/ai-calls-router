@@ -20,6 +20,7 @@ import httpx
 from starlette.responses import Response, StreamingResponse
 
 from ai_calls_router._lib import jsonnum
+from ai_calls_router.proxy import chatgpt_oauth
 
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonObject, JsonValue
@@ -38,6 +39,7 @@ FRAMING_RESPONSE_HEADERS = frozenset(
 )
 
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
+CHATGPT_CODEX_UPSTREAM = "https://chatgpt.com/backend-api/codex"
 
 _USAGE_KEYS = (
     "input_tokens",
@@ -80,14 +82,30 @@ def filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+def _is_chatgpt_codex_upstream(upstream: str) -> bool:
+    """Return whether an upstream targets the ChatGPT Codex backend."""
+    return upstream.rstrip("/") == CHATGPT_CODEX_UPSTREAM
+
+
 def _upstream_path(upstream: str, path: str) -> str:
-    del upstream
+    """Map a request path for the upstream, rewriting Codex Responses to /responses."""
+    if _is_chatgpt_codex_upstream(upstream) and path == "/v1/responses":
+        return "/responses"
     return path
 
 
 def _request_headers_for_upstream(upstream: str, headers: Mapping[str, str]) -> dict[str, str]:
-    del upstream
-    return filter_request_headers(headers)
+    """Build forwardable headers, applying ChatGPT OAuth headers for the Codex backend."""
+    if not _is_chatgpt_codex_upstream(upstream):
+        return filter_request_headers(headers)
+    codex_headers = chatgpt_oauth.codex_chatgpt_headers(headers)
+    if codex_headers is None:
+        return filter_request_headers(headers)
+    return {
+        key: value
+        for key, value in codex_headers
+        if key.lower() not in HOP_BY_HOP_REQUEST_HEADERS and not key.lower().startswith("x-acr-")
+    }
 
 
 class _UsageCapture:

@@ -74,6 +74,7 @@ def test_route_table_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         ("/dashboard", ["GET", "HEAD"], "dashboard"),
         ("/v1/messages", ["POST"], "messages"),
         ("/v1/chat/completions", ["POST"], "chat_completions"),
+        ("/v1/responses", ["POST"], "responses"),
         (
             "/{path:path}",
             ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"],

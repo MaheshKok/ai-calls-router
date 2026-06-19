@@ -17,6 +17,7 @@ import yaml
 from ai_calls_router._lib import config
 from ai_calls_router.routing import provider_config
 from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
+from ai_calls_router.routing.config_schema import ConfigSchemaError, validate_routes_payload
 
 
 def _base_routes(*, router: dict[str, object] | None = None) -> dict[str, object]:
@@ -80,6 +81,66 @@ def test_provider_files_merge_to_hand_written_agents_block() -> None:
     expected = copy.deepcopy(base)
     expected["agents"] = expected_agents
     assert assembled == expected
+
+
+def test_oauth_hermes_tiers_pass_routes_schema_validation() -> None:
+    # Regression: ChatGPT-OAuth Hermes tiers (auth.mode: oauth, no key_env) must
+    # validate. Rejecting them is the bug that disabled routing at startup with
+    # "config schema validation failed (Input should be 'api_key_env')".
+    routes = {
+        "settings": {"tier_precedence": ["premium", "structured", "code", "fast", "crud"]},
+        "agents": {
+            "hermes": {
+                "upstream": "https://chatgpt.com/backend-api/codex",
+                "tools": {"terminal": "fast", "patch": "premium"},
+                "premium_tools": ["patch"],
+                "tiers": {
+                    "fast": {
+                        "provider": "codex",
+                        "model": "gpt-5.4-mini",
+                        "auth": {"mode": "oauth"},
+                        "max_tokens": 8192,
+                    },
+                    "code": {
+                        "provider": "codex",
+                        "model": "gpt-5.3-codex-spark",
+                        "auth": {"mode": "oauth"},
+                        "max_tokens": 8192,
+                    },
+                },
+            },
+        },
+    }
+    validate_routes_payload(routes)
+
+
+def test_api_key_env_tier_without_key_env_still_validates() -> None:
+    routes = {
+        "agents": {
+            "claude_code": {
+                "tiers": {
+                    "fast": {
+                        "provider": "deepseek",
+                        "model": "deepseek/deepseek-v4-flash",
+                        "auth": {"mode": "api_key_env", "key_env": "DEEPSEEK_API_KEY"},
+                    }
+                }
+            }
+        }
+    }
+    validate_routes_payload(routes)
+
+
+def test_unknown_auth_mode_is_rejected_by_routes_schema() -> None:
+    routes = {
+        "agents": {
+            "hermes": {
+                "tiers": {"fast": {"model": "gpt-5.4-mini", "auth": {"mode": "session_token"}}}
+            }
+        }
+    }
+    with pytest.raises(ConfigSchemaError):
+        validate_routes_payload(routes)
 
 
 def test_cheap_key_env_provider_payload_is_rejected() -> None:

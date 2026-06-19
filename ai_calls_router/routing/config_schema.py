@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonObject, JsonValue
 
+CODEX_OAUTH_SENTINEL = "oauth"
+
 
 class ConfigSchemaError(ValueError):
     """Raised when a routing config payload fails schema validation."""
@@ -39,7 +41,7 @@ class _SchemaModel(BaseModel):
 class TierAuthConfig(_SchemaModel):
     """Schema for one tier auth declaration."""
 
-    mode: Literal["api_key_env"]
+    mode: Literal["api_key_env", "oauth"]
     key_env: str | None = Field(default=None, min_length=1)
 
 
@@ -150,6 +152,14 @@ def parse_tier_config(tier_cfg: JsonObject) -> TierConfig:
         return TierConfig.model_validate(tier_cfg)
     except ValidationError as exc:
         raise _schema_error(exc) from exc
+
+
+def is_codex_tier(tier_cfg: JsonObject) -> bool:
+    """Return whether a tier targets Codex subscription routing."""
+    parsed = parse_tier_config(tier_cfg)
+    if parsed.provider in {"codex", "openai-codex"}:
+        return True
+    return parsed.model.startswith(("codex/", "openai-codex/"))
 
 
 def validate_provider_payload(group: str, payload: JsonObject) -> ProviderPayloadConfig:

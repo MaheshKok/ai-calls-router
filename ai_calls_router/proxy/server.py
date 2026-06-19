@@ -47,6 +47,8 @@ logger = logging.getLogger("acr.server")
 LOG_REVISION = "2026-06-15-premium-guard-v2"
 
 _RouteAttempt = route_dispatch.RouteAttempt
+codex_direct = route_dispatch.codex_direct
+_try_codex_direct_route = route_dispatch.try_codex_direct_route
 
 
 @dataclass
@@ -269,6 +271,7 @@ async def _try_route(
     request_headers: Mapping[str, str],
     client: httpx.AsyncClient | None = None,
     user_agent: str = "",
+    agent: str = "",
     session: str | None = None,
 ) -> _RouteAttempt:
     """Compatibility wrapper for tests that monkeypatch server._try_route."""
@@ -281,6 +284,7 @@ async def _try_route(
         routes_loader=_load_assembled_routes,
         client=client,
         user_agent=user_agent,
+        agent=agent,
         session=session,
     )
 
@@ -305,6 +309,19 @@ async def chat_completions(request: Request) -> Response:
 
     Args:
         request: Incoming OpenAI Chat Completions request.
+
+    Returns:
+        The routed response or the streamed premium passthrough.
+    """
+    with logging_setup.request_context():
+        return await _handle_routed_request(request)
+
+
+async def responses(request: Request) -> Response:
+    """Decide and serve one /v1/responses request.
+
+    Args:
+        request: Incoming OpenAI Responses request.
 
     Returns:
         The routed response or the streamed premium passthrough.
@@ -355,6 +372,7 @@ async def _handle_routed_request(request: Request) -> Response:
         request_headers=request.headers,
         client=request.app.state.client,
         user_agent=_user_agent(request),
+        agent=agent,
         session=session,
     )
     if attempt.response is not None:
@@ -479,6 +497,7 @@ def create_app(transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
             Route("/dashboard", observability.dashboard, methods=["GET"]),
             Route("/v1/messages", messages, methods=["POST"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
+            Route("/v1/responses", responses, methods=["POST"]),
             Route("/{path:path}", proxy, methods=PROXY_METHODS),
         ],
         lifespan=lifespan,

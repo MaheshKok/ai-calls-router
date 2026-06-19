@@ -54,7 +54,7 @@ def _load_compressor() -> _Compressor | None:
         installed.
     """
     try:
-        import headroom
+        import headroom  # pyrefly: ignore[missing-import]
     except ImportError:
         logger.warning(
             "headroom-ai not installed; LiteLLM-path compression is a no-op "
