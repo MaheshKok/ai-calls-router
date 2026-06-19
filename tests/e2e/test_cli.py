@@ -274,8 +274,9 @@ class TestWrap:
         acr_home: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
-        restored = Path("/tmp/config.toml")
+        restored = tmp_path / "config.toml"
         monkeypatch.setattr(wrap, "disable_codex_config", lambda: restored)
 
         assert cli.main(["unwrap", "codex"]) == 0

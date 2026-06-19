@@ -182,7 +182,14 @@ def _cmd_wrap(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     command = wrap.AGENT_COMMANDS[args.agent]
-    result = subprocess.run([command, *args.agent_args], env=wrap.launch_env(args.agent, proxy_url))
+    try:
+        result = subprocess.run(
+            [command, *args.agent_args],
+            env=wrap.launch_env(args.agent, proxy_url),
+        )
+    except (FileNotFoundError, OSError) as exc:
+        print("failed to start agent command: %s", exc)
+        return 1
     return result.returncode
 
 

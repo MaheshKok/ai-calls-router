@@ -179,7 +179,12 @@ def _user_agent_match(router: JsonObject, user_agent: str) -> str | None:
             continue
         contains = item.get("contains")
         group = _known(item.get("group"))
-        if isinstance(contains, str) and group and contains.lower() in normalized_ua:
+        if (
+            isinstance(contains, str)
+            and contains.strip()
+            and group
+            and contains.lower() in normalized_ua
+        ):
             return group
     return None
 

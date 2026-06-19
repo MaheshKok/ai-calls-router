@@ -435,4 +435,7 @@ def wants_stream(client_body: JsonObject, anthropic_body: JsonObject) -> bool:
     stream = client_body.get("stream")
     if isinstance(stream, bool):
         return stream
-    return bool(anthropic_body.get("stream"))
+    anthropic_stream = anthropic_body.get("stream")
+    if isinstance(anthropic_stream, bool):
+        return anthropic_stream
+    return False
