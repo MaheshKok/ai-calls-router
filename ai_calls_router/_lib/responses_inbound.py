@@ -280,7 +280,7 @@ def responses_request_to_anthropic(body: JsonObject) -> JsonObject:
     if system_parts:
         converted = {"model": converted["model"], "system": "\n".join(system_parts), "messages": []}
     raw_input = body["input"]
-    if isinstance(raw_input, str | list):
+    if isinstance(raw_input, str | list):  # pyrefly: ignore[implicit-any-type-argument]
         converted["messages"] = cast("JsonArray", responses_input_to_anthropic_messages(raw_input))
     else:
         raise ValueError("Responses input must be a string or list")  # noqa: TRY004
@@ -342,7 +342,7 @@ def _text_output_item(text_parts: list[str]) -> JsonObject:
 def _output_items(anthropic_response: JsonObject) -> list[JsonObject]:
     """Convert Anthropic response content blocks to Responses output items."""
     content = anthropic_response.get("content")
-    blocks = cast("JsonArray", content) if isinstance(content, list) else []
+    blocks: JsonArray = cast("JsonArray", content) if isinstance(content, list) else []
     output: list[JsonObject] = []
     text_parts: list[str] = []
     for block in blocks:
@@ -364,7 +364,7 @@ def _output_items(anthropic_response: JsonObject) -> list[JsonObject]:
 def anthropic_to_responses(anthropic_response: JsonObject, model: str) -> JsonObject:
     """Convert an Anthropic response to non-streaming Responses JSON."""
     usage = anthropic_response.get("usage")
-    usage_obj = usage if isinstance(usage, dict) else {}
+    usage_obj: JsonObject = usage if isinstance(usage, dict) else {}
     status, incomplete_details = _response_status(anthropic_response.get("stop_reason"))
     response = cast(
         "JsonObject",

@@ -45,8 +45,8 @@ def synthesize_sse(response_body: JsonObject) -> bytes:
     Returns:
         UTF-8 encoded SSE payload.
     """
-    usage = response_body.get("usage")
-    usage = usage if isinstance(usage, dict) else {}
+    usage_raw = response_body.get("usage")
+    usage: JsonObject = usage_raw if isinstance(usage_raw, dict) else {}
     parts: list[str] = [
         _sse_event(
             "message_start",

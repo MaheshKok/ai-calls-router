@@ -47,7 +47,7 @@ def _content_text(content: JsonValue) -> str:
 def _tool_call_to_content_block(tool_call: JsonObject) -> JsonObject:
     """Convert one OpenAI assistant tool call to an Anthropic tool_use block."""
     function = tool_call.get("function")
-    function_obj = function if isinstance(function, dict) else {}
+    function_obj: JsonObject = function if isinstance(function, dict) else {}
     return {
         "type": "tool_use",
         "id": str(tool_call.get("id", "")),
@@ -133,7 +133,7 @@ def openai_tool_to_anthropic(tool: JsonObject) -> JsonObject:
         Anthropic tool definition using ``input_schema``.
     """
     function = tool.get("function")
-    function_obj = function if isinstance(function, dict) else {}
+    function_obj: JsonObject = function if isinstance(function, dict) else {}
     function_obj = cast("JsonObject", function_obj)
     converted: JsonObject = {"name": function_obj.get("name", "")}
     if "description" in function_obj:
@@ -151,7 +151,9 @@ def _tool_choice_to_anthropic(choice: JsonValue) -> JsonObject:
         return {"type": "auto"}
     if isinstance(choice, dict):
         function = choice.get("function")
-        function_obj = cast("JsonObject", function) if isinstance(function, dict) else {}
+        function_obj: JsonObject = (
+            cast("JsonObject", function) if isinstance(function, dict) else {}
+        )
         return {"type": "tool", "name": function_obj.get("name", "")}
     return {"type": "auto"}
 
@@ -237,7 +239,7 @@ def anthropic_to_chat_response(anthropic_body: JsonObject) -> JsonObject:
         OpenAI Chat Completions response body.
     """
     content = anthropic_body.get("content")
-    blocks = cast("JsonArray", content) if isinstance(content, list) else []
+    blocks: JsonArray = cast("JsonArray", content) if isinstance(content, list) else []
     text_parts: list[str] = []
     tool_calls: list[JsonValue] = []
     for block in blocks:
@@ -255,7 +257,7 @@ def anthropic_to_chat_response(anthropic_body: JsonObject) -> JsonObject:
         message["tool_calls"] = tool_calls
 
     usage = anthropic_body.get("usage")
-    usage_obj = cast("JsonObject", usage) if isinstance(usage, dict) else {}
+    usage_obj: JsonObject = cast("JsonObject", usage) if isinstance(usage, dict) else {}
     finish_reason = _STOP_REASON_TO_FINISH_REASON.get(
         str(anthropic_body.get("stop_reason", "end_turn")), "stop"
     )

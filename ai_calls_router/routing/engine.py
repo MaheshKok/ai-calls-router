@@ -145,7 +145,7 @@ def _prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
 def _usage_summary(response_body: JsonObject) -> str:
     """Return a compact token/cache summary for routing logs."""
     raw_usage = response_body.get("usage")
-    usage = raw_usage if isinstance(raw_usage, dict) else {}
+    usage: JsonObject = raw_usage if isinstance(raw_usage, dict) else {}
     input_tokens = jsonnum.int_value(usage.get("input_tokens", 0), minimum=0)
     output_tokens = jsonnum.int_value(usage.get("output_tokens", 0), minimum=0)
     cache_read = jsonnum.int_value(usage.get("cache_read_input_tokens", 0), minimum=0)
@@ -360,7 +360,7 @@ async def _serve_via_direct(
 def _usage_from_anthropic(body: JsonObject) -> RouteUsage:
     """Extract normalized token counts from an Anthropic usage block."""
     usage_value = body.get("usage")
-    usage = usage_value if isinstance(usage_value, dict) else {}
+    usage: JsonObject = usage_value if isinstance(usage_value, dict) else {}
     return RouteUsage(
         input_tokens=jsonnum.int_value(usage.get("input_tokens", 0), minimum=0),
         output_tokens=jsonnum.int_value(usage.get("output_tokens", 0), minimum=0),

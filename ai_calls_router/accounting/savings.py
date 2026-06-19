@@ -313,8 +313,8 @@ def record_savings_from_response(
             cumulative compression survives a proxy restart.
     """
     try:
-        usage = response_body.get("usage") if isinstance(response_body, dict) else None
-        usage = usage if isinstance(usage, dict) else {}
+        usage_raw = response_body.get("usage") if isinstance(response_body, dict) else None
+        usage: JsonObject = usage_raw if isinstance(usage_raw, dict) else {}
         input_tokens = jsonnum.int_value(usage.get("input_tokens", 0), strict=True)
         output_tokens = jsonnum.int_value(usage.get("output_tokens", 0), strict=True)
         cache_read = jsonnum.int_value(usage.get("cache_read_input_tokens", 0), strict=True)

@@ -126,7 +126,7 @@ def _assemble_routes_fail_open(
             if exc.group is not None and exc.group in remaining:
                 remaining.pop(exc.group)
                 continue
-            remaining = {}
+            remaining: dict[str, JsonObject] = {}
     return provider_config.assemble_routes(base, provider_files={})
 
 

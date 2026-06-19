@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, cast
 from starlette.responses import JSONResponse, Response
 
 from ai_calls_router._lib import logging_setup
-from ai_calls_router.accounting import metrics, savings
+from ai_calls_router.accounting import metrics, savings, shrink_stats
 from ai_calls_router.proxy import websocket_passthrough
 from ai_calls_router.routing import codex_direct, provider_config
 from ai_calls_router.routing import decide as routing
@@ -55,12 +55,14 @@ class RouteAttempt:
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
     duration: float = 0.0
+    shrink: shrink_stats.ShrinkStats | None = None
 
 
 def record_ws_route_attempt(headers: Mapping[str, str], attempt: RouteAttempt) -> None:
     """Record one WebSocket response.create route attempt for dashboard visibility."""
     try:
         m = metrics.get_metrics()
+        shrink = attempt.shrink or shrink_stats.compute_shrink(path="none", before={}, after={})
         user_agent = headers.get("user-agent", "")
         routed = attempt.response is not None
         m.incr_total()
@@ -95,6 +97,8 @@ def record_ws_route_attempt(headers: Mapping[str, str], attempt: RouteAttempt) -
             cache_read=attempt.cache_read_tokens,
             cache_creation=attempt.cache_creation_tokens,
             duration=attempt.duration,
+            shrink_chars_before=shrink.chars_before,
+            shrink_chars_after=shrink.chars_after,
             premium_model="" if routed else attempt.model,
             agent=metrics.identify_agent(user_agent),
             session_id="",
@@ -121,7 +125,7 @@ def resolve_tier_config(
     if not isinstance(tier_cfg, dict):
         return tier, None, None, routes
     settings_value = routes.get("settings")
-    settings_cfg = settings_value if isinstance(settings_value, dict) else {}
+    settings_cfg: JsonObject = settings_value if isinstance(settings_value, dict) else {}
     credential = routing.resolve_tier_credential(tier_cfg, settings_cfg)
     if credential is None:
         logger.info("acr: tier=%s has no API key; passing through", tier)
@@ -213,7 +217,7 @@ async def try_codex_direct_route(
             names=names,
             tier=tier,
         )
-    response_body, usage_values = result
+    response_body, usage_values, shrink = result
     response_guard_tools = routed_call.premium_tool_names_from_responses(
         response_body, {}, premium_tools=premium_tools
     )
@@ -244,6 +248,7 @@ async def try_codex_direct_route(
             agent=agent,
             session_id=session,
             elapsed=duration,
+            shrink=shrink,
             request_id=logging_setup.current_request_id(),
         )
     )
@@ -268,6 +273,7 @@ async def try_codex_direct_route(
         cache_read_tokens=usage.cache_read_tokens,
         cache_creation_tokens=usage.cache_creation_tokens,
         duration=duration,
+        shrink=shrink,
     )
 
 
@@ -315,7 +321,7 @@ async def try_route(  # noqa: PLR0911 - pure move of fail-open routing branches.
             )
         savings.register_tier_prices(routes)
         settings_value = routes.get("settings")
-        settings_cfg = settings_value if isinstance(settings_value, dict) else {}
+        settings_cfg: JsonObject = settings_value if isinstance(settings_value, dict) else {}
         premium_tools = routing.agent_premium_tools(routes, group)
         codex_attempt = await try_codex_direct_route(
             body=body,
@@ -424,7 +430,11 @@ async def try_route_ws_response_create(
         record_ws_route_attempt(headers, attempt)
         if attempt.response is None:
             return None
-        return websocket_passthrough.sse_to_ws_messages(bytes(attempt.response.body))
+        previous_response_id = body.get("previous_response_id")
+        response_id = previous_response_id if isinstance(previous_response_id, str) else None
+        return websocket_passthrough.sse_to_ws_messages(
+            bytes(attempt.response.body), response_id=response_id
+        )
     except Exception as exc:
         logger.warning("acr: websocket routing decision failed (%s); passing through", exc)
         return None

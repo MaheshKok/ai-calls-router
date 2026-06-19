@@ -127,7 +127,7 @@ def assemble_routes(base: JsonObject, *, provider_files: dict[str, JsonObject]) 
 
     result = copy.deepcopy(compat)
     existing_agents = result.get("agents")
-    agents = dict(existing_agents) if isinstance(existing_agents, dict) else {}
+    agents: JsonObject = dict(existing_agents) if isinstance(existing_agents, dict) else {}
     for group in sorted(KNOWN_GROUPS):
         payload = provider_files.get(group)
         if payload is None:

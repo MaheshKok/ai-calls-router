@@ -127,9 +127,8 @@ def server_settings(routes: JsonObject) -> ServerSettings:
         ServerSettings with defaults substituted for missing or malformed
         values (a bad config must not stop the proxy from serving).
     """
-    server = routes.get("server")
-    if not isinstance(server, dict):
-        server = {}
+    server_raw = routes.get("server")
+    server: JsonObject = server_raw if isinstance(server_raw, dict) else {}
 
     host = server.get("host")
     if not isinstance(host, str) or not host:
