@@ -28,7 +28,7 @@ jobs:
 
   # ── Type checking ─────────────────────────────────────────────────
   type:
-    name: Type check (Pyright)
+    name: Type check (pyrefly)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +36,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv pip install -e ".[dev,compression]"
-      - run: uv run pyright ai_calls_router
+      - run: uv run pyrefly check ai_calls_router
 
   # ── Tests (matrix across Python versions) ─────────────────────────
   test:
