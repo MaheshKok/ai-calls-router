@@ -466,7 +466,7 @@ async def try_route(  # noqa: PLR0911 - pure move of fail-open routing branches.
             premium_tools=premium_tools,
             request_path=request_path,
             user_agent=user_agent,
-            agent=group,
+            agent=agent,
             session_id=session or "",
             on_premium_guard=response_guard_tools.extend,
             client=client,

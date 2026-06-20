@@ -502,6 +502,38 @@ def test_anthropic_request_to_responses_converts_messages_tools_and_controls() -
     assert converted["top_p"] == 0.9
 
 
+def test_anthropic_request_to_responses_flattens_list_tool_result_content() -> None:
+    # Anthropic tool_result content may be a list of text blocks; the Responses
+    # function_call_output must carry the joined text, never the list's repr.
+    body = {
+        "model": "claude-x",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call_1", "name": "exec", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": [
+                            {"type": "text", "text": "line one"},
+                            {"type": "text", "text": "line two"},
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+    converted = anthropic_request_to_responses(body)
+    assert converted["input"] == [
+        {"type": "function_call", "call_id": "call_1", "name": "exec", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_1", "output": "line one\nline two"},
+    ]
+
+
 def test_anthropic_request_to_responses_handles_string_content_and_omits_empty_system() -> None:
     converted = anthropic_request_to_responses(
         {"model": "m", "system": "", "messages": [{"role": "user", "content": "plain"}]}

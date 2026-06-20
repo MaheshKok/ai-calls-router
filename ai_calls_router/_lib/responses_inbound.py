@@ -481,6 +481,22 @@ def _responses_text_part(text: str, *, role: str) -> JsonObject:
     return {"type": part_type, "text": text}
 
 
+def _tool_result_output_text(content: JsonValue) -> str:
+    """Flatten Anthropic tool_result content (string or text-block list) to text.
+
+    Anthropic tool_result content may be a plain string or a list of content
+    blocks; stringifying a list directly would emit its Python repr, so text
+    parts are extracted and joined (mirroring top-level text-block handling).
+    """
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return str(content)
+
+
 def _anthropic_content_to_responses_input(message: JsonObject) -> list[JsonObject]:
     """Convert one Anthropic message into Responses input items."""
     role = message.get("role")
@@ -520,7 +536,7 @@ def _anthropic_content_to_responses_input(message: JsonObject) -> list[JsonObjec
                 {
                     "type": "function_call_output",
                     "call_id": str(block.get("tool_use_id", "")),
-                    "output": str(block.get("content", "")),
+                    "output": _tool_result_output_text(block.get("content", "")),
                 }
             )
     if text_parts:

@@ -188,7 +188,7 @@ def _cmd_wrap(args: argparse.Namespace) -> int:
             env=wrap.launch_env(args.agent, proxy_url),
         )
     except (FileNotFoundError, OSError) as exc:
-        print("failed to start agent command: %s", exc)
+        print(f"failed to start agent command: {exc}", file=sys.stderr)
         return 1
     return result.returncode
 
