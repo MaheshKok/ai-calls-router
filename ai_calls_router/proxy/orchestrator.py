@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from starlette.responses import JSONResponse, Response
@@ -24,8 +24,8 @@ from starlette.responses import JSONResponse, Response
 from ai_calls_router._lib import config, logging_setup
 from ai_calls_router.accounting import metrics
 from ai_calls_router.proxy import passthrough, route_dispatch
+from ai_calls_router.routing import content_sanitize, forward_compression, provider_config
 from ai_calls_router.routing import decide as routing
-from ai_calls_router.routing import forward_compression, provider_config
 from ai_calls_router.routing.adapters import adapter_for_path
 
 if TYPE_CHECKING:
@@ -73,6 +73,22 @@ def _parse_body_dict(body_bytes: bytes) -> JsonObject | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _repair_inbound_body(ctx: RequestContext, body: JsonObject, *, agent: str) -> RequestContext:
+    """Strip blank text blocks from the inbound body, returning a repaired context.
+
+    Anthropic rejects blank text content blocks, so a history poisoned by one (an
+    empty text block a routed model emitted before a tool_use) 400s on both the
+    routed call and its byte-identical premium passthrough. Returns the original
+    context untouched when nothing was blank, so valid bodies stay byte-identical
+    and keep the upstream prompt cache.
+    """
+    cleaned = content_sanitize.clean_request_messages(body)
+    if cleaned is None:
+        return ctx
+    logger.warning("acr: stripped blank text block(s) from %s request agent=%s", ctx.path, agent)
+    return replace(ctx, body_bytes=json.dumps(cleaned, ensure_ascii=False).encode("utf-8"))
 
 
 async def serve_passthrough(
@@ -258,6 +274,7 @@ async def handle(ctx: RequestContext, *, routes_loader: RoutesLoader) -> Respons
     )
     if isinstance(body_dict, dict):
         logger.info("inbound %s %s agent=%s", ctx.path, _request_summary(body_dict), agent)
+        ctx = _repair_inbound_body(ctx, body_dict, agent=agent)
     else:
         logger.info(
             "inbound %s unparsed-body bytes=%d agent=%s", ctx.path, len(ctx.body_bytes), agent

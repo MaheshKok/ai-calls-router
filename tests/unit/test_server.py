@@ -275,6 +275,46 @@ class TestMessagesPassthrough:
         assert response.json() == {"marker": "upstream"}
         assert upstream.requests[0].content == b"not json at all"
 
+    def test_blank_text_block_stripped_before_passthrough(
+        self, client: TestClient, upstream: _Upstream
+    ) -> None:
+        """A history poisoned by a blank text block is repaired before upstream.
+
+        Anthropic 400s on the blank block, so a premium turn replaying it would
+        fail; the orchestrator strips it from the forwarded body.
+        """
+        body: JsonObject = {
+            "model": "claude-fable-5",
+            "max_tokens": 1000,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": ""},
+                        {"type": "tool_use", "id": "t1", "name": "Edit", "input": {}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "out"}],
+                },
+            ],
+        }
+        response = client.post("/v1/messages", json=body)
+        assert response.json() == {"marker": "upstream"}
+        sent = json.loads(upstream.requests[0].content)
+        assert sent["messages"][0]["content"] == [
+            {"type": "tool_use", "id": "t1", "name": "Edit", "input": {}}
+        ]
+
+    def test_clean_body_forwarded_byte_identical(
+        self, client: TestClient, upstream: _Upstream
+    ) -> None:
+        """A body with no blank block is forwarded unchanged (cache determinism)."""
+        raw = json.dumps(_tool_result_body("Edit")).encode("utf-8")
+        client.post("/v1/messages", content=raw, headers={"content-type": "application/json"})
+        assert upstream.requests[0].content == raw
+
     def test_passthrough_usage_updates_recent_request(
         self, client: TestClient, upstream: _Upstream
     ) -> None:

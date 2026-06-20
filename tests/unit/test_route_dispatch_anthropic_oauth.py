@@ -9,6 +9,8 @@ with the upstream call and accounting stubbed.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from ai_calls_router.accounting import shrink_stats
@@ -185,3 +187,51 @@ async def test_fails_open_to_passthrough_when_upstream_declines(
     assert attempt.reason == "routed_fallback"
     assert attempt.model == "claude-opus-4-8"
     assert outcomes == []
+
+
+def _blank_then_text_response() -> dict[str, object]:
+    """Return a routed response with a blank text block before real text."""
+    return {
+        "id": "msg_3",
+        "type": "message",
+        "model": "claude-sonnet-4-6",
+        "content": [
+            {"type": "text", "text": ""},
+            {"type": "text", "text": "ok"},
+        ],
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+    }
+
+
+async def test_blank_text_block_stripped_from_routed_json_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A blank text block the tier model emits must not reach the client, or it
+    # poisons history and 400s every later turn that replays it.
+    _stub_messages_call(monkeypatch, result=(_blank_then_text_response(), (3, 2, 0, 0), _shrink()))
+    _stub_accounting(monkeypatch, [])
+
+    attempt = await _run(_decision())
+
+    assert attempt is not None
+    assert attempt.response is not None
+    served = json.loads(bytes(attempt.response.body))
+    assert served["content"] == [{"type": "text", "text": "ok"}]
+
+
+async def test_blank_text_block_absent_from_streamed_routed_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_messages_call(monkeypatch, result=(_blank_then_text_response(), (3, 2, 0, 0), _shrink()))
+    _stub_accounting(monkeypatch, [])
+
+    attempt = await _run(_decision(streaming=True))
+
+    assert attempt is not None
+    assert attempt.response is not None
+    sse = bytes(attempt.response.body).decode("utf-8")
+    # One text_delta means one served text block: with the blank block present
+    # there would be two. (Every text content_block_start carries an empty
+    # "text" by synthesis convention, so that string alone is not the signal.)
+    assert sse.count('"type": "text_delta"') == 1
+    assert '"text": "ok"' in sse

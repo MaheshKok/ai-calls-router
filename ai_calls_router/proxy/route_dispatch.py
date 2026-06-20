@@ -22,7 +22,7 @@ from ai_calls_router._lib.responses_inbound import (
 )
 from ai_calls_router.accounting import savings, shrink_stats
 from ai_calls_router.proxy import chatgpt_oauth, passthrough
-from ai_calls_router.routing import anthropic_oauth, codex_direct
+from ai_calls_router.routing import anthropic_oauth, codex_direct, content_sanitize
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
 from ai_calls_router.routing.config_schema import (
@@ -161,7 +161,14 @@ def _routing_error_attempt(
 def _adapter_response(
     adapter: ClientAdapter, anthropic_response: JsonObject, *, streaming: bool
 ) -> Response:
-    """Shape an Anthropic-shaped response into the client's wire format."""
+    """Shape an Anthropic-shaped response into the client's wire format.
+
+    Blank text blocks are stripped first so the proxy never emits one. A routed
+    tier model can return an empty text block ahead of a tool_use; persisted by
+    the client it would 400 ("text content blocks must be non-empty") on every
+    later turn that replays it.
+    """
+    anthropic_response = content_sanitize.clean_response_content(anthropic_response)
     if streaming:
         return Response(
             b"".join(adapter.to_client_sse(anthropic_response)),
