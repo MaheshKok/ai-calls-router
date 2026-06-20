@@ -167,6 +167,31 @@ async def test_messages_call_downgrades_xhigh_effort_for_sonnet() -> None:
 
 
 @pytest.mark.asyncio
+async def test_messages_call_applies_tier_effort_and_logs_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A tier "effort" pins the routed reasoning level, overriding the client's
+    # xhigh, and the level actually sent upstream is logged for observability.
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_ok_response())
+
+    body = _body()
+    body["output_config"] = {"effort": "xhigh"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with caplog.at_level("INFO", logger="acr.anthropic_oauth"):
+            await anthropic_oauth.messages_call(
+                body=body, tier_cfg=_tier(effort="low"), oauth_headers={}, client=client
+            )
+
+    assert json.loads(captured[0].content)["output_config"]["effort"] == "low"
+    assert "effort=low" in caplog.text
+    assert "model=claude-sonnet-4-6" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_messages_call_strips_long_context_beta_keeps_others() -> None:
     # opus[1m] forwards context-1m, which the subscription rejects for the routed
     # model (HTTP 429); the routed call must drop it but keep the OAuth beta.

@@ -119,20 +119,46 @@ def _clamp_max_tokens(body: JsonObject, tier_cfg: JsonObject, routed: JsonObject
 
 
 # Opus accepts output_config.effort='xhigh'; Sonnet and other routed Anthropic
-# models reject it (HTTP 400, supported: high/low/max/medium), so a routed turn
-# carrying Claude Code's 'xhigh' setting fails open to premium. 'high' is the
-# nearest supported level and the cost-appropriate ceiling for a cheap tier.
+# models reject it (HTTP 400, supported: high/low/max/medium). A tier may pin its
+# own routed reasoning level via tier_cfg "effort"; absent that, only the Opus-
+# only 'xhigh' is downgraded so a routed turn never fails open on effort alone.
+# Each tier decides independently; premium passthrough keeps its own level.
 _UNSUPPORTED_ROUTED_EFFORT = "xhigh"
 _ROUTED_EFFORT_FALLBACK = "high"
 
 
-def _normalize_effort(body: JsonObject, routed: JsonObject) -> None:
-    """Downgrade the Opus-only 'xhigh' effort the routed tier model rejects."""
+def _routed_effort(tier_cfg: JsonObject, current_effort: object) -> str | None:
+    """Return the effort to force on a routed turn, or None to leave it as-is.
+
+    A configured tier ``effort`` always wins (returning None only when it already
+    matches the request, to avoid a needless copy). Without a tier override, the
+    sole adjustment is the ``xhigh`` safety downgrade; any already-supported level
+    is left untouched.
+
+    Args:
+        tier_cfg: Tier config; reads an optional ``effort`` override.
+        current_effort: The effort the client requested, if any.
+
+    Returns:
+        The effort level to write onto the routed body, or None for no change.
+    """
+    configured = tier_cfg.get("effort")
+    if isinstance(configured, str) and configured:
+        return configured if configured != current_effort else None
+    if current_effort == _UNSUPPORTED_ROUTED_EFFORT:
+        return _ROUTED_EFFORT_FALLBACK
+    return None
+
+
+def _normalize_effort(body: JsonObject, tier_cfg: JsonObject, routed: JsonObject) -> None:
+    """Apply the tier's routed effort, or the xhigh safety downgrade, to the body."""
     output_config = body.get("output_config")
     if not isinstance(output_config, dict):
         return
-    if output_config.get("effort") == _UNSUPPORTED_ROUTED_EFFORT:
-        routed["output_config"] = {**output_config, "effort": _ROUTED_EFFORT_FALLBACK}
+    target = _routed_effort(tier_cfg, output_config.get("effort"))
+    if target is None:
+        return
+    routed["output_config"] = {**output_config, "effort": target}
 
 
 def prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
@@ -141,13 +167,15 @@ def prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
     Swaps in the tier model, removes the stream flag (routed calls are
     buffered), clamps max_tokens to the tier limit when the requested value
     is missing, non-int, or larger, strips thinking/redacted_thinking blocks
-    the routed provider cannot interpret, and downgrades the Opus-only 'xhigh'
-    effort the routed model rejects. Assistant messages emptied by the
+    the routed provider cannot interpret, and sets the reasoning effort to the
+    tier's configured ``effort`` (falling back to downgrading the Opus-only
+    'xhigh' the routed model rejects). Assistant messages emptied by the
     stripping are dropped. The input body is never mutated.
 
     Args:
         body: Anthropic-format request body from the client.
-        tier_cfg: Tier config with "model" and optional "max_tokens".
+        tier_cfg: Tier config with "model", optional "max_tokens", and optional
+            "effort" reasoning level.
 
     Returns:
         A new request body ready for conversion to the routed provider.
@@ -157,7 +185,7 @@ def prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
     routed.pop("stream", None)
     _clamp_max_tokens(body, tier_cfg, routed)
     _strip_thinking_from_messages(body, routed)
-    _normalize_effort(body, routed)
+    _normalize_effort(body, tier_cfg, routed)
     return routed
 
 

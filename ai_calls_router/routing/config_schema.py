@@ -53,6 +53,11 @@ class TierConfig(_SchemaModel):
     key_env: str | None = Field(default=None, min_length=1)
     auth: TierAuthConfig | None = None
     max_tokens: int | None = Field(default=None, gt=0)
+    # Optional reasoning level forced on this tier's routed turns. Restricted to
+    # the levels a routed Anthropic model accepts; "xhigh" is excluded because
+    # only premium Opus accepts it (Sonnet returns HTTP 400). Premium passthrough
+    # is never routed and keeps its own level, set in the client, independently.
+    effort: Literal["low", "medium", "high", "max"] | None = None
 
 
 class ServerConfig(_SchemaModel):

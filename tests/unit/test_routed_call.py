@@ -238,6 +238,43 @@ class TestPrepareRoutedBody:
         rc.prepare_routed_body(body, TIER_CFG)
         assert body == snapshot
 
+    def test_tier_effort_overrides_requested_xhigh(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        routed = rc.prepare_routed_body(body, {**TIER_CFG, "effort": "low"})
+        assert routed["output_config"]["effort"] == "low"
+
+    def test_tier_effort_overrides_an_already_supported_request_level(self) -> None:
+        # The tier pin wins even when the client's requested level is valid.
+        body = _request_body()
+        body["output_config"] = {"effort": "max"}
+        routed = rc.prepare_routed_body(body, {**TIER_CFG, "effort": "medium"})
+        assert routed["output_config"]["effort"] == "medium"
+
+    def test_tier_effort_preserves_other_output_config_keys(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh", "format": {"type": "json"}}
+        routed = rc.prepare_routed_body(body, {**TIER_CFG, "effort": "high"})
+        assert routed["output_config"] == {"effort": "high", "format": {"type": "json"}}
+
+    def test_tier_effort_not_added_when_request_has_no_output_config(self) -> None:
+        # Nothing to attach the level to: a turn without output_config is unchanged.
+        routed = rc.prepare_routed_body(_request_body(), {**TIER_CFG, "effort": "low"})
+        assert "output_config" not in routed
+
+    def test_tier_effort_matching_request_is_a_noop(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "high"}
+        routed = rc.prepare_routed_body(body, {**TIER_CFG, "effort": "high"})
+        assert routed["output_config"]["effort"] == "high"
+
+    def test_tier_effort_does_not_mutate_input(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        snapshot = copy.deepcopy(body)
+        rc.prepare_routed_body(body, {**TIER_CFG, "effort": "low"})
+        assert body == snapshot
+
 
 class TestEscalates:
     def _response_with_tool(self, name: str) -> dict[str, object]:

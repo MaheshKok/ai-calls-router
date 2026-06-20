@@ -50,6 +50,15 @@ settings:
 #
 # Auth:
 #   auth.mode: api_key_env uses auth.key_env from process env or settings.env_file.
+#
+# effort (optional, per tier): reasoning level forced on this tier's routed
+#   turns -- one of low | medium | high | max. Each tier decides independently,
+#   so a cheap tier can run low while another runs high. "xhigh" is rejected
+#   because only premium Opus accepts it (a routed Sonnet turn returns HTTP 400).
+#   Premium passthrough is never routed and keeps its own level (set in the
+#   client), so there is nothing to sync. Omit to leave the client's level
+#   as-is, downgrading only the Opus-only xhigh to high as a safety net. Only
+#   Anthropic routed models read effort; DeepSeek/OpenAI tiers ignore it.
 agents:
   claude_code:
     upstream: https://api.anthropic.com

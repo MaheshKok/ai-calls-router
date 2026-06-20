@@ -97,6 +97,12 @@ def _response_usage(response_body: JsonObject) -> tuple[int, int, int, int]:
     )
 
 
+def _payload_effort(payload: JsonObject) -> object:
+    """Return the routed reasoning effort in a payload, or None when absent."""
+    output_config = payload.get("output_config")
+    return output_config.get("effort") if isinstance(output_config, dict) else None
+
+
 def _without_long_context_beta(value: str) -> str:
     """Drop context-1m tokens from a comma-joined anthropic-beta header value."""
     kept = [
@@ -166,6 +172,11 @@ async def messages_call(
         {**prepare_routed_body(body, tier_cfg), "model": native_model_id(tier_cfg)},
     )
     headers = _forward_headers(oauth_headers)
+    logger.info(
+        "acr: anthropic-oauth routed model=%s effort=%s",
+        payload.get("model"),
+        _payload_effort(payload),
+    )
     timeout_value = tier_cfg.get("timeout", DEFAULT_TIMEOUT_SECONDS)
     timeout = timeout_value if isinstance(timeout_value, int | float) else DEFAULT_TIMEOUT_SECONDS
     own_client = client is None

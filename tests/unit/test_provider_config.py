@@ -17,7 +17,11 @@ import yaml
 from ai_calls_router._lib import config
 from ai_calls_router.routing import provider_config
 from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
-from ai_calls_router.routing.config_schema import ConfigSchemaError, validate_routes_payload
+from ai_calls_router.routing.config_schema import (
+    ConfigSchemaError,
+    parse_tier_config,
+    validate_routes_payload,
+)
 
 
 def _base_routes(*, router: dict[str, object] | None = None) -> dict[str, object]:
@@ -392,3 +396,21 @@ def test_assemble_routes_does_not_mutate_base() -> None:
     )
 
     assert base == before
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "max"])
+def test_tier_config_accepts_routed_effort_levels(effort: str) -> None:
+    parsed = parse_tier_config({"model": "anthropic/claude-sonnet-4-6", "effort": effort})
+
+    assert parsed.effort == effort
+
+
+def test_tier_config_effort_defaults_to_none_when_absent() -> None:
+    assert parse_tier_config({"model": "anthropic/claude-sonnet-4-6"}).effort is None
+
+
+@pytest.mark.parametrize("bad_effort", ["xhigh", "highest", "", "HIGH", 3])
+def test_tier_config_rejects_efforts_a_routed_model_cannot_serve(bad_effort: object) -> None:
+    # xhigh is Opus-only (Sonnet returns HTTP 400); the rest are simply invalid.
+    with pytest.raises(ConfigSchemaError):
+        parse_tier_config({"model": "anthropic/claude-sonnet-4-6", "effort": bad_effort})
