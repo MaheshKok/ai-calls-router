@@ -1,12 +1,13 @@
-"""Starlette application wiring the routing decision to the two call paths.
+"""Starlette application wiring the proxy transport to the orchestrator.
 
-POST /v1/messages reads the body once and decides per request: turns that
-process tool results mapped to a configured cheap tier with a resolvable key
-are served by routed_call; everything else (turn openers, premium or unmapped
-tools, missing keys, malformed JSON, decision errors, routed_call declining)
-streams through to the premium upstream with the client's headers intact.
-GET /health answers locally, GET /metrics exposes live counters, and every
-other path proxies unchanged.
+This module owns transport concerns only: the route table, the shared upstream
+HTTP client, the assembled-routes cache, the loopback-bind warning, and parsing
+each incoming request into a transport-agnostic context. The serving decision --
+adapter selection, group resolution, routed tier attempt, compression, recording,
+and passthrough -- lives in :mod:`ai_calls_router.proxy.orchestrator`. POST
+/v1/messages, /v1/chat/completions, and /v1/responses are decided by the
+orchestrator; GET /health answers locally, GET /metrics and /dashboard expose
+live telemetry, and every other path proxies unchanged.
 """
 
 from __future__ import annotations
@@ -14,14 +15,13 @@ from __future__ import annotations
 import contextlib
 import functools
 import ipaddress
-import json
 import logging
 import os
 import threading
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import httpx
 from starlette.applications import Starlette
@@ -32,23 +32,22 @@ from starlette.routing import Route
 from ai_calls_router._lib import config, logging_setup
 from ai_calls_router.accounting import metrics
 from ai_calls_router.ops import bootstrap
-from ai_calls_router.proxy import observability, passthrough, route_dispatch
+from ai_calls_router.proxy import observability, orchestrator, passthrough, route_dispatch
 from ai_calls_router.routing import decide as routing
-from ai_calls_router.routing import forward_compression, provider_config
-from ai_calls_router.routing.adapters import adapter_for_path
+from ai_calls_router.routing import provider_config
 from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
 
 if TYPE_CHECKING:
-    from ai_calls_router._lib.types import JsonObject, JsonValue
-    from ai_calls_router.routing.adapters.base import ClientAdapter
+    from ai_calls_router._lib.types import JsonObject
 
 logger = logging.getLogger("acr.server")
 
 LOG_REVISION = "2026-06-15-premium-guard-v2"
 
-_RouteAttempt = route_dispatch.RouteAttempt
 codex_direct = route_dispatch.codex_direct
 _try_codex_direct_route = route_dispatch.try_codex_direct_route
+
+PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
 
 
 @dataclass
@@ -80,17 +79,6 @@ def _warn_if_public_bind(settings: config.ServerSettings) -> None:
         "acr: server.host=%s is not loopback; /metrics and /dashboard are unauthenticated",
         settings.host,
     )
-
-
-def _request_summary(body: JsonObject) -> str:
-    messages = body.get("messages")
-    msg_count = len(messages) if isinstance(messages, list) else 0
-    model = body.get("model")
-    stream = body.get("stream")
-    return f"model={model!r} stream={stream!r} messages={msg_count}"
-
-
-PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
 
 
 def _assembled_routes_signature() -> tuple[tuple[str, int, int, int], ...]:
@@ -146,59 +134,6 @@ def _load_assembled_routes() -> JsonObject:
     return assembled
 
 
-async def health(request: Request) -> JSONResponse:
-    """Answer the daemon health probe without touching the upstream.
-
-    Args:
-        request: Incoming health-check request.
-
-    Returns:
-        A local 200 status response.
-    """
-    return JSONResponse({"status": "ok"})
-
-
-async def _serve_passthrough(
-    request: Request,
-    body_bytes: bytes,
-    *,
-    group: str | None = None,
-    on_complete: passthrough.ResponseComplete | None = None,
-) -> Response:
-    """Relay a request to an upstream unchanged.
-
-    When an agent group is available, passthrough targets that group's own
-    upstream. Without a group, it uses the premium default. Body bytes and
-    client headers are relayed without conversion or injected tier keys.
-
-    Args:
-        request: Incoming client request.
-        body_bytes: Raw request body, already read.
-        group: Optional agent group for per-agent upstream selection.
-        on_complete: Optional callback invoked after the premium response is
-            fully relayed.
-
-    Returns:
-        The streamed upstream response.
-    """
-    routes = _load_assembled_routes()
-    upstream = (
-        routing.agent_upstream(routes, group)
-        if group is not None
-        else config.server_settings(routes).upstream
-    )
-    return await passthrough.forward(
-        client=request.app.state.client,
-        upstream=upstream,
-        method=request.method,
-        path=request.url.path,
-        headers=request.headers,
-        body=body_bytes,
-        query=request.url.query,
-        on_complete=on_complete,
-    )
-
-
 def _client_ip(request: Request) -> str:
     """Extract the client IP from the request."""
     forwarded = request.headers.get("x-forwarded-for")
@@ -214,85 +149,48 @@ def _user_agent(request: Request) -> str:
     return request.headers.get("user-agent", "")
 
 
-def _models_passthrough_group(request: Request) -> str | None:
-    """Resolve a per-agent upstream for model-list requests when identity is clear."""
-    if request.url.path != "/v1/models":
-        return None
-    try:
-        return provider_config.resolve_agent_group(
-            path=request.url.path,
-            headers=request.headers,
-            routes=_load_assembled_routes(),
-            adapter_default="",
-        )
-    except Exception as exc:
-        logger.warning("acr: model-list identity lookup failed (%s); using premium default", exc)
-        return None
-
-
-def _premium_usage_callback(
-    *,
-    m: metrics.Metrics,
-    request_id: str,
-) -> Callable[[int, dict[str, int], float], None]:
-    """Build a callback that updates metrics after premium passthrough completes."""
-
-    def _record(status: int, usage: dict[str, int], duration: float) -> None:
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        cache_read = usage.get("cache_read_input_tokens", 0)
-        cache_creation = usage.get("cache_creation_input_tokens", 0)
-        if input_tokens or output_tokens or cache_read or cache_creation:
-            m.add_premium_tokens(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cache_read=cache_read,
-                cache_creation=cache_creation,
-            )
-        m.update_request_usage(
-            request_id=request_id,
-            status=status,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read=cache_read,
-            cache_creation=cache_creation,
-            duration=duration,
-        )
-
-    return _record
-
-
-async def _try_route(
-    body_bytes: bytes,
-    *,
-    adapter: ClientAdapter,
-    group: str,
-    request_path: str,
-    request_headers: Mapping[str, str],
-    client: httpx.AsyncClient | None = None,
-    user_agent: str = "",
-    agent: str = "",
-    session: str | None = None,
-) -> _RouteAttempt:
-    """Compatibility wrapper for tests that monkeypatch server._try_route."""
-    return await route_dispatch.try_route(
-        body_bytes,
-        adapter=adapter,
-        group=group,
-        request_path=request_path,
-        request_headers=request_headers,
-        routes_loader=_load_assembled_routes,
-        client=client,
-        user_agent=user_agent,
-        agent=agent,
-        session=session,
+def _build_context(request: Request, body_bytes: bytes) -> orchestrator.RequestContext:
+    """Snapshot a Starlette request into a transport-agnostic context."""
+    return orchestrator.RequestContext(
+        method=request.method,
+        path=request.url.path,
+        query=request.url.query,
+        headers=request.headers,
+        body_bytes=body_bytes,
+        client=request.app.state.client,
+        user_agent=_user_agent(request),
+        client_ip=_client_ip(request),
     )
+
+
+async def health(request: Request) -> JSONResponse:
+    """Answer the daemon health probe without touching the upstream.
+
+    Args:
+        request: Incoming health-check request.
+
+    Returns:
+        A local 200 status response.
+    """
+    return JSONResponse({"status": "ok"})
+
+
+async def _serve_routed(request: Request) -> Response:
+    """Snapshot the request and serve it through the orchestrator.
+
+    Args:
+        request: Incoming adapter-backed request.
+
+    Returns:
+        The routed response or the streamed premium passthrough.
+    """
+    with logging_setup.request_context():
+        ctx = _build_context(request, await request.body())
+        return await orchestrator.handle(ctx, routes_loader=_load_assembled_routes)
 
 
 async def messages(request: Request) -> Response:
     """Decide and serve one /v1/messages request.
-
-    Records routing metrics as a side-effect.
 
     Args:
         request: Incoming Anthropic Messages API request.
@@ -300,8 +198,7 @@ async def messages(request: Request) -> Response:
     Returns:
         The routed response or the streamed premium passthrough.
     """
-    with logging_setup.request_context():
-        return await _handle_routed_request(request)
+    return await _serve_routed(request)
 
 
 async def chat_completions(request: Request) -> Response:
@@ -313,8 +210,7 @@ async def chat_completions(request: Request) -> Response:
     Returns:
         The routed response or the streamed premium passthrough.
     """
-    with logging_setup.request_context():
-        return await _handle_routed_request(request)
+    return await _serve_routed(request)
 
 
 async def responses(request: Request) -> Response:
@@ -326,121 +222,11 @@ async def responses(request: Request) -> Response:
     Returns:
         The routed response or the streamed premium passthrough.
     """
-    with logging_setup.request_context():
-        return await _handle_routed_request(request)
-
-
-async def _handle_routed_request(request: Request) -> Response:
-    """Serve one adapter-backed request inside an active request context."""
-    path = request.url.path
-    body_bytes = await request.body()
-    agent = metrics.identify_agent(_user_agent(request))
-    try:
-        payload = cast("JsonValue", json.loads(body_bytes))
-        body_dict = payload if isinstance(payload, dict) else None
-    except Exception:
-        body_dict = None
-    session = metrics.session_fingerprint(
-        body_dict.get("messages") if isinstance(body_dict, dict) else None
-    )
-    if isinstance(body_dict, dict):
-        logger.info("inbound %s %s agent=%s", path, _request_summary(body_dict), agent)
-    else:
-        logger.info("inbound %s unparsed-body bytes=%d agent=%s", path, len(body_bytes), agent)
-
-    m = metrics.get_metrics()
-    m.incr_total()
-
-    adapter = adapter_for_path(path)
-    if adapter is None:
-        # No adapter means no trusted agent group; keep the premium default.
-        return await _serve_passthrough(request, body_bytes)
-    routes = _load_assembled_routes()
-    group = provider_config.resolve_agent_group(
-        path=path,
-        headers=request.headers,
-        routes=routes,
-        adapter_default=adapter.default_agent_group,
-    )
-    if group is None:
-        return JSONResponse({"error": "unresolved agent identity"}, status_code=400)
-    attempt = await _try_route(
-        body_bytes,
-        adapter=adapter,
-        group=group,
-        request_path=path,
-        request_headers=request.headers,
-        client=request.app.state.client,
-        user_agent=_user_agent(request),
-        agent=agent,
-        session=session,
-    )
-    if attempt.response is not None:
-        m.incr_routed()
-        logger.info("outcome=routed %s agent=%s tier=%s", path, agent, attempt.tier)
-        return attempt.response
-
-    m.incr_passthrough()
-    if attempt.reason == "response_premium_guard":
-        m.incr_escalated()
-    elif attempt.reason in {"routing_error", "routed_fallback", "tier_unavailable"}:
-        m.incr_fallback()
-    logger.info(
-        "outcome=passthrough %s agent=%s reason=%s tier=%s model=%r tools=%s",
-        path,
-        agent,
-        attempt.reason,
-        attempt.tier,
-        attempt.model,
-        attempt.tool_names,
-    )
-    # Compress the forwarded body for non-DeepSeek premium turns and record the
-    # realized tool-output shrink (per-row column plus the aggregate tile). The
-    # compressor relays byte-identical when nothing shrank, so short decision
-    # turns keep the upstream prompt cache intact.
-    upstream = routing.agent_upstream(routes, group)
-    forward_bytes, shrink = forward_compression.compress_forward_body(
-        body_bytes, request_path=path, upstream=upstream
-    )
-    m.add_shrink(chars_before=shrink.chars_before, chars_after=shrink.chars_after)
-    m.record_request(
-        method="POST",
-        path=path,
-        status=0,
-        tier=attempt.tier,
-        route="premium_guard"
-        if attempt.reason in {"request_premium_guard", "response_premium_guard"}
-        else "passthrough",
-        model=attempt.model,
-        user_agent=_user_agent(request),
-        client_ip=_client_ip(request),
-        tool_names=attempt.tool_names,
-        input_tokens=0,
-        output_tokens=0,
-        cache_read=0,
-        cache_creation=0,
-        duration=0,
-        premium_model=attempt.model,
-        agent=agent,
-        session_id=session or "",
-        decision_reason=attempt.reason,
-        request_id=logging_setup.current_request_id(),
-        shrink_chars_before=shrink.chars_before,
-        shrink_chars_after=shrink.chars_after,
-    )
-    return await _serve_passthrough(
-        request,
-        forward_bytes,
-        group=group,
-        on_complete=_premium_usage_callback(
-            m=m,
-            request_id=logging_setup.current_request_id(),
-        ),
-    )
+    return await _serve_routed(request)
 
 
 async def proxy(request: Request) -> Response:
-    """Proxy any non-messages endpoint to the premium upstream.
+    """Proxy any non-adapter endpoint to the resolved upstream.
 
     Args:
         request: Incoming client request for any other path.
@@ -448,9 +234,12 @@ async def proxy(request: Request) -> Response:
     Returns:
         The streamed upstream response.
     """
-    body_bytes = await request.body()
+    ctx = _build_context(request, await request.body())
     # Only /v1/models resolves identity here; other catch-all paths keep the premium default.
-    return await _serve_passthrough(request, body_bytes, group=_models_passthrough_group(request))
+    group = orchestrator.models_passthrough_group(ctx, routes_loader=_load_assembled_routes)
+    return await orchestrator.serve_passthrough(
+        ctx, ctx.body_bytes, routes_loader=_load_assembled_routes, group=group
+    )
 
 
 @contextlib.asynccontextmanager

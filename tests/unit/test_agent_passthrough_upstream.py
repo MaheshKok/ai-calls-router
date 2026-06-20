@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
+from ai_calls_router.proxy import orchestrator as orchestrator_mod
 from ai_calls_router.proxy import server as server_mod
 from tests.acr_testkit import Upstream, make_client
 
@@ -131,7 +132,7 @@ def test_adapter_none_and_proxy_catchall_use_premium_default(
     upstream: Upstream,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(server_mod, "adapter_for_path", lambda _path: None)
+    monkeypatch.setattr(orchestrator_mod, "adapter_for_path", lambda _path: None)
     client.post("/v1/messages", json=_messages_opener())
     client.post("/not-routed", json={"ok": True})
     assert [request.url.host for request in upstream.requests] == [

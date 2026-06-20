@@ -61,6 +61,28 @@ class RouteAttempt:
     shrink: shrink_stats.ShrinkStats | None = None
 
 
+@dataclass(frozen=True)
+class RouteDecision:
+    """Resolved routing decision for a routable request.
+
+    Carries the parsed request bodies, serve flags, and the chosen tier with its
+    credential so the dispatch stage can serve the call without re-deriving any
+    of it. Only built when the request is routable; otherwise the decision stage
+    returns a :class:`RouteAttempt` describing the passthrough reason.
+    """
+
+    body: JsonObject
+    anthropic_body: JsonObject
+    requested_model: str
+    streaming: bool
+    names: list[str]
+    tier: str
+    tier_cfg: JsonObject
+    credential: routing.TierCredential
+    settings: JsonObject
+    premium_tools: list[str]
+
+
 def resolve_tier_config(
     names: list[str],
     *,
@@ -126,6 +148,26 @@ def routed_fallback_attempt(
         tool_names=names,
         tier=tier,
     )
+
+
+def _routing_error_attempt(
+    exc: Exception, *, requested_model: str, names: list[str]
+) -> RouteAttempt:
+    """Log a fail-open routing failure and build its passthrough attempt."""
+    logger.warning("acr: routing decision failed (%s); passing through", exc, exc_info=True)
+    return RouteAttempt(reason="routing_error", model=requested_model, tool_names=names)
+
+
+def _adapter_response(
+    adapter: ClientAdapter, anthropic_response: JsonObject, *, streaming: bool
+) -> Response:
+    """Shape an Anthropic-shaped response into the client's wire format."""
+    if streaming:
+        return Response(
+            b"".join(adapter.to_client_sse(anthropic_response)),
+            media_type="text/event-stream",
+        )
+    return JSONResponse(adapter.to_client_response(anthropic_response))
 
 
 async def try_codex_direct_route(
@@ -307,16 +349,8 @@ async def try_oauth_responses_route(
         )
     )
     anthropic_response = responses_to_anthropic_response(response_body, requested_model)
-    response = (
-        Response(
-            b"".join(adapter.to_client_sse(anthropic_response)),
-            media_type="text/event-stream",
-        )
-        if streaming
-        else JSONResponse(adapter.to_client_response(anthropic_response))
-    )
     return RouteAttempt(
-        response=response,
+        response=_adapter_response(adapter, anthropic_response, streaming=streaming),
         tier=tier,
         reason="routed",
         model=tier_model,
@@ -332,18 +366,10 @@ async def try_oauth_responses_route(
 
 
 async def try_native_or_oauth_route(
+    decision: RouteDecision,
     *,
-    body: JsonObject,
-    anthropic_body: JsonObject,
     adapter: ClientAdapter,
-    tier: str,
-    tier_cfg: JsonObject,
-    credential: routing.TierCredential,
     request_headers: Mapping[str, str],
-    streaming: bool,
-    requested_model: str,
-    names: list[str],
-    premium_tools: list[str],
     request_path: str,
     user_agent: str,
     agent: str,
@@ -352,15 +378,15 @@ async def try_native_or_oauth_route(
 ) -> RouteAttempt | None:
     """Try native Codex and generic OAuth Responses routing."""
     codex_attempt = await try_codex_direct_route(
-        body=body,
-        tier=tier,
-        tier_cfg=tier_cfg,
-        credential=credential,
+        body=decision.body,
+        tier=decision.tier,
+        tier_cfg=decision.tier_cfg,
+        credential=decision.credential,
         request_headers=request_headers,
-        streaming=streaming,
-        requested_model=requested_model,
-        names=names,
-        premium_tools=premium_tools,
+        streaming=decision.streaming,
+        requested_model=decision.requested_model,
+        names=decision.names,
+        premium_tools=decision.premium_tools,
         request_path=request_path,
         user_agent=user_agent,
         agent=agent,
@@ -370,16 +396,16 @@ async def try_native_or_oauth_route(
     if codex_attempt is not None:
         return codex_attempt
     return await try_oauth_responses_route(
-        anthropic_body=anthropic_body,
+        anthropic_body=decision.anthropic_body,
         adapter=adapter,
-        tier=tier,
-        tier_cfg=tier_cfg,
-        credential=credential,
+        tier=decision.tier,
+        tier_cfg=decision.tier_cfg,
+        credential=decision.credential,
         request_headers=request_headers,
-        streaming=streaming,
-        requested_model=requested_model,
-        names=names,
-        premium_tools=premium_tools,
+        streaming=decision.streaming,
+        requested_model=decision.requested_model,
+        names=decision.names,
+        premium_tools=decision.premium_tools,
         request_path=request_path,
         user_agent=user_agent,
         agent=agent,
@@ -388,20 +414,21 @@ async def try_native_or_oauth_route(
     )
 
 
-async def try_route(  # noqa: PLR0911 - pure move of fail-open routing branches.
+def prepare_route(
     body_bytes: bytes,
     *,
     adapter: ClientAdapter,
     group: str,
-    request_path: str,
-    request_headers: Mapping[str, str],
     routes_loader: Callable[[], JsonObject],
-    client: httpx.AsyncClient | None = None,
-    user_agent: str = "",
-    agent: str = "",
-    session: str | None = None,
-) -> RouteAttempt:
-    """Attempt to serve an adapter request on a routed tier."""
+) -> RouteDecision | RouteAttempt:
+    """Resolve the routing decision for a request.
+
+    Returns a :class:`RouteDecision` when the request is routable, otherwise a
+    :class:`RouteAttempt` describing why it falls back to premium passthrough.
+    Every path is fail-open: a parse/resolution failure surfaces the partial
+    requested model so the caller records it, and routing never breaks traffic
+    that would otherwise succeed.
+    """
     requested_model = ""
     names: list[str] = []
     try:
@@ -433,73 +460,114 @@ async def try_route(  # noqa: PLR0911 - pure move of fail-open routing branches.
         savings.register_tier_prices(routes)
         settings_value = routes.get("settings")
         settings_cfg: JsonObject = settings_value if isinstance(settings_value, dict) else {}
-        premium_tools = routing.agent_premium_tools(routes, group)
-        route_attempt = await try_native_or_oauth_route(
+        return RouteDecision(
             body=body,
             anthropic_body=anthropic_body,
-            adapter=adapter,
+            requested_model=requested_model,
+            streaming=streaming,
+            names=names,
             tier=tier,
             tier_cfg=tier_cfg,
             credential=credential,
-            request_headers=request_headers,
-            streaming=streaming,
-            requested_model=requested_model,
-            names=names,
-            premium_tools=premium_tools,
-            request_path=request_path,
-            user_agent=user_agent,
-            agent=agent,
-            session=session or "",
-            client=client,
-        )
-        if route_attempt is not None:
-            return route_attempt
-        response_guard_tools: list[str] = []
-
-        result = await routed_call.routed_call(
-            body=anthropic_body,
-            tier_name=tier,
-            tier_cfg=tier_cfg,
-            api_key=credential.value,
             settings=settings_cfg,
-            tool_names=names,
-            premium_tools=premium_tools,
-            request_path=request_path,
-            user_agent=user_agent,
-            agent=agent,
-            session_id=session or "",
-            on_premium_guard=response_guard_tools.extend,
-            client=client,
-        )
-        if result is None:
-            return routed_fallback_attempt(
-                response_guard_tools=response_guard_tools,
-                requested_model=requested_model,
-                names=names,
-                tier=tier,
-            )
-        client_body = adapter.to_client_response(result.body)
-        if streaming:
-            return RouteAttempt(
-                response=Response(
-                    b"".join(adapter.to_client_sse(result.body)),
-                    media_type="text/event-stream",
-                ),
-                tier=tier,
-                reason="routed",
-                model=requested_model,
-                tool_names=names,
-            )
-        return RouteAttempt(
-            response=JSONResponse(client_body),
-            tier=tier,
-            reason="routed",
-            model=requested_model,
-            tool_names=names,
+            premium_tools=routing.agent_premium_tools(routes, group),
         )
     except Exception as exc:
-        logger.warning("acr: routing decision failed (%s); passing through", exc, exc_info=True)
-        return RouteAttempt(reason="routing_error", model=requested_model, tool_names=names)
+        return _routing_error_attempt(exc, requested_model=requested_model, names=names)
+
+
+async def _serve_routed_litellm(
+    decision: RouteDecision,
+    *,
+    adapter: ClientAdapter,
+    request_path: str,
+    user_agent: str,
+    agent: str,
+    session: str,
+    client: httpx.AsyncClient | None = None,
+) -> RouteAttempt:
+    """Serve a routed request through the LiteLLM engine and shape the response."""
+    response_guard_tools: list[str] = []
+    result = await routed_call.routed_call(
+        body=decision.anthropic_body,
+        tier_name=decision.tier,
+        tier_cfg=decision.tier_cfg,
+        api_key=decision.credential.value,
+        settings=decision.settings,
+        tool_names=decision.names,
+        premium_tools=decision.premium_tools,
+        request_path=request_path,
+        user_agent=user_agent,
+        agent=agent,
+        session_id=session,
+        on_premium_guard=response_guard_tools.extend,
+        client=client,
+    )
+    if result is None:
+        return routed_fallback_attempt(
+            response_guard_tools=response_guard_tools,
+            requested_model=decision.requested_model,
+            names=decision.names,
+            tier=decision.tier,
+        )
+    return RouteAttempt(
+        response=_adapter_response(adapter, result.body, streaming=decision.streaming),
+        tier=decision.tier,
+        reason="routed",
+        model=decision.requested_model,
+        tool_names=decision.names,
+    )
+
+
+async def try_route(
+    body_bytes: bytes,
+    *,
+    adapter: ClientAdapter,
+    group: str,
+    request_path: str,
+    request_headers: Mapping[str, str],
+    routes_loader: Callable[[], JsonObject],
+    client: httpx.AsyncClient | None = None,
+    user_agent: str = "",
+    agent: str = "",
+    session: str | None = None,
+) -> RouteAttempt:
+    """Attempt to serve an adapter request on a routed tier.
+
+    Resolves the decision (:func:`prepare_route`), then dispatches to the native
+    Codex / OAuth Responses path or the LiteLLM engine. A failure during dispatch
+    falls back to premium passthrough while preserving the partial model.
+    """
+    decision = prepare_route(body_bytes, adapter=adapter, group=group, routes_loader=routes_loader)
+    if isinstance(decision, RouteAttempt):
+        return decision
+    session_id = session or ""
+    try:
+        attempt = await try_native_or_oauth_route(
+            decision,
+            adapter=adapter,
+            request_headers=request_headers,
+            request_path=request_path,
+            user_agent=user_agent,
+            agent=agent,
+            session=session_id,
+            client=client,
+        )
+        if attempt is not None:
+            return attempt
+        return await _serve_routed_litellm(
+            decision,
+            adapter=adapter,
+            request_path=request_path,
+            user_agent=user_agent,
+            agent=agent,
+            session=session_id,
+            client=client,
+        )
+    except Exception as exc:
+        return _routing_error_attempt(
+            exc, requested_model=decision.requested_model, names=decision.names
+        )
 
 
 def wants_stream(client_body: JsonObject, anthropic_body: JsonObject) -> bool:

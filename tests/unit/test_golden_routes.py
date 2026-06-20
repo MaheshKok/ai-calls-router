@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -9,6 +10,7 @@ import pytest
 
 from ai_calls_router._lib.types import JsonObject
 from ai_calls_router.proxy import route_dispatch
+from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import provider_config
 from ai_calls_router.routing.adapters import adapter_for_path
 
@@ -209,3 +211,48 @@ def test_golden_route_decisions(monkeypatch: pytest.MonkeyPatch, case: GoldenRou
     assert tier == case.expected_tier
     assert (tier_cfg.get("model") if tier_cfg is not None else None) == case.expected_model
     assert (credential.auth_mode if credential is not None else None) == case.expected_auth_mode
+
+
+def test_try_route_dispatch_error_falls_back_preserving_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatch-stage exception fails open to routing_error, keeping the model.
+
+    The decision stage succeeds, so ``try_route`` must catch a failure raised by
+    the native/OAuth dispatch path and return a passthrough attempt that still
+    carries the resolved model and tools (so the caller records them).
+    """
+    decision = route_dispatch.RouteDecision(
+        body={"model": "claude-fable-5"},
+        anthropic_body={"model": "claude-fable-5"},
+        requested_model="claude-fable-5",
+        streaming=False,
+        names=["Bash"],
+        tier="fast",
+        tier_cfg={"model": "deepseek/deepseek-chat"},
+        credential=routing.TierCredential(value="secret", auth_mode="api_key"),
+        settings={},
+        premium_tools=[],
+    )
+    monkeypatch.setattr(route_dispatch, "prepare_route", lambda *_a, **_k: decision)
+
+    async def _boom(*_a: object, **_k: object) -> route_dispatch.RouteAttempt | None:
+        raise RuntimeError("dispatch exploded")
+
+    monkeypatch.setattr(route_dispatch, "try_native_or_oauth_route", _boom)
+
+    attempt = asyncio.run(
+        route_dispatch.try_route(
+            b"{}",
+            adapter=object(),  # type: ignore[arg-type]  # unused: dispatch is patched to raise
+            group="claude_code",
+            request_path="/v1/messages",
+            request_headers={},
+            routes_loader=dict,
+        )
+    )
+
+    assert attempt.reason == "routing_error"
+    assert attempt.model == "claude-fable-5"
+    assert attempt.tool_names == ["Bash"]
+    assert attempt.response is None

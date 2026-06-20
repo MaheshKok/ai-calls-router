@@ -96,8 +96,8 @@ class TestJsonArrayBodyPassthrough:
     """A POST body that is a JSON array (not an object) must fall back to passthrough."""
 
     def test_array_body_falls_back_to_passthrough(self, tmp_path, monkeypatch):
-        """A non-dict body makes _try_route return None, so the array reaches
-        the upstream untouched (server.py:84)."""
+        """A non-dict body makes route_dispatch.try_route decline, so the array
+        reaches the upstream untouched."""
         upstream = Upstream()
         with make_client(
             config_yaml=FULL_CONFIG, tmp_path=tmp_path, monkeypatch=monkeypatch, upstream=upstream
@@ -122,7 +122,7 @@ class TestMalformedTierConfigPassthrough:
     """When the tier entry in the config is not a dict, routing falls back."""
 
     def test_string_tier_cfg_falls_back_to_passthrough(self, tmp_path, monkeypatch):
-        """tier_cfg is a bare string → _try_route returns None → upstream serves."""
+        """tier_cfg is a bare string → route_dispatch.try_route declines → upstream serves."""
         upstream = Upstream()
         with make_client(
             config_yaml=MALFORMED_TIER_CONFIG,
