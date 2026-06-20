@@ -120,6 +120,32 @@ def test_passthrough_forwards_client_headers_without_tier_key(
     assert json.loads(request.content) == body
 
 
+def test_passthrough_strips_long_context_opt_in(*, client: TestClient, upstream: Upstream) -> None:
+    # opus[1m] passthrough turns 429 on a subscription without long-context credits;
+    # acr drops the [1m] model suffix and the context-1m beta before relaying.
+    body = {**_messages_opener(), "model": "claude-opus-4-8[1m]"}
+    client.post(
+        "/v1/messages",
+        json=body,
+        headers={"anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07"},
+    )
+    request = upstream.requests[0]
+    assert request.url.host == "api.anthropic.com"
+    assert json.loads(request.content)["model"] == "claude-opus-4-8"
+    assert request.headers["anthropic-beta"] == "oauth-2025-04-20"
+
+
+def test_passthrough_preserves_request_without_long_context(
+    *, client: TestClient, upstream: Upstream
+) -> None:
+    # A turn that does not opt into long context relays byte-identical (cache intact).
+    body = _messages_opener()
+    client.post("/v1/messages", json=body, headers={"anthropic-beta": "oauth-2025-04-20"})
+    request = upstream.requests[0]
+    assert json.loads(request.content) == body
+    assert request.headers["anthropic-beta"] == "oauth-2025-04-20"
+
+
 def test_trailing_slash_upstream_is_normalized(*, client: TestClient, upstream: Upstream) -> None:
     client.post("/v1/chat/completions", json=_chat_opener())
     assert upstream.requests[0].url.host == "hermes.internal.example"

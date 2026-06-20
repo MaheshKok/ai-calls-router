@@ -24,7 +24,12 @@ from starlette.responses import JSONResponse, Response
 from ai_calls_router._lib import config, logging_setup
 from ai_calls_router.accounting import metrics
 from ai_calls_router.proxy import passthrough, route_dispatch
-from ai_calls_router.routing import content_sanitize, forward_compression, provider_config
+from ai_calls_router.routing import (
+    anthropic_oauth,
+    content_sanitize,
+    forward_compression,
+    provider_config,
+)
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing.adapters import adapter_for_path
 
@@ -208,6 +213,16 @@ async def _serve_premium_passthrough(
         attempt.model,
         attempt.tool_names,
     )
+    # Drop the 1M long-context opt-in (anthropic-beta: context-1m + opus[1m] model
+    # suffix) before relaying: the routed path strips it, but an OAuth subscription
+    # without long-context credits 429s a passthrough turn that opts in.
+    sanitized = anthropic_oauth.strip_long_context_passthrough(ctx.body_bytes, ctx.headers)
+    if sanitized is not None:
+        long_context_body, long_context_headers = sanitized
+        logger.warning(
+            "acr: stripped 1M long-context opt-in from passthrough %s agent=%s", ctx.path, agent
+        )
+        ctx = replace(ctx, body_bytes=long_context_body, headers=long_context_headers)
     # Compress the forwarded body for non-DeepSeek premium turns and record the
     # realized tool-output shrink (per-row column plus the aggregate tile). The
     # compressor relays byte-identical when nothing shrank, so short decision

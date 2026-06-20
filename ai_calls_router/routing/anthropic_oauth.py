@@ -13,6 +13,7 @@ None so serving falls back to premium passthrough.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, cast
 
@@ -111,6 +112,84 @@ def _without_long_context_beta(value: str) -> str:
         if token.strip() and not token.strip().startswith(_LONG_CONTEXT_BETA_PREFIX)
     ]
     return ",".join(kept)
+
+
+# Claude Code's opus[1m] also names the 1M variant in the body model itself
+# (claude-opus-4-8[1m]); stripping only the header leaves the suffix to re-trigger
+# the long-context 429, so the passthrough sanitizer drops both.
+_LONG_CONTEXT_MODEL_SUFFIX = "[1m]"
+
+
+def _strip_long_context_model(body_bytes: bytes) -> tuple[bytes, bool]:
+    """Drop a trailing ``[1m]`` long-context suffix from the body model.
+
+    Args:
+        body_bytes: Raw Anthropic Messages request body.
+
+    Returns:
+        The (possibly re-serialized) body and whether the suffix was removed. The
+        body is returned unchanged when it is not a JSON object, lacks a string
+        model, or the model does not carry the suffix.
+    """
+    try:
+        body = json.loads(body_bytes)
+    except (ValueError, TypeError):
+        return body_bytes, False
+    if not isinstance(body, dict):
+        return body_bytes, False
+    model = body.get("model")
+    if not isinstance(model, str) or not model.endswith(_LONG_CONTEXT_MODEL_SUFFIX):
+        return body_bytes, False
+    body["model"] = model[: -len(_LONG_CONTEXT_MODEL_SUFFIX)]
+    return json.dumps(body, ensure_ascii=False).encode("utf-8"), True
+
+
+def _drop_long_context_beta(header_items: list[tuple[str, str]]) -> dict[str, str]:
+    """Return headers with context-1m stripped from any anthropic-beta value.
+
+    The anthropic-beta header is dropped entirely when context-1m was its only
+    token; every other header is preserved verbatim.
+    """
+    out: dict[str, str] = {}
+    for key, value in header_items:
+        if key.lower() != "anthropic-beta":
+            out[key] = value
+            continue
+        filtered = _without_long_context_beta(value)
+        if filtered:
+            out[key] = filtered
+    return out
+
+
+def strip_long_context_passthrough(
+    body_bytes: bytes, headers: Mapping[str, str]
+) -> tuple[bytes, dict[str, str]] | None:
+    """Remove the 1M long-context opt-in from a premium-passthrough Anthropic turn.
+
+    Claude Code's ``opus[1m]`` turns carry both an ``anthropic-beta: context-1m``
+    token and a ``[1m]`` model suffix. An OAuth subscription without long-context
+    credits rejects them with HTTP 429 (``Usage credits are required for long
+    context requests``). The routed path strips the beta already; passthrough
+    forwards the request verbatim, so large premium turns 429. This drops both
+    markers so the subscription serves the turn within its standard window. A turn
+    that genuinely exceeds the standard window then fails on length instead, which
+    the subscription cannot serve either way.
+
+    Args:
+        body_bytes: Raw Anthropic ``/v1/messages`` request body to relay.
+        headers: Client request headers to forward upstream.
+
+    Returns:
+        The sanitized ``(body, headers)`` pair when either long-context marker was
+        present, or ``None`` so the caller relays the request byte-identical.
+    """
+    header_items = list(headers.items())
+    beta = next((value for key, value in header_items if key.lower() == "anthropic-beta"), None)
+    has_long_context_beta = beta is not None and _without_long_context_beta(beta) != beta
+    new_body, model_stripped = _strip_long_context_model(body_bytes)
+    if not has_long_context_beta and not model_stripped:
+        return None
+    return new_body, _drop_long_context_beta(header_items)
 
 
 # Only these client headers are forwarded to api.anthropic.com. An explicit

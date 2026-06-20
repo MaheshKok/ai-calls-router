@@ -357,3 +357,105 @@ async def test_messages_call_creates_and_closes_its_own_client_when_none_passed(
     assert result is not None
     _response, usage, _shrink = result
     assert usage == (10, 4, 3, 2)
+
+
+def _passthrough_body(model: str) -> bytes:
+    """Return a serialized Anthropic Messages body with the given model id."""
+    return json.dumps({"model": model, "messages": [{"role": "user", "content": "hi"}]}).encode()
+
+
+def test_strip_long_context_passthrough_drops_both_markers() -> None:
+    body = _passthrough_body("claude-opus-4-8[1m]")
+    headers = {"anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07", "x-keep": "1"}
+
+    result = anthropic_oauth.strip_long_context_passthrough(body, headers)
+
+    assert result is not None
+    new_body, new_headers = result
+    assert json.loads(new_body)["model"] == "claude-opus-4-8"
+    assert new_headers["anthropic-beta"] == "oauth-2025-04-20"
+    assert new_headers["x-keep"] == "1"
+
+
+def test_strip_long_context_passthrough_header_only_keeps_body_bytes() -> None:
+    body = _passthrough_body("claude-opus-4-8")
+    headers = {"anthropic-beta": "context-1m-2025-08-07,tool-streaming"}
+
+    result = anthropic_oauth.strip_long_context_passthrough(body, headers)
+
+    assert result is not None
+    new_body, new_headers = result
+    assert new_body == body  # model had no suffix, so the body relays byte-identical
+    assert new_headers["anthropic-beta"] == "tool-streaming"
+
+
+def test_strip_long_context_passthrough_drops_empty_beta_header() -> None:
+    result = anthropic_oauth.strip_long_context_passthrough(
+        _passthrough_body("claude-opus-4-8"), {"anthropic-beta": "context-1m-2025-08-07"}
+    )
+
+    assert result is not None
+    _new_body, new_headers = result
+    assert "anthropic-beta" not in new_headers
+
+
+def test_strip_long_context_passthrough_model_suffix_without_beta() -> None:
+    result = anthropic_oauth.strip_long_context_passthrough(
+        _passthrough_body("claude-opus-4-8[1m]"), {}
+    )
+
+    assert result is not None
+    new_body, new_headers = result
+    assert json.loads(new_body)["model"] == "claude-opus-4-8"
+    assert new_headers == {}
+
+
+def test_strip_long_context_passthrough_header_key_is_case_insensitive() -> None:
+    result = anthropic_oauth.strip_long_context_passthrough(
+        _passthrough_body("claude-opus-4-8"), {"Anthropic-Beta": "context-1m-2025-08-07"}
+    )
+
+    assert result is not None
+    _new_body, new_headers = result
+    assert "Anthropic-Beta" not in new_headers
+
+
+def test_strip_long_context_passthrough_no_markers_returns_none() -> None:
+    result = anthropic_oauth.strip_long_context_passthrough(
+        _passthrough_body("claude-opus-4-8"), {"anthropic-beta": "oauth-2025-04-20"}
+    )
+
+    assert result is None
+
+
+def test_strip_long_context_passthrough_suffix_must_be_trailing() -> None:
+    # A [1m] that is not the trailing token is not the long-context variant.
+    result = anthropic_oauth.strip_long_context_passthrough(
+        _passthrough_body("claude-[1m]-experimental"), {}
+    )
+
+    assert result is None
+
+
+def test_strip_long_context_passthrough_non_json_body_with_beta() -> None:
+    result = anthropic_oauth.strip_long_context_passthrough(
+        b"not-json", {"anthropic-beta": "context-1m-2025-08-07"}
+    )
+
+    assert result is not None
+    new_body, new_headers = result
+    assert new_body == b"not-json"  # unparseable body relays verbatim
+    assert "anthropic-beta" not in new_headers
+
+
+def test_strip_long_context_passthrough_non_json_body_without_beta_returns_none() -> None:
+    assert anthropic_oauth.strip_long_context_passthrough(b"not-json", {}) is None
+
+
+def test_strip_long_context_passthrough_does_not_mutate_input_headers() -> None:
+    headers = {"anthropic-beta": "context-1m-2025-08-07,tool-streaming"}
+    body = _passthrough_body("claude-opus-4-8[1m]")
+
+    anthropic_oauth.strip_long_context_passthrough(body, headers)
+
+    assert headers == {"anthropic-beta": "context-1m-2025-08-07,tool-streaming"}
