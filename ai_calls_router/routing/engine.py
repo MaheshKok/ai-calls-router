@@ -1,7 +1,7 @@
 """Routed call engine: serve a tool-result turn on a cheap tier model.
 
 routed_call rewrites the client's Anthropic request for the tier model
-(_prepare_routed_body) and serves it on one of two paths: providers with a
+(prepare_routed_body) and serves it on one of two paths: providers with a
 native Anthropic endpoint (DeepSeek) receive the body directly -- no LiteLLM
 conversion -- so consecutive tool-result turns keep byte-identical prefixes for
 the provider's prefix cache; every other provider goes through LiteLLM. The
@@ -118,14 +118,32 @@ def _clamp_max_tokens(body: JsonObject, tier_cfg: JsonObject, routed: JsonObject
             routed["max_tokens"] = tier_max
 
 
-def _prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
+# Opus accepts output_config.effort='xhigh'; Sonnet and other routed Anthropic
+# models reject it (HTTP 400, supported: high/low/max/medium), so a routed turn
+# carrying Claude Code's 'xhigh' setting fails open to premium. 'high' is the
+# nearest supported level and the cost-appropriate ceiling for a cheap tier.
+_UNSUPPORTED_ROUTED_EFFORT = "xhigh"
+_ROUTED_EFFORT_FALLBACK = "high"
+
+
+def _normalize_effort(body: JsonObject, routed: JsonObject) -> None:
+    """Downgrade the Opus-only 'xhigh' effort the routed tier model rejects."""
+    output_config = body.get("output_config")
+    if not isinstance(output_config, dict):
+        return
+    if output_config.get("effort") == _UNSUPPORTED_ROUTED_EFFORT:
+        routed["output_config"] = {**output_config, "effort": _ROUTED_EFFORT_FALLBACK}
+
+
+def prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
     """Rewrite a client request body for the tier model.
 
     Swaps in the tier model, removes the stream flag (routed calls are
     buffered), clamps max_tokens to the tier limit when the requested value
-    is missing, non-int, or larger, and strips thinking/redacted_thinking
-    blocks the routed provider cannot interpret. Assistant messages emptied
-    by the stripping are dropped. The input body is never mutated.
+    is missing, non-int, or larger, strips thinking/redacted_thinking blocks
+    the routed provider cannot interpret, and downgrades the Opus-only 'xhigh'
+    effort the routed model rejects. Assistant messages emptied by the
+    stripping are dropped. The input body is never mutated.
 
     Args:
         body: Anthropic-format request body from the client.
@@ -139,6 +157,7 @@ def _prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
     routed.pop("stream", None)
     _clamp_max_tokens(body, tier_cfg, routed)
     _strip_thinking_from_messages(body, routed)
+    _normalize_effort(body, routed)
     return routed
 
 
@@ -303,7 +322,7 @@ async def _serve_via_litellm(
         character delta when compression runs, or a no-op (path "none", zero
         chars saved) when it is disabled or unavailable.
     """
-    routed_body = _prepare_routed_body(body, tier_cfg)
+    routed_body = prepare_routed_body(body, tier_cfg)
     kwargs = completion_kwargs(routed_body, api_key)
     if compress:
         messages = kwargs.get("messages")
@@ -350,7 +369,7 @@ async def _serve_via_direct(
         "none", zero chars saved).
     """
     stats = shrink_stats.compute_shrink(path="none", before=body, after=body)
-    routed_body = _prepare_routed_body(body, tier_cfg)
+    routed_body = prepare_routed_body(body, tier_cfg)
     response = await anthropic_direct.direct_call(
         body=routed_body, tier_cfg=tier_cfg, api_key=api_key, client=client
     )

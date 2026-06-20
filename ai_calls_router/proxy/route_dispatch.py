@@ -21,8 +21,8 @@ from ai_calls_router._lib.responses_inbound import (
     responses_to_anthropic_response,
 )
 from ai_calls_router.accounting import savings, shrink_stats
-from ai_calls_router.proxy import chatgpt_oauth
-from ai_calls_router.routing import codex_direct
+from ai_calls_router.proxy import chatgpt_oauth, passthrough
+from ai_calls_router.routing import anthropic_oauth, codex_direct
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
 from ai_calls_router.routing.config_schema import (
@@ -365,6 +365,101 @@ async def try_oauth_responses_route(
     )
 
 
+async def try_anthropic_oauth_route(
+    decision: RouteDecision,
+    *,
+    adapter: ClientAdapter,
+    request_headers: Mapping[str, str],
+    request_path: str,
+    user_agent: str,
+    agent: str,
+    session: str,
+    client: httpx.AsyncClient | None = None,
+) -> RouteAttempt | None:
+    """Serve a claude_code cheap turn on Anthropic subscription OAuth.
+
+    Forwards the model-swapped Anthropic body to api.anthropic.com with the
+    client's inbound OAuth bearer so the turn draws the subscription's quota for
+    the tier model (e.g. Sonnet) instead of paying per token. Returns None when
+    the tier is not an Anthropic-OAuth Messages tier so non-matching tiers fall
+    through to the Codex paths and the LiteLLM engine.
+    """
+    if decision.credential.auth_mode != "oauth" or request_path != "/v1/messages":
+        return None
+    if not anthropic_oauth.is_anthropic_oauth_tier(decision.tier_cfg):
+        return None
+    started = time.monotonic()
+    result = await anthropic_oauth.messages_call(
+        body=decision.anthropic_body,
+        tier_cfg=decision.tier_cfg,
+        oauth_headers=passthrough.filter_request_headers(request_headers),
+        client=client,
+    )
+    duration = time.monotonic() - started
+    if result is None:
+        return routed_fallback_attempt(
+            response_guard_tools=[],
+            requested_model=decision.requested_model,
+            names=decision.names,
+            tier=decision.tier,
+        )
+    response_body, usage_values, shrink = result
+    response_guard_tools = routed_call.premium_tool_names_from_anthropic(
+        response_body, decision.settings, premium_tools=decision.premium_tools
+    )
+    if response_guard_tools:
+        return routed_fallback_attempt(
+            response_guard_tools=response_guard_tools,
+            requested_model=decision.requested_model,
+            names=decision.names,
+            tier=decision.tier,
+        )
+    tier_model = anthropic_oauth.native_model_id(decision.tier_cfg)
+    usage = routed_call.RouteUsage(
+        input_tokens=usage_values[0],
+        output_tokens=usage_values[1],
+        cache_read_tokens=usage_values[2],
+        cache_creation_tokens=usage_values[3],
+    )
+    await routed_call.record_route_outcome(
+        routed_call.RouteOutcome(
+            premium_model=decision.requested_model,
+            routed_model=tier_model,
+            tier_name=decision.tier,
+            tier_cfg=decision.tier_cfg,
+            tool_names=decision.names,
+            usage=usage,
+            request_path=request_path,
+            route="anthropic_oauth",
+            user_agent=user_agent,
+            agent=agent,
+            session_id=session,
+            elapsed=duration,
+            shrink=shrink,
+            request_id=logging_setup.current_request_id(),
+        )
+    )
+    client_body = (
+        {**response_body, "model": decision.requested_model}
+        if decision.requested_model
+        else response_body
+    )
+    return RouteAttempt(
+        response=_adapter_response(adapter, client_body, streaming=decision.streaming),
+        tier=decision.tier,
+        reason="routed",
+        model=tier_model,
+        premium_model=decision.requested_model,
+        tool_names=decision.names,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_creation_tokens=usage.cache_creation_tokens,
+        duration=duration,
+        shrink=shrink,
+    )
+
+
 async def try_native_or_oauth_route(
     decision: RouteDecision,
     *,
@@ -376,7 +471,19 @@ async def try_native_or_oauth_route(
     session: str,
     client: httpx.AsyncClient | None = None,
 ) -> RouteAttempt | None:
-    """Try native Codex and generic OAuth Responses routing."""
+    """Try Anthropic OAuth, native Codex, then generic OAuth Responses routing."""
+    anthropic_attempt = await try_anthropic_oauth_route(
+        decision,
+        adapter=adapter,
+        request_headers=request_headers,
+        request_path=request_path,
+        user_agent=user_agent,
+        agent=agent,
+        session=session,
+        client=client,
+    )
+    if anthropic_attempt is not None:
+        return anthropic_attempt
     codex_attempt = await try_codex_direct_route(
         body=decision.body,
         tier=decision.tier,

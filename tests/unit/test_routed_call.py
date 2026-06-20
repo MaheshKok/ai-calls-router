@@ -1,6 +1,6 @@
 """Spec-derived tests for the routing engine and its SSE synthesis.
 
-Contract under test: _prepare_routed_body swaps in the tier model, clamps
+Contract under test: prepare_routed_body swaps in the tier model, clamps
 max_tokens, and strips Claude-specific thinking blocks without mutating the
 input; escalates flags routed responses that call premium tools; routed_call
 serves a request on the tier provider with only the tier key, records honest
@@ -134,35 +134,35 @@ def _call(
 
 class TestPrepareRoutedBody:
     def test_model_swapped_to_tier_model(self) -> None:
-        routed = rc._prepare_routed_body(_request_body(), TIER_CFG)
+        routed = rc.prepare_routed_body(_request_body(), TIER_CFG)
         assert routed["model"] == CHEAP_MODEL
 
     def test_stream_flag_removed(self) -> None:
-        routed = rc._prepare_routed_body(_request_body(), TIER_CFG)
+        routed = rc.prepare_routed_body(_request_body(), TIER_CFG)
         assert "stream" not in routed
 
     def test_max_tokens_clamped_when_over_tier_limit(self) -> None:
         body = _request_body()
         body["max_tokens"] = 100_000
-        routed = rc._prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
+        routed = rc.prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
         assert routed["max_tokens"] == 4096
 
     def test_max_tokens_set_when_missing(self) -> None:
         body = _request_body()
         del body["max_tokens"]
-        routed = rc._prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
+        routed = rc.prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
         assert routed["max_tokens"] == 4096
 
     def test_max_tokens_below_tier_limit_preserved(self) -> None:
         body = _request_body()
         body["max_tokens"] = 100
-        routed = rc._prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
+        routed = rc.prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
         assert routed["max_tokens"] == 100
 
     @pytest.mark.parametrize("tier_max", [None, 0, -1, "4096", True])
     def test_unusable_tier_max_never_clamps(self, tier_max: object) -> None:
         body = _request_body()
-        routed = rc._prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": tier_max})
+        routed = rc.prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": tier_max})
         assert routed["max_tokens"] == 32000
 
     def test_thinking_blocks_stripped(self) -> None:
@@ -170,7 +170,7 @@ class TestPrepareRoutedBody:
         body["messages"][1]["content"].insert(
             0, {"type": "thinking", "thinking": "secret", "signature": "s"}
         )
-        routed = rc._prepare_routed_body(body, TIER_CFG)
+        routed = rc.prepare_routed_body(body, TIER_CFG)
         types = [b["type"] for b in routed["messages"][1]["content"]]
         assert "thinking" not in types
         assert "tool_use" in types
@@ -178,7 +178,7 @@ class TestPrepareRoutedBody:
     def test_redacted_thinking_blocks_stripped(self) -> None:
         body = _request_body()
         body["messages"][1]["content"].insert(0, {"type": "redacted_thinking", "data": "opaque"})
-        routed = rc._prepare_routed_body(body, TIER_CFG)
+        routed = rc.prepare_routed_body(body, TIER_CFG)
         types = [b["type"] for b in routed["messages"][1]["content"]]
         assert "redacted_thinking" not in types
 
@@ -191,12 +191,12 @@ class TestPrepareRoutedBody:
                 "content": [{"type": "thinking", "thinking": "only", "signature": "s"}],
             },
         )
-        routed = rc._prepare_routed_body(body, TIER_CFG)
+        routed = rc.prepare_routed_body(body, TIER_CFG)
         assert len(routed["messages"]) == 3
         assert all(msg.get("content") for msg in routed["messages"] if msg["role"] == "assistant")
 
     def test_string_content_messages_pass_through(self) -> None:
-        routed = rc._prepare_routed_body(_request_body(), TIER_CFG)
+        routed = rc.prepare_routed_body(_request_body(), TIER_CFG)
         assert routed["messages"][0] == {"role": "user", "content": "run ls"}
 
     def test_input_body_never_mutated(self) -> None:
@@ -205,7 +205,37 @@ class TestPrepareRoutedBody:
             0, {"type": "thinking", "thinking": "secret", "signature": "s"}
         )
         snapshot = copy.deepcopy(body)
-        rc._prepare_routed_body(body, TIER_CFG)
+        rc.prepare_routed_body(body, TIER_CFG)
+        assert body == snapshot
+
+    def test_xhigh_effort_downgraded_to_high(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        routed = rc.prepare_routed_body(body, TIER_CFG)
+        assert routed["output_config"]["effort"] == "high"
+
+    @pytest.mark.parametrize("effort", ["high", "medium", "low", "max"])
+    def test_supported_effort_levels_preserved(self, effort: str) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": effort}
+        routed = rc.prepare_routed_body(body, TIER_CFG)
+        assert routed["output_config"]["effort"] == effort
+
+    def test_other_output_config_keys_preserved_when_downgrading(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh", "format": {"type": "json"}}
+        routed = rc.prepare_routed_body(body, TIER_CFG)
+        assert routed["output_config"] == {"effort": "high", "format": {"type": "json"}}
+
+    def test_missing_output_config_not_added(self) -> None:
+        routed = rc.prepare_routed_body(_request_body(), TIER_CFG)
+        assert "output_config" not in routed
+
+    def test_effort_normalization_does_not_mutate_input(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        snapshot = copy.deepcopy(body)
+        rc.prepare_routed_body(body, TIER_CFG)
         assert body == snapshot
 
 
@@ -581,7 +611,7 @@ class TestRoutedCallDeepSeekDirect:
     def test_direct_path_prepares_body_and_strips_stream(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # _prepare_routed_body still runs: model swapped to the tier id, the
+        # prepare_routed_body still runs: model swapped to the tier id, the
         # stream flag dropped, max_tokens clamped to the tier ceiling.
         _, captured = _call_direct(monkeypatch, _direct_body())
         sent = captured["body"]
