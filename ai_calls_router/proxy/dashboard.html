@@ -177,15 +177,14 @@ function rowTotalInput(x) {
 }
 
 function hasVisibleRequestData(x) {
-  return rowTotalInput(x) > 0 || String(x.method || '').toUpperCase() === 'WS';
+  return rowTotalInput(x) > 0;
 }
 
 function buildRecentRows(data) {
   const rows = data.last_requests || [];
   // Skip rows whose total input is still 0: token usage is filled in by a
   // later accounting pass, so a fresh row would otherwise read as a real
-  // zero-input request and confuse the viewer. WebSocket route attempts do not
-  // have HTTP token accounting, so keep them visible by method.
+  // zero-input request and confuse the viewer.
   const scored = rows.filter(hasVisibleRequestData);
   const recentRows = scored.slice(0, 20);
   const rowHtml = recentRows.length ? recentRows.map((x) => {

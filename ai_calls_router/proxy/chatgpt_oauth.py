@@ -4,7 +4,7 @@ Hermes clients authenticate to the ChatGPT backend (``chatgpt.com/backend-api``)
 with a ChatGPT OAuth bearer and a ``chatgpt-account-id``. Both the premium
 passthrough path and the OAuth-tier routed serving path need to detect that auth
 and build the forwardable upstream headers. These helpers are pure (no transport
-state) so they can be shared without dragging in the HTTP or WebSocket layers.
+state) so they can be shared without dragging in the HTTP transport layer.
 """
 
 from __future__ import annotations
@@ -31,10 +31,6 @@ _HOP_HEADERS = frozenset(
         "host",
         "connection",
         "upgrade",
-        "sec-websocket-key",
-        "sec-websocket-version",
-        "sec-websocket-extensions",
-        "sec-websocket-protocol",
         "content-length",
         "content-encoding",
         "transfer-encoding",

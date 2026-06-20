@@ -103,18 +103,14 @@ def test_hop_by_hop_headers_are_stripped() -> None:
             "chatgpt-account-id": "acct_header",
             "host": "chatgpt.com",
             "connection": "keep-alive",
-            "upgrade": "websocket",
-            "sec-websocket-key": "abc",
-            "sec-websocket-version": "13",
+            "upgrade": "http/1.1",
             "authorization": "Bearer opaque",
             "content-type": "application/json",
         }
     )
     assert result is not None
     keys = {key.lower() for key, _ in result}
-    assert keys.isdisjoint(
-        {"host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version"}
-    )
+    assert keys.isdisjoint({"host", "connection", "upgrade"})
     assert {"authorization", "content-type"} <= keys
 
 
