@@ -275,7 +275,9 @@ async def responses_call(  # noqa: PLR0911 - fail-open routing declines to passt
                 len(orphans),
             )
             return None
-        payload, shrink = forward_compression.compress_responses(payload)
+        payload, shrink = forward_compression.compress_responses(
+            payload, enable_text_ml=bool(tier_cfg.get("text_ml_compression"))
+        )
         if auth_mode == "oauth":
             payload["stream"] = True
             payload.pop("max_output_tokens", None)

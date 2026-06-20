@@ -230,6 +230,62 @@ class TestCompressLitellmMessages:
         )
 
 
+class TestTextMlToggle:
+    """The enable_text_ml flag gates headroom's lossy ML plain-text compressor.
+
+    Contract: text-ML is off by default, so the wrapper passes
+    ``kompress_model="disabled"`` to headroom; opting a tier in omits that kwarg
+    so headroom's default (ML on) applies. Asserted through the fake compressor's
+    recorded kwargs so no real ML stack is needed.
+    """
+
+    def test_default_disables_text_ml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Omitting the flag must disable Kompress so merely installing the ML
+        # extra never changes behaviour for an un-opted-in tier.
+        fake = _FakeCompressor(lambda m: m)
+        monkeypatch.setattr(compression, "_load_compressor", lambda: fake)
+
+        compression.compress_litellm_messages(_openai_messages("log"), model="gpt-5.5")
+
+        assert fake.calls[0]["kompress_model"] == "disabled"
+
+    def test_explicit_false_disables_text_ml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _FakeCompressor(lambda m: m)
+        monkeypatch.setattr(compression, "_load_compressor", lambda: fake)
+
+        compression.compress_litellm_messages(
+            _openai_messages("log"), model="gpt-5.5", enable_text_ml=False
+        )
+
+        assert fake.calls[0]["kompress_model"] == "disabled"
+
+    def test_enabled_omits_kompress_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Opting in must NOT pass kompress_model, leaving headroom's default
+        # (ML on) in force. The key must be absent, not merely non-"disabled".
+        fake = _FakeCompressor(lambda m: m)
+        monkeypatch.setattr(compression, "_load_compressor", lambda: fake)
+
+        compression.compress_litellm_messages(
+            _openai_messages("log"), model="gpt-5.5", enable_text_ml=True
+        )
+
+        assert "kompress_model" not in fake.calls[0]
+
+    def test_toggle_does_not_disturb_model_and_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The flag must not perturb the other forwarded kwargs.
+        fake = _FakeCompressor(lambda m: m)
+        monkeypatch.setattr(compression, "_load_compressor", lambda: fake)
+
+        compression.compress_litellm_messages(
+            _openai_messages("log"), model="gpt-5.5", model_limit=999, enable_text_ml=True
+        )
+
+        call = fake.calls[0]
+        assert call["model"] == "gpt-5.5"
+        assert call["model_limit"] == 999
+        assert call["optimize"] is True
+
+
 class TestLoadCompressor:
     def test_returns_none_and_warns_once_when_headroom_absent(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture

@@ -26,7 +26,7 @@ _SHRUNK = "S"  # Stand-in compressed tool output, far shorter than any input.
 
 
 def _shrink_tool_messages(
-    messages: JsonArray, *, model: str, model_limit: int = 0
+    messages: JsonArray, *, model: str, model_limit: int = 0, enable_text_ml: bool = False
 ) -> tuple[JsonArray, ShrinkStats]:
     """Stub compressor: collapse every role=tool content to a 1-char string."""
     out: list[JsonObject] = []
@@ -43,7 +43,7 @@ def _shrink_tool_messages(
 
 
 def _identity(
-    messages: JsonArray, *, model: str, model_limit: int = 0
+    messages: JsonArray, *, model: str, model_limit: int = 0, enable_text_ml: bool = False
 ) -> tuple[JsonArray, ShrinkStats]:
     """Stub compressor that changes nothing (no tool output is shrinkable)."""
     return messages, ShrinkStats("none", 0, 0)
@@ -242,6 +242,66 @@ def test_openai_chat_replaces_messages_when_shrunk(monkeypatch: pytest.MonkeyPat
     new_body, stats = forward_compression.compress_openai_chat(body)
     assert new_body["messages"][1]["content"] == _SHRUNK
     assert stats.chars_saved > 0
+
+
+# ── enable_text_ml flag forwarding ─────────────────────────────────────────
+
+
+def _recording_compressor() -> tuple[object, list[bool]]:
+    """Build an identity compressor that records each enable_text_ml it sees."""
+    seen: list[bool] = []
+
+    def _record(
+        messages: JsonArray, *, model: str, model_limit: int = 0, enable_text_ml: bool = False
+    ) -> tuple[JsonArray, ShrinkStats]:
+        seen.append(enable_text_ml)
+        return messages, ShrinkStats("none", 0, 0)
+
+    return _record, seen
+
+
+@pytest.mark.parametrize(
+    ("builder", "request_path"),
+    [
+        (lambda: _anthropic_body(("call_1", "x" * 4000)), "/v1/messages"),
+        (lambda: _responses_body(("call_1", "x" * 4000)), "/v1/responses"),
+    ],
+)
+def test_forward_body_threads_enable_text_ml_true(
+    monkeypatch: pytest.MonkeyPatch, *, builder: object, request_path: str
+) -> None:
+    # An opted-in tier must reach the headroom wrapper with enable_text_ml=True
+    # so its lossy ML text compressor runs; default-off would silently disable it.
+    record, seen = _recording_compressor()
+    _patch_compressor(monkeypatch, record)
+    raw = json.dumps(builder()).encode()  # type: ignore[operator]
+    forward_compression.compress_forward_body(
+        raw, request_path=request_path, upstream="https://chatgpt.com", enable_text_ml=True
+    )
+    assert seen == [True]
+
+
+def test_forward_body_defaults_enable_text_ml_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Premium passthrough (orchestrator) passes no flag; the wrapper must see
+    # False so installing the ML extra never changes lossless passthrough.
+    record, seen = _recording_compressor()
+    _patch_compressor(monkeypatch, record)
+    raw = json.dumps(_responses_body(("call_1", "x" * 4000))).encode()
+    forward_compression.compress_forward_body(
+        raw, request_path="/v1/responses", upstream="https://chatgpt.com"
+    )
+    assert seen == [False]
+
+
+def test_compress_responses_forwards_enable_text_ml(monkeypatch: pytest.MonkeyPatch) -> None:
+    # codex_direct calls compress_responses directly with the tier flag; verify
+    # that entry point forwards it (not only the compress_forward_body wrapper).
+    record, seen = _recording_compressor()
+    _patch_compressor(monkeypatch, record)
+    forward_compression.compress_responses(
+        _responses_body(("call_1", "x" * 4000)), enable_text_ml=True
+    )
+    assert seen == [True]
 
 
 # ── pure helpers ───────────────────────────────────────────────────────────

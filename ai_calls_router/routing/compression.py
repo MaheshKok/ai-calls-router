@@ -37,8 +37,20 @@ class _Compressor(Protocol):
     """Headroom compression callable shape used by this module."""
 
     def __call__(
-        self, messages: JsonArray, *, model: str, model_limit: int, optimize: bool
+        self,
+        messages: JsonArray,
+        *,
+        model: str,
+        model_limit: int,
+        optimize: bool,
+        **kwargs: object,
     ) -> _CompressResult: ...
+
+
+# Sentinel passed to headroom as ``kompress_model`` to skip its ML (Kompress)
+# plain-text compressor. Lossless compressors (SmartCrusher, code, log, diff,
+# search, html) still run; only the lossy ModernBERT token-dropping stage is off.
+_DISABLE_TEXT_ML = "disabled"
 
 
 @functools.lru_cache(maxsize=1)
@@ -89,18 +101,21 @@ def _messages_chars(messages: JsonArray) -> int:
 
 
 def compress_litellm_messages(
-    messages: JsonArray, *, model: str, model_limit: int = DEFAULT_MODEL_LIMIT
+    messages: JsonArray,
+    *,
+    model: str,
+    model_limit: int = DEFAULT_MODEL_LIMIT,
+    enable_text_ml: bool = False,
 ) -> tuple[JsonArray, ShrinkStats]:
     """Compress OpenAI-format messages with headroom's default policy.
 
     Runs on the messages after the Anthropic-to-OpenAI conversion, where
-    headroom's content router is effective. No ``config`` override is passed, so
-    headroom's defaults apply: coding-agent tool output stays verbatim and
-    user/system messages stay protected. Savings are measured as the
-    string-content character delta and returned as a ShrinkStats so they flow
-    through the existing accounting plumbing. Headroom also exposes exact token
-    counts on its ``CompressResult``; the character delta is kept here to match
-    the dashboard's existing units.
+    headroom's content router is effective. Headroom's other defaults apply:
+    coding-agent tool output stays verbatim and user/system messages stay
+    protected. Savings are measured as the string-content character delta and
+    returned as a ShrinkStats so they flow through the existing accounting
+    plumbing. Headroom also exposes exact token counts on its ``CompressResult``;
+    the character delta is kept here to match the dashboard's existing units.
 
     Best-effort: when headroom-ai is not installed, or compression raises, the
     input messages are returned unchanged with a no-op (``"none"``) stat.
@@ -109,6 +124,11 @@ def compress_litellm_messages(
         messages: OpenAI-format chat messages to compress (never mutated).
         model: Provider model id, used by headroom for tokenizer/limit selection.
         model_limit: Token budget passed to ``headroom.compress``.
+        enable_text_ml: When False (default), headroom's lossy ML plain-text
+            compressor (Kompress) is disabled so only the lossless content
+            compressors run; installing the ML extra never changes behaviour on
+            its own. Set True per tier to opt that tier's prose tool output into
+            ML compression.
 
     Returns:
         A pair of the (possibly new) message list and a ShrinkStats. The list is
@@ -119,8 +139,9 @@ def compress_litellm_messages(
     before = _messages_chars(messages)
     if compress is None:
         return messages, ShrinkStats(path="none", chars_before=before, chars_after=before)
+    extra: dict[str, object] = {} if enable_text_ml else {"kompress_model": _DISABLE_TEXT_ML}
     try:
-        result = compress(messages, model=model, model_limit=model_limit, optimize=True)
+        result = compress(messages, model=model, model_limit=model_limit, optimize=True, **extra)
     except Exception:
         logger.exception("headroom compression failed; sending messages uncompressed")
         return messages, ShrinkStats(path="none", chars_before=before, chars_after=before)

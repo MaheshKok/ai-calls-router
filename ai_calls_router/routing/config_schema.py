@@ -58,6 +58,12 @@ class TierConfig(_SchemaModel):
     # only premium Opus accepts it (Sonnet returns HTTP 400). Premium passthrough
     # is never routed and keeps its own level, set in the client, independently.
     effort: Literal["low", "medium", "high", "max"] | None = None
+    # Opt this tier's routed turns into headroom's lossy ML plain-text compressor
+    # (Kompress). Off by default: the lossless content compressors always run, so
+    # installing the ML extra never changes behaviour until a tier sets this True.
+    # Leave False for tiers serving coding agents where dropping prose tokens from
+    # tool output could corrupt context.
+    text_ml_compression: bool = False
 
 
 class ServerConfig(_SchemaModel):

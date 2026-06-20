@@ -59,6 +59,14 @@ settings:
 #   client), so there is nothing to sync. Omit to leave the client's level
 #   as-is, downgrading only the Opus-only xhigh to high as a safety net. Only
 #   Anthropic routed models read effort; DeepSeek/OpenAI tiers ignore it.
+#
+# text_ml_compression (optional, per tier): set true to also run headroom's
+#   lossy ML plain-text compressor (Kompress) on this tier's tool-output text.
+#   Off by default -- the lossless compressors (JSON tables, code, diffs, logs)
+#   always run, so this only adds prose-token shrinking. Requires the ML extra
+#   (`pip install ai-calls-router[compression-ml]`); without it the flag is a
+#   silent no-op. Leave false for tiers serving coding agents, where dropping
+#   prose tokens from tool output can corrupt the model's context.
 agents:
   claude_code:
     upstream: https://api.anthropic.com

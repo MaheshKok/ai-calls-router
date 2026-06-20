@@ -359,7 +359,9 @@ async def _serve_via_litellm(
             stats = shrink_stats.compute_shrink(path="none", before=body, after=body)
         else:
             kwargs["messages"], stats = compress_litellm_messages(
-                cast("JsonArray", messages), model=model
+                cast("JsonArray", messages),
+                model=model,
+                enable_text_ml=bool(tier_cfg.get("text_ml_compression")),
             )
     else:
         stats = shrink_stats.compute_shrink(path="none", before=body, after=body)

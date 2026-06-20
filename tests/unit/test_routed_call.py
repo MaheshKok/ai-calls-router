@@ -529,6 +529,47 @@ class TestRoutedCall:
         assert response is not None
         assert not ledger_file.exists()
 
+    def _route_capturing_compress_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch, *, tier_cfg: dict[str, object]
+    ) -> dict[str, object]:
+        """Route one turn and return the kwargs the engine handed the compressor."""
+        seen: dict[str, object] = {}
+
+        def _recorder(messages: list[dict[str, object]], **kwargs: object) -> object:
+            seen.update(kwargs)
+            return SimpleNamespace(messages=messages)
+
+        monkeypatch.setattr(compression, "_load_compressor", lambda: _recorder)
+        fake = FakeLitellm(_fake_response())
+        monkeypatch.setattr(rc, "load_litellm", lambda: fake)
+        asyncio.run(
+            rc.routed_call(
+                body=_request_body(),
+                tier_name="fast",
+                tier_cfg=tier_cfg,
+                api_key="k",
+                settings=SETTINGS,
+                premium_tools=SETTINGS["premium_tools"],
+            )
+        )
+        return seen
+
+    def test_tier_text_ml_flag_opts_into_kompress(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # text_ml_compression=True must reach the compressor as the absence of a
+        # kompress_model override, so headroom's ML text stage runs for this tier.
+        seen = self._route_capturing_compress_kwargs(
+            monkeypatch, tier_cfg={"model": CHEAP_MODEL, "text_ml_compression": True}
+        )
+        assert "kompress_model" not in seen
+
+    def test_tier_without_flag_keeps_text_ml_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A tier that omits the flag (the default) must disable Kompress, so
+        # installing the ML extra never silently turns lossy text compression on.
+        seen = self._route_capturing_compress_kwargs(monkeypatch, tier_cfg={"model": CHEAP_MODEL})
+        assert seen["kompress_model"] == "disabled"
+
 
 # --- DeepSeek direct path -------------------------------------------------
 

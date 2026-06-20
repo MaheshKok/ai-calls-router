@@ -41,6 +41,11 @@ implicit-any = "error"
 # import is guarded, so without this extra installed compression is a no-op and
 # the router still serves every request.
 compression = ["headroom-ai>=0.25"]
+# Lossy ML plain-text compressor (Kompress) for tiers that set
+# text_ml_compression=True. ONNX-only inference path: no torch needed, unlike
+# headroom-ai[ml]. acr imports neither directly -- these are headroom's runtime
+# deps, declared here as a one-line install target (deptry DEP002-ignored below).
+compression-ml = ["headroom-ai>=0.25", "onnxruntime>=1.20", "transformers>=4.40,<6"]
 dev = [
     "bandit>=1.7",
     "build>=1.2",
@@ -210,6 +215,11 @@ extend_exclude = ["tests", ".venv", "build", "dist", "scripts"]
 known_first_party = ["ai_calls_router"]
 optional_dependencies_dev_groups = ["dev"]
 package_module_name_map = { "headroom-ai" = "headroom" }
+
+[tool.deptry.per_rule_ignores]
+# onnxruntime + transformers back headroom's optional ML text compressor; acr
+# never imports them directly, so they are intentionally "unused" to deptry.
+DEP002 = ["onnxruntime", "transformers"]
 
 [tool.interrogate]
 exclude = ["tests", "build", "dist", ".venv"]
