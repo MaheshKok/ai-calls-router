@@ -626,3 +626,76 @@ class TestBootstrapPerRowShrink:
         live_row = live.snapshot()["last_requests"][0]
         replay_row = replay.snapshot()["last_requests"][0]
         assert set(replay_row) == set(live_row)
+
+
+class TestRoutedByModelCounter:
+    """incr_routed_model maintains a lifetime routed-call tally keyed by routed
+    model. The snapshot exposes it under "routed_by_model"; bootstrap seeds it
+    from the savings ledger so the tally survives restarts."""
+
+    def test_fresh_metrics_report_empty_model_tally(self) -> None:
+        assert _Metrics().snapshot()["routed_by_model"] == {}
+
+    def test_increment_counts_per_model(self) -> None:
+        m = _Metrics()
+        m.incr_routed_model(model="deepseek-chat")
+        m.incr_routed_model(model="deepseek-chat")
+        m.incr_routed_model(model="gpt-5.4-mini")
+        assert m.snapshot()["routed_by_model"] == {
+            "deepseek-chat": 2,
+            "gpt-5.4-mini": 1,
+        }
+
+    def test_blank_model_buckets_under_unknown(self) -> None:
+        m = _Metrics()
+        m.incr_routed_model(model="")
+        m.incr_routed_model(model="   ")
+        assert m.snapshot()["routed_by_model"] == {"unknown": 2}
+
+    def test_bootstrap_seeds_tally_from_ledger(self) -> None:
+        # Two records on deepseek-chat, one on gpt-5.4-mini -> {2, 1}. Counts
+        # come from the ledger's per-model request totals, not row order.
+        records = [
+            _make_record(ts=1718000000, routed_model="deepseek-chat", saved_usd=0.0),
+            _make_record(ts=1718000001, routed_model="deepseek-chat", saved_usd=0.0),
+            _make_record(ts=1718000002, routed_model="gpt-5.4-mini", saved_usd=0.0),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+            ledger_path = Path(f.name)
+
+        try:
+            m = _Metrics()
+            m.bootstrap(ledger_path=ledger_path, max_recent=10)
+            assert m.snapshot()["routed_by_model"] == {
+                "deepseek-chat": 2,
+                "gpt-5.4-mini": 1,
+            }
+        finally:
+            ledger_path.unlink(missing_ok=True)
+
+    def test_bootstrap_then_live_increment_accumulates(self) -> None:
+        # A live routed call after bootstrap must add to the seeded count, not
+        # replace it: the restart-surviving tally keeps growing in-process.
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(
+                json.dumps(_make_record(ts=1718000000, routed_model="deepseek-chat", saved_usd=0.0))
+                + "\n"
+            )
+            ledger_path = Path(f.name)
+
+        try:
+            m = _Metrics()
+            m.bootstrap(ledger_path=ledger_path, max_recent=10)
+            m.incr_routed_model(model="deepseek-chat")
+            assert m.snapshot()["routed_by_model"]["deepseek-chat"] == 2
+        finally:
+            ledger_path.unlink(missing_ok=True)
+
+    def test_snapshot_tally_is_detached_from_live_updates(self) -> None:
+        m = _Metrics()
+        m.incr_routed_model(model="deepseek-chat")
+        snap = m.snapshot()
+        m.incr_routed_model(model="deepseek-chat")
+        assert snap["routed_by_model"] == {"deepseek-chat": 1}

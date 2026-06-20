@@ -350,12 +350,14 @@ function buildRecentRows(data) {
 }
 
 function buildModelRows(data) {
-  const rows = data.last_requests || [];
+  // Lifetime routed-call counts per model from the backend counter
+  // (bootstrapped from the savings ledger, survives restarts). Collapse the
+  // raw model id to its short name for display, summing any ids that share one.
+  const raw = data.routed_by_model || {};
   const buckets = {};
-  for (const r of rows) {
-    if ((r.route || '').trim() !== 'routed') continue;
-    const model = shortModel(r.model) || 'unknown';
-    buckets[model] = (buckets[model] || 0) + 1;
+  for (const model of Object.keys(raw)) {
+    const label = shortModel(model) || 'unknown';
+    buckets[label] = (buckets[label] || 0) + Number(raw[model] || 0);
   }
   const keys = Object.keys(buckets).sort((a, b) => buckets[b] - buckets[a]);
   const html = ['<h2>routed calls per model</h2>'];

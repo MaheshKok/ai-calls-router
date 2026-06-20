@@ -448,6 +448,7 @@ async def record_route_outcome(outcome: RouteOutcome) -> None:
         cache_creation=usage.cache_creation_tokens,
     )
     mtr.add_shrink(chars_before=shrink.chars_before, chars_after=shrink.chars_after)
+    mtr.incr_routed_model(model=outcome.routed_model)
     mtr.record_request(
         method=outcome.method,
         path=outcome.request_path,

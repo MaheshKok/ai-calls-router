@@ -387,6 +387,10 @@ class _Metrics:
         self._shrink_chars_after = 0
         # Latest per-request metadata for the recent-activity table
         self._last_requests: list[JsonObject] = []
+        # Lifetime routed-call count keyed by routed model. Bootstrapped from
+        # the savings ledger at startup, then incremented per routed serve, so
+        # the count survives restarts and reflects all-time routed traffic.
+        self._routed_by_model: dict[str, int] = {}
 
     # ── counters ──────────────────────────────────────────────────────
 
@@ -413,6 +417,17 @@ class _Metrics:
     def incr_fallback(self) -> None:
         with self._lock:
             self._fallback_requests += 1
+
+    def incr_routed_model(self, *, model: str) -> None:
+        """Increment the lifetime routed-call counter for one routed model.
+
+        Args:
+            model: The routed model identifier (e.g. "deepseek/deepseek-chat").
+                Blank values are bucketed under "unknown".
+        """
+        name = (model or "").strip() or "unknown"
+        with self._lock:
+            self._routed_by_model[name] = self._routed_by_model.get(name, 0) + 1
 
     # ── token accumulation ─────────────────────────────────────────────
 
@@ -583,10 +598,15 @@ class _Metrics:
             return
         summary = savings_ledger.aggregate(entries)
         totals = cast("savings_ledger.Bucket", summary["totals"])
+        by_model = cast("dict[str, savings_ledger.Bucket]", summary["by_model"])
         recent = db_recent or [_recent_entry_from_ledger_record(rec) for rec in entries]
         recent.sort(key=lambda item: jsonnum.int_value(item.get("ts", 0)), reverse=True)
         with self._lock:
             self._routed_requests += int(totals["requests"])
+            for model_name, bucket in by_model.items():
+                self._routed_by_model[model_name] = self._routed_by_model.get(model_name, 0) + int(
+                    bucket["requests"]
+                )
             self._routed_input_tokens += int(totals["input_tokens"])
             self._routed_output_tokens += int(totals["output_tokens"])
             self._routed_cache_read_tokens += int(totals["cache_read_input_tokens"])
@@ -692,6 +712,7 @@ class _Metrics:
                         "est_tokens_saved": compression.est_tokens_saved(),
                     },
                     "last_requests": copy.deepcopy(self._last_requests[:50]),
+                    "routed_by_model": dict(self._routed_by_model),
                 },
             )
 
