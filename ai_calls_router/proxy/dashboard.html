@@ -88,7 +88,7 @@ td.empty { color:#484f58; text-align:center; padding: 24px;}
     <div class="table-header"><h2>recent requests</h2><span class="status" id="status">loading</span></div>
     <table>
       <thead id="table-head">
-        <tr><th>date/time</th><th>wire</th><th>model</th><th>tools</th><th>total input</th><th>cache miss</th><th>output</th><th>shrunk</th><th>ms</th><th>agent</th><th>session</th></tr>
+        <tr><th>date/time</th><th>wire</th><th>model</th><th>tools</th><th>input</th><th>cache miss</th><th>output</th><th>saved</th><th>ms</th><th>agent</th><th>session</th></tr>
       </thead>
       <tbody id="rows"><tr><td colspan="11" class="empty">no requests yet</td></tr></tbody>
     </table>
@@ -114,7 +114,7 @@ function shrunkCell(x) {
   const after = Number(x.shrink_chars_after || 0);
   if (before <= 0) return '--';
   const saved = Math.max(before - after, 0);
-  return num(saved) + ' (' + pct(saved / before * 100) + ')';
+  return pct(saved / before * 100);
 }
 function agentKey(agent) {
   const a = (agent || '').trim();
