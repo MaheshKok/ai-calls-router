@@ -112,6 +112,8 @@ async def test_messages_call_swaps_model_strips_thinking_and_forwards_oauth() ->
                 "anthropic-version": "2023-06-01",
                 "anthropic-beta": "oauth-2025-04-20",
                 "Content-Type": "text/plain",
+                "Cookie": "session=secret",
+                "X-Forwarded-For": "203.0.113.7",
             },
             client=client,
         )
@@ -141,6 +143,10 @@ async def test_messages_call_swaps_model_strips_thinking_and_forwards_oauth() ->
     assert captured[0].headers["anthropic-version"] == "2023-06-01"
     assert captured[0].headers["anthropic-beta"] == "oauth-2025-04-20"
     assert captured[0].headers["content-type"] == "application/json"
+    # Allowlist contract: client headers outside the OAuth set never reach
+    # api.anthropic.com, so unrelated/sensitive headers cannot leak upstream.
+    assert "cookie" not in captured[0].headers
+    assert "x-forwarded-for" not in captured[0].headers
 
 
 @pytest.mark.asyncio

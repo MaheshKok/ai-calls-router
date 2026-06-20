@@ -378,11 +378,12 @@ async def _serve_via_direct(
 ) -> tuple[JsonObject | None, shrink_stats.ShrinkStats]:
     """Serve a turn directly on the provider's native Anthropic endpoint.
 
-    Skips LiteLLM conversion and sends the body unmodified so consecutive
-    tool-result turns keep byte-identical prefixes, letting the provider's
-    prefix cache do the work. The router applies no compression or reduction on
-    this path: DeepSeek's input is never shrunk, preserving cache stability, and
-    any token reduction is delegated to the upstream Headroom layer.
+    Skips LiteLLM conversion. The body is prepared for the tier by
+    prepare_routed_body (model swap, max_tokens clamp, thinking strip, effort
+    normalization) but never compressed or shrunk, so consecutive tool-result
+    turns keep byte-identical prefixes and the provider's prefix cache does the
+    work. DeepSeek's input is never reduced, preserving cache stability; any
+    token reduction is delegated to the upstream Headroom layer.
 
     Args:
         body: Anthropic-format request body from the client.

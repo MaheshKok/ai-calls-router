@@ -113,19 +113,28 @@ def _without_long_context_beta(value: str) -> str:
     return ",".join(kept)
 
 
-def _forward_headers(oauth_headers: Mapping[str, str]) -> dict[str, str]:
-    """Return upstream headers from already-filtered client OAuth headers.
+# Only these client headers are forwarded to api.anthropic.com. An explicit
+# allowlist keeps unrelated client headers (cookies, x-forwarded-*, any other
+# auth) from leaking upstream; the routed OAuth turn needs only the subscription
+# bearer, the API version, and the anthropic-beta flags. Content-Type is set
+# from the re-serialized body, so it is never taken from the client.
+_FORWARDABLE_OAUTH_HEADERS = frozenset({"authorization", "anthropic-version", "anthropic-beta"})
 
-    Forwards the OAuth bearer, anthropic-version, and remaining anthropic-beta
-    tokens verbatim, but drops the 1M-context beta: a routed cheap turn must not
-    opt into long context, which the subscription rejects for the routed model
-    as a credit request (HTTP 429) instead of covering it. The JSON content type
-    is forced for the re-serialized body.
+
+def _forward_headers(oauth_headers: Mapping[str, str]) -> dict[str, str]:
+    """Return the allowlisted upstream headers for a routed OAuth turn.
+
+    Only the OAuth bearer, anthropic-version, and anthropic-beta tokens are
+    forwarded; every other client header is dropped so nothing unrelated reaches
+    api.anthropic.com. The 1M-context beta is stripped from anthropic-beta: a
+    routed cheap turn must not opt into long context, which the subscription
+    rejects for the routed model as a credit request (HTTP 429) instead of
+    covering it. The JSON content type is forced for the re-serialized body.
     """
     headers: dict[str, str] = {}
     for key, value in oauth_headers.items():
         lowered = key.lower()
-        if lowered == "content-type":
+        if lowered not in _FORWARDABLE_OAUTH_HEADERS:
             continue
         if lowered == "anthropic-beta":
             filtered = _without_long_context_beta(value)
@@ -178,7 +187,13 @@ async def messages_call(
         _payload_effort(payload),
     )
     timeout_value = tier_cfg.get("timeout", DEFAULT_TIMEOUT_SECONDS)
-    timeout = timeout_value if isinstance(timeout_value, int | float) else DEFAULT_TIMEOUT_SECONDS
+    timeout = (
+        timeout_value
+        if isinstance(timeout_value, int | float)
+        and not isinstance(timeout_value, bool)
+        and timeout_value > 0
+        else DEFAULT_TIMEOUT_SECONDS
+    )
     own_client = client is None
     http = client if client is not None else httpx.AsyncClient(timeout=timeout)
     try:

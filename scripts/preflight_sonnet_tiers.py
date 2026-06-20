@@ -47,7 +47,7 @@ def main() -> int:
         cred_mode = cred.auth_mode if cred else None
         print(f"  [{marker}] {name}: native={native} auth={cred_mode}")
         if not ok:
-            failures.append(f"{name}: native={native} cred={cred}")
+            failures.append(f"{name}: native={native} auth={cred_mode}")
 
     if failures:
         print("\nPREFLIGHT FAILED:")
