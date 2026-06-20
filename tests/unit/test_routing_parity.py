@@ -1,7 +1,8 @@
 """Cross-wire routing parity tests.
 
-The router accepts Anthropic Messages and OpenAI Chat Completions wires, but
-should make the same tier decision for the same logical tool-result turn.
+The router accepts Anthropic Messages, OpenAI Chat Completions, and OpenAI
+Responses wires, but should make the same tier decision for the same logical
+tool-result turn.
 """
 
 from __future__ import annotations
@@ -60,6 +61,21 @@ def _chat_body(tool_name: str) -> dict[str, object]:
     }
 
 
+def _responses_body(tool_name: str) -> dict[str, object]:
+    return {
+        "model": "gpt-test",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": tool_name,
+                "arguments": "{}",
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        ],
+    }
+
+
 @pytest.mark.parametrize(
     ("tool_name", "expected_tier"),
     [("exec_command", "fast"), ("apply_patch", "premium")],
@@ -68,6 +84,7 @@ def test_tool_detection_parity_across_wires(tool_name: str, expected_tier: str) 
     cases = [
         ("/v1/messages", "claude_code", _anthropic_body(tool_name)),
         ("/v1/chat/completions", "hermes", _chat_body(tool_name)),
+        ("/v1/responses", "hermes", _responses_body(tool_name)),
     ]
 
     decisions: list[tuple[list[str], str]] = []
@@ -77,7 +94,7 @@ def test_tool_detection_parity_across_wires(tool_name: str, expected_tier: str) 
         names = adapter.extract_pending_tools(body)
         decisions.append((names, decide.tier_for_tools(names, ROUTES, group=group)))
 
-    assert decisions == [([tool_name], expected_tier)] * 2
+    assert decisions == [([tool_name], expected_tier)] * 3
 
 
 def test_direct_module_contains_no_decision_logic() -> None:
@@ -86,9 +103,15 @@ def test_direct_module_contains_no_decision_logic() -> None:
     direct_py = Path(__file__).resolve().parents[2] / "ai_calls_router" / "routing" / "direct.py"
     tree = ast.parse(direct_py.read_text(encoding="utf-8"))
     imports_decide = any(
-        isinstance(node, ast.ImportFrom)
-        and node.module == "ai_calls_router.routing"
-        and any(alias.name == "decide" for alias in node.names)
+        (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "ai_calls_router.routing"
+            and any(alias.name == "decide" for alias in node.names)
+        )
+        or (
+            isinstance(node, ast.Import)
+            and any(alias.name == "ai_calls_router.routing.decide" for alias in node.names)
+        )
         for node in ast.walk(tree)
     )
     suspicious_functions = {

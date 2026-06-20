@@ -141,6 +141,7 @@ def test_premium_passthrough_leaves_non_array_output_byte_identical(
             "/v1/messages", content=raw, headers={"content-type": "application/json"}
         )
         assert response.status_code == 200
+        assert len(upstream.requests) == 1
         forwarded = upstream.requests[0].content.decode("utf-8")
         assert forwarded == raw
 
@@ -195,6 +196,7 @@ def test_excluded_file_tool_output_is_never_compressed(
             "/v1/messages", content=raw, headers={"content-type": "application/json"}
         )
         assert response.status_code == 200
+        assert len(upstream.requests) == 1
         forwarded = upstream.requests[0].content.decode("utf-8")
         assert forwarded == raw
         assert "[150]{" not in forwarded
