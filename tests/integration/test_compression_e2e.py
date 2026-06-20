@@ -1,12 +1,13 @@
 """End-to-end proof that forward compression reaches the wire and the dashboard.
 
-Drives the real ASGI app: a premium-passthrough turn whose earlier Bash tool
+Drives the real ASGI app: a premium-passthrough turn whose earlier custom-tool
 outputs are large JSON arrays is sent through ``/v1/messages``. headroom never
-compresses the Read/Edit/Grep/Glob/Write file tools (their outputs are exact
-reference data), but Bash and other tools are fair game -- so the mock upstream
-must receive a table-compressed body, and the ``/metrics`` snapshot that feeds
-the dashboard must report the realized character saving. Skipped when the
-optional ``headroom`` extra is absent, since compression is best-effort.
+compresses its default-excluded coding tools (Bash/Read/Edit/Grep/Glob/Write --
+their outputs are exact reference data), but a custom tool like ``search_files``
+is fair game -- so the mock upstream must receive a table-compressed body, and
+the ``/metrics`` snapshot that feeds the dashboard must report the realized
+character saving. Skipped when the optional ``headroom`` extra is absent, since
+compression is best-effort.
 """
 
 from __future__ import annotations
@@ -50,20 +51,21 @@ def _json_array(n: int) -> str:
     )
 
 
-def _premium_body(bash_outputs: list[str]) -> dict[str, object]:
-    """Build Bash tool turns carrying ``bash_outputs``, then a pending Edit turn.
+def _premium_body(tool_outputs: list[str]) -> dict[str, object]:
+    """Build search_files tool turns carrying ``tool_outputs``, then a pending Edit.
 
-    Bash outputs are compressible (not in headroom's file-tool exclude set); the
-    trailing Edit tool_use makes the turn escalate to premium passthrough, which
-    is the forward-compression path under test.
+    ``search_files`` is a custom tool, so its outputs are compressible (unlike the
+    default-excluded Bash/Read/Edit/Grep/Glob/Write coding tools); the trailing
+    Edit tool_use makes the turn escalate to premium passthrough, which is the
+    forward-compression path under test.
     """
     messages: list[dict[str, object]] = [{"role": "user", "content": "run the suite"}]
-    for i, out in enumerate(bash_outputs):
+    for i, out in enumerate(tool_outputs):
         cid = f"b{i}"
         messages.append(
             {
                 "role": "assistant",
-                "content": [{"type": "tool_use", "id": cid, "name": "Bash", "input": {}}],
+                "content": [{"type": "tool_use", "id": cid, "name": "search_files", "input": {}}],
             }
         )
         messages.append(
@@ -124,7 +126,7 @@ def test_premium_passthrough_compresses_json_array_and_records_it(
 def test_premium_passthrough_leaves_non_array_output_byte_identical(
     *, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
 ) -> None:
-    # Plain text Bash output is not array-shaped -> SmartCrusher passes through,
+    # Plain text tool output is not array-shaped -> SmartCrusher passes through,
     # so the forwarded body must stay byte-identical (no needless cache break).
     body = _premium_body(["just some plain text output, nothing to crush here"])
     raw = json.dumps(body)
