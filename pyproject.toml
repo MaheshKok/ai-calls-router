@@ -136,6 +136,10 @@ extend-select = ["ANN401"]
 max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
+"vulture_whitelist.py" = [
+    "B018",  # bare names ARE the vulture allowlist's reference mechanism
+    "F821",  # names are intentionally undefined; only their AST presence matters
+]
 "tests/**/*.py" = [
     "TC001", "TC002", "TC003",   # type-checking imports in tests are fine
     "ARG001", "ARG002", "ARG005", # unused args in test fixtures/mocks
@@ -202,9 +206,9 @@ exclude_dirs = ["tests", ".venv", "build", "dist"]
 skips = ["B404", "B603", "B607", "B101"]  # subprocess + assert for type narrowing
 
 [tool.deptry]
-extend_exclude = ["tests", ".venv", "build", "dist"]
+extend_exclude = ["tests", ".venv", "build", "dist", "scripts"]
 known_first_party = ["ai_calls_router"]
-pep621_dev_dependency_groups = ["dev"]
+optional_dependencies_dev_groups = ["dev"]
 package_module_name_map = { "headroom-ai" = "headroom" }
 
 [tool.interrogate]

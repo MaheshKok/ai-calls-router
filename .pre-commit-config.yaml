@@ -50,5 +50,19 @@ repos:
         types: [python]
         pass_filenames: false
         stages: [pre-commit]
+      - id: deptry
+        name: deptry dependency drift check
+        entry: .venv/bin/python -m deptry .
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: vulture
+        name: vulture dead code check (min-confidence 80)
+        entry: .venv/bin/python -m vulture ai_calls_router vulture_whitelist.py --min-confidence 80
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
   # flake8/wemake removed — cognitive complexity via Ruff C901 (mccabe)
   # docstring-outdated detection via Ruff D417 (pydocstyle: args-match-signature)
