@@ -19,6 +19,13 @@ if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonValue
 
 _CHATGPT_ACCOUNT_CLAIM = "https://api.openai.com/auth.chatgpt_account_id"
+# Hop-by-hop headers plus body-framing headers. The framing headers
+# (content-length, content-encoding, transfer-encoding) describe the original
+# client body; every consumer of these headers re-serializes the body (the
+# Codex direct path posts json=payload, passthrough rebuilds via build_request),
+# so a forwarded content-length over-declares the new body and the upstream send
+# fails with "Too little data for declared Content-Length". httpx recomputes the
+# correct content-length from the actual payload once the stale one is gone.
 _HOP_HEADERS = frozenset(
     {
         "host",
@@ -28,6 +35,9 @@ _HOP_HEADERS = frozenset(
         "sec-websocket-version",
         "sec-websocket-extensions",
         "sec-websocket-protocol",
+        "content-length",
+        "content-encoding",
+        "transfer-encoding",
     }
 )
 

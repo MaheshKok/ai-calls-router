@@ -118,6 +118,27 @@ def test_hop_by_hop_headers_are_stripped() -> None:
     assert {"authorization", "content-type"} <= keys
 
 
+def test_body_framing_headers_are_stripped() -> None:
+    # The body is re-serialized downstream (Codex direct posts json=payload),
+    # so a forwarded content-length over-declares the new body and the upstream
+    # send fails with "Too little data for declared Content-Length". The builder
+    # must drop content-length/content-encoding/transfer-encoding.
+    result = codex_chatgpt_headers(
+        {
+            "chatgpt-account-id": "acct_header",
+            "authorization": "Bearer opaque",
+            "content-length": "99999",
+            "content-encoding": "gzip",
+            "transfer-encoding": "chunked",
+            "content-type": "application/json",
+        }
+    )
+    assert result is not None
+    keys = {key.lower() for key, _ in result}
+    assert keys.isdisjoint({"content-length", "content-encoding", "transfer-encoding"})
+    assert {"authorization", "content-type"} <= keys
+
+
 def test_existing_account_id_and_originator_are_not_duplicated() -> None:
     result = codex_chatgpt_headers(
         {
