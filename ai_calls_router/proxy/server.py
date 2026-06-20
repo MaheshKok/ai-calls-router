@@ -34,7 +34,7 @@ from ai_calls_router.accounting import metrics
 from ai_calls_router.ops import bootstrap
 from ai_calls_router.proxy import observability, passthrough, route_dispatch
 from ai_calls_router.routing import decide as routing
-from ai_calls_router.routing import provider_config
+from ai_calls_router.routing import forward_compression, provider_config
 from ai_calls_router.routing.adapters import adapter_for_path
 from ai_calls_router.routing.adapters.base import KNOWN_GROUPS
 
@@ -394,6 +394,15 @@ async def _handle_routed_request(request: Request) -> Response:
         attempt.model,
         attempt.tool_names,
     )
+    # Compress the forwarded body for non-DeepSeek premium turns and record the
+    # realized tool-output shrink (per-row column plus the aggregate tile). The
+    # compressor relays byte-identical when nothing shrank, so short decision
+    # turns keep the upstream prompt cache intact.
+    upstream = routing.agent_upstream(routes, group)
+    forward_bytes, shrink = forward_compression.compress_forward_body(
+        body_bytes, request_path=path, upstream=upstream
+    )
+    m.add_shrink(chars_before=shrink.chars_before, chars_after=shrink.chars_after)
     m.record_request(
         method="POST",
         path=path,
@@ -416,10 +425,12 @@ async def _handle_routed_request(request: Request) -> Response:
         session_id=session or "",
         decision_reason=attempt.reason,
         request_id=logging_setup.current_request_id(),
+        shrink_chars_before=shrink.chars_before,
+        shrink_chars_after=shrink.chars_after,
     )
     return await _serve_passthrough(
         request,
-        body_bytes,
+        forward_bytes,
         group=group,
         on_complete=_premium_usage_callback(
             m=m,

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Literal, cast
 import httpx
 
 from ai_calls_router._lib import jsonnum
-from ai_calls_router.accounting import shrink_stats
+from ai_calls_router.routing import forward_compression
 from ai_calls_router.routing.config_schema import (
     ConfigSchemaError,
     is_codex_tier,
@@ -29,6 +29,7 @@ from ai_calls_router.routing.config_schema import (
 
 if TYPE_CHECKING:
     from ai_calls_router._lib.types import JsonObject, JsonValue
+    from ai_calls_router.accounting import shrink_stats
 
 logger = logging.getLogger("acr.codex_direct")
 
@@ -274,7 +275,7 @@ async def responses_call(  # noqa: PLR0911 - fail-open routing declines to passt
                 len(orphans),
             )
             return None
-        shrink = shrink_stats.compute_shrink(path="none", before=body, after=payload)
+        payload, shrink = forward_compression.compress_responses(payload)
         if auth_mode == "oauth":
             payload["stream"] = True
             payload.pop("max_output_tokens", None)
