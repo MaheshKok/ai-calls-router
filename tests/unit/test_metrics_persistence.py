@@ -699,3 +699,197 @@ class TestRoutedByModelCounter:
         snap = m.snapshot()
         m.incr_routed_model(model="deepseek-chat")
         assert snap["routed_by_model"] == {"deepseek-chat": 1}
+
+
+def _record_passthrough(
+    m: _Metrics,
+    *,
+    route: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read: int,
+    cache_creation: int,
+    request_id: str,
+) -> None:
+    """Persist one premium passthrough row to the metrics DB."""
+    m.record_request(
+        method="POST",
+        path="/v1/messages",
+        status=200,
+        tier="premium",
+        route=route,
+        model="claude-opus-4-8",
+        user_agent="claude-cli/2.1.0",
+        client_ip="",
+        tool_names=[],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read=cache_read,
+        cache_creation=cache_creation,
+        duration=0,
+        premium_model="claude-opus-4-8",
+        request_id=request_id,
+    )
+
+
+def _premium_view(snapshot: dict[str, object]) -> dict[str, int]:
+    """Extract the premium_tokens block from a snapshot."""
+    return dict(snapshot["premium_tokens"])  # type: ignore[arg-type]
+
+
+class TestPremiumTokenBootstrap:
+    """Bootstrap should restore premium token totals from the request DB.
+
+    Premium passthrough turns never reach the savings ledger, so their token
+    usage is summed from the persisted request_events rows on restart.
+    """
+
+    def test_fresh_metrics_report_zero_premium_tokens(self, tmp_path: Path) -> None:
+        m = _Metrics(db_path=tmp_path / "events.db")
+        assert _premium_view(m.snapshot()) == {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_creation": 0,
+        }
+
+    def test_bootstrap_sums_passthrough_rows_into_premium_tokens(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "events.db"
+        writer = _Metrics(db_path=db_path)
+        _record_passthrough(
+            writer,
+            route="passthrough",
+            input_tokens=100,
+            output_tokens=40,
+            cache_read=200,
+            cache_creation=10,
+            request_id="r1",
+        )
+        _record_passthrough(
+            writer,
+            route="passthrough",
+            input_tokens=50,
+            output_tokens=20,
+            cache_read=100,
+            cache_creation=5,
+            request_id="r2",
+        )
+
+        restarted = _Metrics(db_path=db_path)
+        restarted.bootstrap(ledger_path=None, max_recent=10)
+
+        assert _premium_view(restarted.snapshot()) == {
+            "input": 150,
+            "output": 60,
+            "cache_read": 300,
+            "cache_creation": 15,
+        }
+
+    def test_bootstrap_counts_premium_guard_rows(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "events.db"
+        writer = _Metrics(db_path=db_path)
+        _record_passthrough(
+            writer,
+            route="premium_guard",
+            input_tokens=70,
+            output_tokens=30,
+            cache_read=0,
+            cache_creation=0,
+            request_id="g1",
+        )
+
+        restarted = _Metrics(db_path=db_path)
+        restarted.bootstrap(ledger_path=None, max_recent=10)
+
+        assert _premium_view(restarted.snapshot())["input"] == 70
+        assert _premium_view(restarted.snapshot())["output"] == 30
+
+    def test_bootstrap_excludes_routed_rows_from_premium(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "events.db"
+        writer = _Metrics(db_path=db_path)
+        for route in ("litellm", "direct", "anthropic_oauth"):
+            _record_passthrough(
+                writer,
+                route=route,
+                input_tokens=999,
+                output_tokens=999,
+                cache_read=999,
+                cache_creation=999,
+                request_id=f"routed-{route}",
+            )
+
+        restarted = _Metrics(db_path=db_path)
+        restarted.bootstrap(ledger_path=None, max_recent=10)
+
+        assert _premium_view(restarted.snapshot()) == {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_creation": 0,
+        }
+
+    def test_bootstrap_restores_premium_even_with_ledger_present(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "events.db"
+        writer = _Metrics(db_path=db_path)
+        _record_passthrough(
+            writer,
+            route="passthrough",
+            input_tokens=80,
+            output_tokens=25,
+            cache_read=0,
+            cache_creation=0,
+            request_id="p1",
+        )
+        ledger_path = _write_records(tmp_path, [_make_record(ts=1)])
+
+        restarted = _Metrics(db_path=db_path)
+        restarted.bootstrap(ledger_path=ledger_path, max_recent=10)
+
+        # Premium tokens come from the DB; routed tokens from the ledger. The DB
+        # passthrough row must still be counted when a ledger is present.
+        premium = _premium_view(restarted.snapshot())
+        assert premium["input"] == 80
+        assert premium["output"] == 25
+
+    def test_premium_tokens_survive_record_then_update_then_restart(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "events.db"
+        writer = _Metrics(db_path=db_path)
+        # Real flow: row persisted with zero usage, filled by the async callback.
+        _record_passthrough(
+            writer,
+            route="passthrough",
+            input_tokens=0,
+            output_tokens=0,
+            cache_read=0,
+            cache_creation=0,
+            request_id="late",
+        )
+        writer.update_request_usage(
+            request_id="late",
+            status=200,
+            input_tokens=120,
+            output_tokens=45,
+            cache_read=300,
+            cache_creation=12,
+            duration=1.0,
+        )
+
+        restarted = _Metrics(db_path=db_path)
+        restarted.bootstrap(ledger_path=None, max_recent=10)
+
+        assert _premium_view(restarted.snapshot()) == {
+            "input": 120,
+            "output": 45,
+            "cache_read": 300,
+            "cache_creation": 12,
+        }
+
+    def test_bootstrap_premium_noop_without_db_path(self) -> None:
+        m = _Metrics()
+        m.bootstrap(ledger_path=None, max_recent=10)
+        assert _premium_view(m.snapshot()) == {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_creation": 0,
+        }

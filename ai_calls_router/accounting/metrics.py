@@ -78,6 +78,24 @@ ORDER BY ts DESC, id DESC
 LIMIT ?
 """
 
+# Routes a premium passthrough turn is recorded under. These turns never reach
+# the savings ledger (they have no routed_model), so their token usage lives
+# only in request_events and must be re-summed from there on bootstrap.
+_PREMIUM_ROUTES = ("passthrough", "premium_guard")
+
+# Two "?" placeholders, one per premium route; route values are bound at
+# execute-time, never interpolated. Adding a route here without a matching
+# placeholder raises sqlite3.ProgrammingError, which the bootstrap tests cover.
+_PREMIUM_USAGE_TOTALS = """
+SELECT
+    COALESCE(SUM(input_tokens), 0),
+    COALESCE(SUM(output_tokens), 0),
+    COALESCE(SUM(cache_read_tokens), 0),
+    COALESCE(SUM(cache_creation_tokens), 0)
+FROM request_events
+WHERE route IN (?, ?)
+"""
+
 # ── singleton ──────────────────────────────────────────────────────────────
 
 
@@ -355,6 +373,30 @@ def _load_request_events(db_path: Path, max_recent: int) -> list[JsonObject]:
     return [_entry_from_db_row(row) for row in rows]
 
 
+def _load_premium_token_totals(db_path: Path) -> tuple[int, int, int, int]:
+    """Sum lifetime premium-passthrough token usage from request_events.
+
+    Premium turns are absent from the savings ledger, so their token totals are
+    re-derived from the persisted request rows on bootstrap. request_events is
+    never pruned, so this sum is the full history.
+
+    Args:
+        db_path: Path to the metrics SQLite database.
+
+    Returns:
+        ``(input, output, cache_read, cache_creation)`` token sums; all zero when
+        the database is absent or holds no premium rows.
+    """
+    if not db_path.exists():
+        return (0, 0, 0, 0)
+    _ensure_request_db(db_path)
+    with sqlite3.connect(db_path) as db:
+        row = db.execute(_PREMIUM_USAGE_TOTALS, _PREMIUM_ROUTES).fetchone()
+    if row is None:
+        return (0, 0, 0, 0)
+    return (int(row[0]), int(row[1]), int(row[2]), int(row[3]))
+
+
 class _Metrics:
     """Thread-safe counters for the proxy."""
 
@@ -584,9 +626,11 @@ class _Metrics:
         add process-local deltas after bootstrap.
         """
         db_recent = self._load_saved_request_entries(max_recent)
+        premium = self._load_saved_premium_tokens()
         if ledger_path is None or not ledger_path.exists():
-            if db_recent:
-                with self._lock:
+            with self._lock:
+                self._restore_premium_tokens(premium)
+                if db_recent:
                     self._last_requests = db_recent + self._last_requests
                     self._last_requests = self._last_requests[:100]
             return
@@ -616,6 +660,7 @@ class _Metrics:
             self._saved_usd += float(totals["saved_usd"])
             self._shrink_chars_before += int(totals["shrink_chars_before"])
             self._shrink_chars_after += int(totals["shrink_chars_after"])
+            self._restore_premium_tokens(premium)
             self._last_requests = recent[:max_recent] + self._last_requests
             self._last_requests = self._last_requests[:100]
 
@@ -665,6 +710,29 @@ class _Metrics:
         except (OSError, sqlite3.Error) as exc:
             logger.warning("acr: metrics history load failed (%s)", exc, exc_info=True)
             return []
+
+    def _load_saved_premium_tokens(self) -> tuple[int, int, int, int]:
+        """Load lifetime premium token totals from the DB without raising."""
+        if self._db_path is None:
+            return (0, 0, 0, 0)
+        try:
+            return _load_premium_token_totals(self._db_path)
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning("acr: premium token load failed (%s)", exc, exc_info=True)
+            return (0, 0, 0, 0)
+
+    def _restore_premium_tokens(self, premium: tuple[int, int, int, int]) -> None:
+        """Add bootstrapped premium token totals to the live counters.
+
+        The caller must already hold ``self._lock``.
+
+        Args:
+            premium: ``(input, output, cache_read, cache_creation)`` token sums.
+        """
+        self._premium_input_tokens += premium[0]
+        self._premium_output_tokens += premium[1]
+        self._premium_cache_read_tokens += premium[2]
+        self._premium_cache_creation_tokens += premium[3]
 
     # ── snapshot ───────────────────────────────────────────────────────
 
