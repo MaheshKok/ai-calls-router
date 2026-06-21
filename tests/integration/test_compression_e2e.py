@@ -116,9 +116,9 @@ def test_premium_passthrough_compresses_json_array_and_records_it(
         snapshot = client.get("/metrics").json()
 
     compression = snapshot["compression"]
-    assert compression["chars_saved"] > 0
+    assert compression["tokens_saved"] > 0
     assert compression["ratio"] > 0
-    assert compression["chars_before"] > compression["chars_after"]
+    assert compression["tokens_before"] > compression["tokens_after"]
     last = snapshot["last_requests"][0]
     assert last["shrink_chars_before"] > last["shrink_chars_after"]
 

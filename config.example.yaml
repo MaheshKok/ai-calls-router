@@ -70,6 +70,14 @@ settings:
 agents:
   claude_code:
     upstream: https://api.anthropic.com
+    auth:
+      mode: oauth_passthrough
+    wire: anthropic_messages
+    endpoints:
+      - /v1/messages
+    model_defaults: {}
+    tool_choice: passthrough
+    reasoning: strip
     tools:
       Bash: fast
       BashOutput: fast
@@ -90,48 +98,72 @@ agents:
       Task: premium
       ExitPlanMode: premium
       AskUserQuestion: premium
-    premium_tools: [Edit, Write, MultiEdit, NotebookEdit, Task, ExitPlanMode, AskUserQuestion]
+      # MCP tools: trailing-* glob routes read/search-class tools to cheap tiers;
+      # exact entries win over the glob (decide.py tier_for_tool). New tools the
+      # server adds later are covered automatically.
+      mcp__lean-ctx__*: code
+      mcp__lean-ctx__ctx_shell: fast
+      mcp__lean-ctx__shell: fast
+      mcp__lean-ctx__ctx_edit: premium
+      mcp__codebase-memory-mcp__*: code
+    premium_tools:
+      - Edit
+      - Write
+      - MultiEdit
+      - NotebookEdit
+      - Task
+      - ExitPlanMode
+      - AskUserQuestion
     tiers:
+      # Cheap claude_code turns route to Sonnet 4.6 on the subscription OAuth bearer
+      # (auth.mode: oauth) so they draw the subscription's separate Sonnet quota
+      # instead of a pay-per-token key. The premium (Opus) passthrough is untouched.
+      # On Sonnet-quota exhaustion (HTTP 429) the turn fails open to premium Opus.
+      #
+      # effort pins each tier's routed reasoning level (low|medium|high|max),
+      # independent of premium. Sonnet rejects the Opus-only xhigh Claude Code sends,
+      # so these levels replace it. Edit per tier; premium keeps its own level.
+      #
+      # Omitted max_tokens means ACR preserves Claude Code's incoming max_tokens.
+      # crud stays capped because low-value admin/task-list turns should stay bounded.
       fast:
-        provider: deepseek
-        model: deepseek/deepseek-v4-flash
+        provider: anthropic
+        model: anthropic/claude-sonnet-4-6
         auth:
-          mode: api_key_env
-          key_env: DEEPSEEK_API_KEY
-        max_tokens: 8192
-        input_cost_per_1m: 0.14
-        input_cached_cost_per_1m: 0.0028
-        output_cost_per_1m: 0.28
+          mode: oauth
+        effort: low
+        input_cost_per_1m: 3.0
+        input_cached_cost_per_1m: 0.30
+        output_cost_per_1m: 15.0
       code:
-        provider: deepseek
-        model: deepseek/deepseek-v4-pro
+        provider: anthropic
+        model: anthropic/claude-sonnet-4-6
         auth:
-          mode: api_key_env
-          key_env: DEEPSEEK_API_KEY
-        max_tokens: 8192
-        input_cost_per_1m: 0.435
-        input_cached_cost_per_1m: 0.003625
-        output_cost_per_1m: 0.87
+          mode: oauth
+        effort: high
+        input_cost_per_1m: 3.0
+        input_cached_cost_per_1m: 0.30
+        output_cost_per_1m: 15.0
       crud:
-        provider: deepseek
-        model: deepseek/deepseek-v4-flash
+        provider: anthropic
+        model: anthropic/claude-sonnet-4-6
         auth:
-          mode: api_key_env
-          key_env: DEEPSEEK_API_KEY
+          mode: oauth
         max_tokens: 4096
-        input_cost_per_1m: 0.14
-        input_cached_cost_per_1m: 0.0028
-        output_cost_per_1m: 0.28
+        effort: low
+        input_cost_per_1m: 3.0
+        input_cached_cost_per_1m: 0.30
+        output_cost_per_1m: 15.0
       structured:
-        provider: deepseek
-        model: deepseek/deepseek-v4-flash
+        provider: anthropic
+        model: anthropic/claude-sonnet-4-6
         auth:
-          mode: api_key_env
-          key_env: DEEPSEEK_API_KEY
-        max_tokens: 8192
-        input_cost_per_1m: 0.14
-        input_cached_cost_per_1m: 0.0028
-        output_cost_per_1m: 0.28
+          mode: oauth
+        effort: high
+        input_cost_per_1m: 3.0
+        input_cached_cost_per_1m: 0.30
+        output_cost_per_1m: 15.0
+    fallback: passthrough
 
   hermes:
     upstream: https://api.openai.com

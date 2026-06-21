@@ -149,7 +149,7 @@ class TestMetricsBootstrapCounters:
             snap = m.snapshot()
 
             assert snap["requests"]["routed"] == 2
-            assert snap["requests"]["total"] == 2  # total = routed + passthrough (2 + 0)
+            assert snap["requests"]["total"] == 2  # routed + passthrough + errors (2 + 0 + 0)
             assert snap["routed_tokens"]["input"] == 300
             assert snap["routed_tokens"]["output"] == 130
             assert snap["routed_tokens"]["cache_read"] == 30
@@ -343,47 +343,48 @@ class TestMetricsBootstrapIntegration:
 
 class TestMetricsCompression:
     """add_shrink accumulates per-turn tool_result character deltas, and the
-    snapshot exposes a compression block with the derived savings figures. The
-    character counts are authoritative; est_tokens_saved is a coarse divisor
-    estimate (chars_saved / 3.5, truncated)."""
+    snapshot exposes a compression block using token estimates as the single
+    source of truth (chars / DEFAULT_CHARS_PER_TOKEN, truncated to int).
+    The ratio is still derived from characters (chars_saved / chars_before)."""
 
     def test_fresh_metrics_report_zero_compression(self) -> None:
         snap = _Metrics().snapshot()
         comp = snap["compression"]
-        assert comp["chars_before"] == 0
-        assert comp["chars_after"] == 0
-        assert comp["chars_saved"] == 0
+        assert comp["tokens_before"] == 0
+        assert comp["tokens_after"] == 0
+        assert comp["tokens_saved"] == 0
         assert comp["ratio"] == 0.0
-        assert comp["est_tokens_saved"] == 0
+        # chars_* keys must not leak into snapshot
+        assert "chars_before" not in comp
+        assert "chars_saved" not in comp
 
     def test_add_shrink_accumulates_across_turns(self) -> None:
         # Two turns: 10000->4000 and 5000->2000. Totals derived independently:
         # before=15000, after=6000, saved=9000, ratio=9000/15000=0.6,
-        # est=floor(9000/3.5)=2571.
+        # tokens_before=floor(15000/3.5)=4285, tokens_after=floor(6000/3.5)=1714,
+        # tokens_saved=floor(9000/3.5)=2571.
         m = _Metrics()
         m.add_shrink(chars_before=10000, chars_after=4000)
         m.add_shrink(chars_before=5000, chars_after=2000)
         comp = m.snapshot()["compression"]
-        assert comp["chars_before"] == 15000
-        assert comp["chars_after"] == 6000
-        assert comp["chars_saved"] == 9000
+        assert comp["tokens_before"] == 4285
+        assert comp["tokens_after"] == 1714
+        assert comp["tokens_saved"] == 2571
         assert comp["ratio"] == pytest.approx(0.6)
-        assert comp["est_tokens_saved"] == 2571
 
     def test_add_shrink_clamps_negative_inputs(self) -> None:
         m = _Metrics()
         m.add_shrink(chars_before=-100, chars_after=-40)
         comp = m.snapshot()["compression"]
-        assert comp["chars_before"] == 0
-        assert comp["chars_after"] == 0
+        assert comp["tokens_before"] == 0
+        assert comp["tokens_after"] == 0
 
     def test_no_op_pass_reports_zero_savings_not_negative(self) -> None:
-        # A pass that does not shrink (after == before) contributes no savings,
-        # and chars_saved is floored at 0 even if a later turn grows the body.
+        # A pass that does not shrink (after == before) contributes no savings.
         m = _Metrics()
         m.add_shrink(chars_before=3000, chars_after=3000)
         comp = m.snapshot()["compression"]
-        assert comp["chars_saved"] == 0
+        assert comp["tokens_saved"] == 0
         assert comp["ratio"] == 0.0
 
     def test_bootstrap_restores_shrink_chars_from_ledger(self) -> None:
@@ -403,9 +404,11 @@ class TestMetricsCompression:
             m = _Metrics()
             m.bootstrap(ledger_path=ledger_path, max_recent=2)
             comp = m.snapshot()["compression"]
-            assert comp["chars_before"] == 10000
-            assert comp["chars_after"] == 4000
-            assert comp["chars_saved"] == 6000
+            # chars: before=10000, after=4000, saved=6000
+            # tokens: floor(10000/3.5)=2857, floor(4000/3.5)=1142, floor(6000/3.5)=1714
+            assert comp["tokens_before"] == 2857
+            assert comp["tokens_after"] == 1142
+            assert comp["tokens_saved"] == 1714
         finally:
             ledger_path.unlink(missing_ok=True)
 
@@ -420,8 +423,8 @@ class TestMetricsCompression:
             m = _Metrics()
             m.bootstrap(ledger_path=ledger_path, max_recent=1)
             comp = m.snapshot()["compression"]
-            assert comp["chars_before"] == 0
-            assert comp["chars_after"] == 0
+            assert comp["tokens_before"] == 0
+            assert comp["tokens_after"] == 0
         finally:
             ledger_path.unlink(missing_ok=True)
 
@@ -438,8 +441,8 @@ class TestMetricsCompression:
             m = _Metrics()
             m.bootstrap(ledger_path=ledger_path, max_recent=1)
             comp = m.snapshot()["compression"]
-            assert comp["chars_before"] == 0
-            assert comp["chars_after"] == 0
+            assert comp["tokens_before"] == 0
+            assert comp["tokens_after"] == 0
         finally:
             ledger_path.unlink(missing_ok=True)
 
@@ -558,7 +561,7 @@ class TestRecordRequestPerRowShrink:
         assert snap["requests"]["routed"] == 1
         assert snap["routed_tokens"]["input"] == 0
         assert snap["costs"]["saved_usd"] == 0
-        assert snap["compression"]["chars_before"] == 0
+        assert snap["compression"]["tokens_before"] == 0
 
 
 class TestBootstrapPerRowShrink:
@@ -626,3 +629,315 @@ class TestBootstrapPerRowShrink:
         live_row = live.snapshot()["last_requests"][0]
         replay_row = replay.snapshot()["last_requests"][0]
         assert set(replay_row) == set(live_row)
+
+
+class TestRoutedByModelCounter:
+    """incr_routed_model maintains a lifetime routed-call tally keyed by routed
+    model. The snapshot exposes it under "routed_by_model"; bootstrap seeds it
+    from the savings ledger so the tally survives restarts."""
+
+    def test_fresh_metrics_report_empty_model_tally(self) -> None:
+        assert _Metrics().snapshot()["routed_by_model"] == {}
+
+    def test_increment_counts_per_model(self) -> None:
+        m = _Metrics()
+        m.incr_routed_model(model="deepseek-chat")
+        m.incr_routed_model(model="deepseek-chat")
+        m.incr_routed_model(model="gpt-5.4-mini")
+        assert m.snapshot()["routed_by_model"] == {
+            "deepseek-chat": 2,
+            "gpt-5.4-mini": 1,
+        }
+
+    def test_blank_model_buckets_under_unknown(self) -> None:
+        m = _Metrics()
+        m.incr_routed_model(model="")
+        m.incr_routed_model(model="   ")
+        assert m.snapshot()["routed_by_model"] == {"unknown": 2}
+
+    def test_bootstrap_seeds_tally_from_ledger(self) -> None:
+        # Two records on deepseek-chat, one on gpt-5.4-mini -> {2, 1}. Counts
+        # come from the ledger's per-model request totals, not row order.
+        records = [
+            _make_record(ts=1718000000, routed_model="deepseek-chat", saved_usd=0.0),
+            _make_record(ts=1718000001, routed_model="deepseek-chat", saved_usd=0.0),
+            _make_record(ts=1718000002, routed_model="gpt-5.4-mini", saved_usd=0.0),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+            ledger_path = Path(f.name)
+
+        try:
+            m = _Metrics()
+            m.bootstrap(ledger_path=ledger_path, max_recent=10)
+            assert m.snapshot()["routed_by_model"] == {
+                "deepseek-chat": 2,
+                "gpt-5.4-mini": 1,
+            }
+        finally:
+            ledger_path.unlink(missing_ok=True)
+
+    def test_bootstrap_then_live_increment_accumulates(self) -> None:
+        # A live routed call after bootstrap must add to the seeded count, not
+        # replace it: the restart-surviving tally keeps growing in-process.
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(
+                json.dumps(_make_record(ts=1718000000, routed_model="deepseek-chat", saved_usd=0.0))
+                + "\n"
+            )
+            ledger_path = Path(f.name)
+
+        try:
+            m = _Metrics()
+            m.bootstrap(ledger_path=ledger_path, max_recent=10)
+            m.incr_routed_model(model="deepseek-chat")
+            assert m.snapshot()["routed_by_model"]["deepseek-chat"] == 2
+        finally:
+            ledger_path.unlink(missing_ok=True)
+
+    def test_snapshot_tally_is_detached_from_live_updates(self) -> None:
+        m = _Metrics()
+        m.incr_routed_model(model="deepseek-chat")
+        snap = m.snapshot()
+        m.incr_routed_model(model="deepseek-chat")
+        assert snap["routed_by_model"] == {"deepseek-chat": 1}
+
+
+def _record_passthrough(
+    m: _Metrics,
+    *,
+    route: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read: int,
+    cache_creation: int,
+    request_id: str,
+) -> None:
+    """Persist one premium passthrough row to the metrics DB."""
+    m.record_request(
+        method="POST",
+        path="/v1/messages",
+        status=200,
+        tier="premium",
+        route=route,
+        model="claude-opus-4-8",
+        user_agent="claude-cli/2.1.0",
+        client_ip="",
+        tool_names=[],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read=cache_read,
+        cache_creation=cache_creation,
+        duration=0,
+        premium_model="claude-opus-4-8",
+        request_id=request_id,
+    )
+
+
+def _premium_view(snapshot: dict[str, object]) -> dict[str, int]:
+    """Extract the premium_tokens block from a snapshot."""
+    return dict(snapshot["premium_tokens"])  # type: ignore[arg-type]
+
+
+class TestPremiumTokenBootstrap:
+    """Bootstrap should restore premium token totals from the request DB.
+
+    Premium passthrough turns never reach the savings ledger, so their token
+    usage is summed from the persisted request_events rows on restart.
+    """
+
+    def test_fresh_metrics_report_zero_premium_tokens(self, tmp_path: Path) -> None:
+        m = _Metrics(db_path=tmp_path / "events.db")
+        assert _premium_view(m.snapshot()) == {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_creation": 0,
+        }
+
+    def test_bootstrap_sums_passthrough_rows_into_premium_tokens(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "events.db"
+        writer = _Metrics(db_path=db_path)
+        _record_passthrough(
+            writer,
+            route="passthrough",
+            input_tokens=100,
+            output_tokens=40,
+            cache_read=200,
+            cache_creation=10,
+            request_id="r1",
+        )
+        _record_passthrough(
+            writer,
+            route="passthrough",
+            input_tokens=50,
+            output_tokens=20,
+            cache_read=100,
+            cache_creation=5,
+            request_id="r2",
+        )
+
+        restarted = _Metrics(db_path=db_path)
+        restarted.bootstrap(ledger_path=None, max_recent=10)
+
+        assert _premium_view(restarted.snapshot()) == {
+            "input": 150,
+            "output": 60,
+            "cache_read": 300,
+            "cache_creation": 15,
+        }
+
+    def test_bootstrap_counts_premium_guard_rows(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "events.db"
+        writer = _Metrics(db_path=db_path)
+        _record_passthrough(
+            writer,
+            route="premium_guard",
+            input_tokens=70,
+            output_tokens=30,
+            cache_read=0,
+            cache_creation=0,
+            request_id="g1",
+        )
+
+        restarted = _Metrics(db_path=db_path)
+        restarted.bootstrap(ledger_path=None, max_recent=10)
+
+        assert _premium_view(restarted.snapshot())["input"] == 70
+        assert _premium_view(restarted.snapshot())["output"] == 30
+
+    def test_bootstrap_excludes_routed_rows_from_premium(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "events.db"
+        writer = _Metrics(db_path=db_path)
+        for route in ("litellm", "direct", "anthropic_oauth"):
+            _record_passthrough(
+                writer,
+                route=route,
+                input_tokens=999,
+                output_tokens=999,
+                cache_read=999,
+                cache_creation=999,
+                request_id=f"routed-{route}",
+            )
+
+        restarted = _Metrics(db_path=db_path)
+        restarted.bootstrap(ledger_path=None, max_recent=10)
+
+        assert _premium_view(restarted.snapshot()) == {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_creation": 0,
+        }
+
+    def test_bootstrap_restores_premium_even_with_ledger_present(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "events.db"
+        writer = _Metrics(db_path=db_path)
+        _record_passthrough(
+            writer,
+            route="passthrough",
+            input_tokens=80,
+            output_tokens=25,
+            cache_read=0,
+            cache_creation=0,
+            request_id="p1",
+        )
+        ledger_path = _write_records(tmp_path, [_make_record(ts=1)])
+
+        restarted = _Metrics(db_path=db_path)
+        restarted.bootstrap(ledger_path=ledger_path, max_recent=10)
+
+        # Premium tokens come from the DB; routed tokens from the ledger. The DB
+        # passthrough row must still be counted when a ledger is present.
+        premium = _premium_view(restarted.snapshot())
+        assert premium["input"] == 80
+        assert premium["output"] == 25
+
+    def test_premium_tokens_survive_record_then_update_then_restart(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "events.db"
+        writer = _Metrics(db_path=db_path)
+        # Real flow: row persisted with zero usage, filled by the async callback.
+        _record_passthrough(
+            writer,
+            route="passthrough",
+            input_tokens=0,
+            output_tokens=0,
+            cache_read=0,
+            cache_creation=0,
+            request_id="late",
+        )
+        writer.update_request_usage(
+            request_id="late",
+            status=200,
+            input_tokens=120,
+            output_tokens=45,
+            cache_read=300,
+            cache_creation=12,
+            duration=1.0,
+        )
+
+        restarted = _Metrics(db_path=db_path)
+        restarted.bootstrap(ledger_path=None, max_recent=10)
+
+        assert _premium_view(restarted.snapshot()) == {
+            "input": 120,
+            "output": 45,
+            "cache_read": 300,
+            "cache_creation": 12,
+        }
+
+    def test_bootstrap_premium_noop_without_db_path(self) -> None:
+        m = _Metrics()
+        m.bootstrap(ledger_path=None, max_recent=10)
+        assert _premium_view(m.snapshot()) == {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_creation": 0,
+        }
+
+
+class TestRequestsTotal:
+    """requests.total must equal routed + passthrough + errors."""
+
+    def test_total_is_zero_on_fresh_metrics(self) -> None:
+        m = _Metrics()
+        assert m.snapshot()["requests"]["total"] == 0
+
+    def test_total_includes_routed_only(self) -> None:
+        m = _Metrics()
+        m.incr_routed()
+        m.incr_routed()
+        snap = m.snapshot()
+        assert snap["requests"]["total"] == 2
+        assert snap["requests"]["routed"] == 2
+        assert snap["requests"]["errors"] == 0
+
+    def test_total_includes_passthrough_only(self) -> None:
+        m = _Metrics()
+        m.incr_passthrough()
+        snap = m.snapshot()
+        assert snap["requests"]["total"] == 1
+        assert snap["requests"]["passthrough"] == 1
+
+    def test_total_includes_errors(self) -> None:
+        m = _Metrics()
+        m.incr_error()
+        snap = m.snapshot()
+        assert snap["requests"]["total"] == 1
+        assert snap["requests"]["errors"] == 1
+        assert snap["requests"]["routed"] == 0
+        assert snap["requests"]["passthrough"] == 0
+
+    def test_total_sums_all_three_categories(self) -> None:
+        m = _Metrics()
+        m.incr_routed()
+        m.incr_routed()
+        m.incr_passthrough()
+        m.incr_error()
+        snap = m.snapshot()
+        assert snap["requests"]["total"] == 4
+        assert snap["requests"]["routed"] == 2
+        assert snap["requests"]["passthrough"] == 1
+        assert snap["requests"]["errors"] == 1
