@@ -132,6 +132,9 @@ td.empty { color: var(--faint); text-align: center; padding: 32px; font-family: 
 .truncate { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 td .muted, td.muted { color: var(--faint); }
 .pill { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; font-family: var(--mono); background: var(--indigo-dim); color: var(--indigo); }
+.tok-head { display: inline-flex; gap: 20px; }
+.tok-col { display: inline-block; min-width: 78px; text-align: right; font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.6px; }
+.tok-col.mono { font-size: 13px; color: var(--text); text-transform: none; letter-spacing: 0; }
 
 @media (max-width: 980px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } .hero { grid-template-columns: 1fr; } }
 @media (max-width: 560px) { .grid-4, .grid-2 { grid-template-columns: 1fr; } body { padding: 18px 14px 36px; } }
@@ -154,14 +157,6 @@ td .muted, td.muted { color: var(--faint); }
     </div>
   </header>
 
-  <div class="section-label">traffic</div>
-  <section class="grid-4">
-    <div class="card indigo"><div class="label">total</div><div class="value" id="total">--</div><div class="sub">requests seen</div></div>
-    <div class="card emerald"><div class="label">routed</div><div class="value" id="routed">--</div><div class="sub" id="routedPct">--</div></div>
-    <div class="card amber"><div class="label">passthrough</div><div class="value" id="passthrough">--</div><div class="sub">premium path</div></div>
-    <div class="card rose"><div class="label">errors</div><div class="value" id="errors">--</div><div class="sub" id="escFallback">--</div></div>
-  </section>
-
   <div class="section-label">savings</div>
   <section class="hero">
     <div class="hero-card">
@@ -177,44 +172,29 @@ td .muted, td.muted { color: var(--faint); }
     <div class="hero-card">
       <div class="hero-row"><span class="k">routed cost</span><span class="v good" id="costRouted">--</span></div>
       <div class="hero-row"><span class="k">premium cost</span><span class="v" id="costPremium" style="color:var(--amber)">--</span></div>
+      <div class="hero-row"><span class="k">tokens shrunk</span><span class="v good" id="compSaved">--</span></div>
     </div>
   </section>
 
-  <div class="section-label">tool_result compression</div>
+  <div class="section-label">at a glance</div>
   <section class="grid-4">
-    <div class="card emerald"><div class="label">tokens shrunk</div><div class="value" id="compSaved">--</div><div class="sub" id="compRatio">reduce + compress</div></div>
-    <div class="card cyan"><div class="label">reduction</div><div class="value" id="compTokensPct">--</div><div class="sub">of tool_result tokens</div></div>
-    <div class="card"><div class="label">tokens before</div><div class="value" id="compBefore">--</div><div class="sub">tool_result in</div></div>
-    <div class="card"><div class="label">tokens after</div><div class="value" id="compAfter">--</div><div class="sub">tool_result out</div></div>
+    <div class="card indigo"><div class="label">requests</div><div class="value" id="total">--</div><div class="sub" id="reqSplit">--</div></div>
+    <div class="card emerald"><div class="label">routing hit rate</div><div class="value" id="hitRate">--</div><div class="sub" id="routedPct">--</div></div>
+    <div class="card cyan"><div class="label">tool_result reduction</div><div class="value" id="compTokensPct">--</div><div class="sub" id="compRatio">--</div></div>
+    <div class="card rose"><div class="label">errors</div><div class="value" id="errors">--</div><div class="sub" id="escFallback">--</div></div>
   </section>
 
-  <div class="section-label">token usage</div>
+  <div class="section-label">routing &amp; tokens</div>
   <section class="grid-2">
-    <div class="panel">
-      <h2>routed tokens</h2>
-      <div class="row"><span>input</span><span class="mono" id="ri">--</span></div>
-      <div class="row"><span>output</span><span class="mono" id="ro">--</span></div>
-      <div class="row"><span>cache read</span><span class="mono" id="rcr">--</span></div>
-      <div class="row"><span>cache creation</span><span class="mono" id="rcc">--</span></div>
-    </div>
-    <div class="panel">
-      <h2>premium tokens</h2>
-      <div class="row"><span>input</span><span class="mono" id="pi">--</span></div>
-      <div class="row"><span>output</span><span class="mono" id="po">--</span></div>
-      <div class="row"><span>cache read</span><span class="mono" id="pcr">--</span></div>
-      <div class="row"><span>cache creation</span><span class="mono" id="pcc">--</span></div>
-    </div>
-  </section>
-
-  <div class="section-label">routed by model</div>
-  <section>
     <div class="panel" id="model-panel"><h2>routed calls per model</h2><div class="row"><span class="mono">--</span><span>no routed calls yet</span></div></div>
-  </section>
-
-  <div class="section-label">activity</div>
-  <section class="grid-2">
-    <div class="panel" id="agent-panel"><h2>agents</h2><div class="row"><span class="mono">--</span><span>no data yet</span></div></div>
-    <div class="panel" id="session-panel"><h2>sessions</h2><div class="row"><span class="mono">--</span><span>no sessions yet</span></div></div>
+    <div class="panel">
+      <h2>token usage</h2>
+      <div class="row"><span class="muted">&nbsp;</span><span class="tok-head"><span class="tok-col">routed</span><span class="tok-col">premium</span></span></div>
+      <div class="row"><span>input</span><span class="tok-head"><span class="tok-col mono" id="ri">--</span><span class="tok-col mono" id="pi">--</span></span></div>
+      <div class="row"><span>output</span><span class="tok-head"><span class="tok-col mono" id="ro">--</span><span class="tok-col mono" id="po">--</span></span></div>
+      <div class="row"><span>cache read</span><span class="tok-head"><span class="tok-col mono" id="rcr">--</span><span class="tok-col mono" id="pcr">--</span></span></div>
+      <div class="row"><span>cache creation</span><span class="tok-head"><span class="tok-col mono" id="rcc">--</span><span class="tok-col mono" id="pcc">--</span></span></div>
+    </div>
   </section>
 
   <section class="table-card">
@@ -225,9 +205,9 @@ td .muted, td.muted { color: var(--faint); }
     <div class="table-scroll">
       <table>
         <thead id="table-head">
-          <tr><th>date/time</th><th>model</th><th>tools</th><th>input</th><th>cache miss</th><th>output</th><th>saved</th><th>ms</th><th>agent</th><th>session</th></tr>
+          <tr><th>date/time</th><th>model</th><th>tools</th><th>input</th><th>cache miss</th><th>output</th><th>saved</th><th>ms</th><th>agent</th></tr>
         </thead>
-        <tbody id="rows"><tr><td colspan="11" class="empty">no requests yet</td></tr></tbody>
+        <tbody id="rows"><tr><td colspan="9" class="empty">no requests yet</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -264,53 +244,6 @@ function agentKey(agent) {
   if (a === 'api') return '\u{1F527} API';
   return a;
 }
-function buildAgentRows(data) {
-  const rows = data.last_requests || [];
-  const buckets = {};
-  for (const r of rows) {
-    const key = (r.agent || '').trim() || 'unknown';
-    buckets[key] = (buckets[key] || 0) + 1;
-  }
-  const html = ['<h2>agents</h2>'];
-  const keys = Object.keys(buckets).sort((a,b) => buckets[b] - buckets[a]);
-  if (keys.length === 0) {
-    html.push('<div class="row"><span class="mono">--</span><span>no data yet</span></div>');
-  } else {
-    for (const k of keys) {
-      html.push('<div class="row"><span class="mono">' + esc(agentKey(k)) + '</span><span class="mono">' + num(buckets[k]) + ' reqs</span></div>');
-    }
-  }
-  $('agent-panel').innerHTML = html.join('');
-}
-function buildSessionRows(data) {
-  const rows = data.last_requests || [];
-  const buckets = {};
-  for (const r of rows) {
-    const sid = (r.session_id || '').trim() || '__no__session__';
-    const agent = (r.agent || '').trim() || 'unknown';
-    if (!buckets[sid]) buckets[sid] = { count: 0, agent };
-    buckets[sid].count++;
-  }
-  const entries = Object.entries(buckets).sort((a, b) => b[1].count - a[1].count).slice(0, 20);
-  const sessionHtml = ['<h2>sessions</h2>'];
-  if (entries.length === 0) {
-    sessionHtml.push('<div class="row"><span class="mono">--</span><span>no sessions yet</span></div>');
-  } else {
-    let shown = 0;
-    for (const [sid, info] of entries) {
-      if (sid === '__no__session__') continue;
-      const label = sid.substring(0, 8) + '…';
-      sessionHtml.push('<div class="row"><span class="mono">' + esc(label) + '</span><span class="mono">' + esc(agentKey(info.agent)) + ' · ' + num(info.count) + ' reqs</span></div>');
-      shown++;
-    }
-    if (shown === 0 && entries.length > 0) {
-      for (const [_, info] of entries) {
-        sessionHtml.push('<div class="row"><span class="mono">--</span><span class="mono">' + esc(agentKey(info.agent)) + ' · ' + num(info.count) + ' reqs</span></div>');
-      }
-    }
-  }
-  $('session-panel').innerHTML = sessionHtml.join('');
-}
 
 function rowTotalInput(x) {
   return Number(x.input_tokens || 0) + Number(x.cache_read_tokens || 0) + Number(x.cache_creation_tokens || 0);
@@ -341,10 +274,9 @@ function buildRecentRows(data) {
       '<td>' + shrunkCell(x) + '</td>' +
       '<td>' + num(x.duration_ms) + '</td>' +
       '<td class="truncate muted">' + esc(agentKey(x.agent) || '--') + '</td>' +
-      '<td class="truncate muted">' + esc((x.session_id || '--').substring(0, 12)) + '</td>' +
       '</tr>'
     );
-  }).join('') : '<tr><td colspan="10" class="empty">no requests yet</td></tr>';
+  }).join('') : '<tr><td colspan="9" class="empty">no requests yet</td></tr>';
   $('rows').innerHTML = rowHtml;
   return { shown: recentRows.length, total: scored.length };
 }
@@ -380,11 +312,11 @@ function apply(data) {
   const routed = Number(r.routed || 0);
   $('uptime').textContent = uptime(data.uptime_seconds);
   $('total').textContent = num(total);
-  $('routed').textContent = num(routed);
-  $('routedPct').textContent = (total ? pct(routed / total * 100) : '--') + ' of total';
-  $('passthrough').textContent = num(r.passthrough);
+  $('reqSplit').textContent = num(routed) + ' routed · ' + num(r.passthrough) + ' premium';
+  $('hitRate').textContent = total ? pct(routed / total * 100) : '--';
+  $('routedPct').textContent = num(routed) + ' of ' + num(total) + ' routed';
   $('errors').textContent = num(r.errors);
-  $('escFallback').textContent = num(r.escalated) + ' escalated / ' + num(r.fallback) + ' fallback';
+  $('escFallback').textContent = num(r.escalated) + ' escalated · ' + num(r.fallback) + ' fallback';
   $('costRouted').textContent = usd(c.routed_usd);
   $('costPremium').textContent = usd(c.premium_usd);
   $('saved').textContent = usd(c.saved_usd);
@@ -393,11 +325,9 @@ function apply(data) {
   const ring = $('saveRing');
   if (ring) ring.style.setProperty('--v', Number.isFinite(saveRateVal) ? Math.max(0, Math.min(100, saveRateVal)) : 0);
   const comp = data.compression || {};
-  $('compSaved').textContent = '~' + num(comp.tokens_saved);
-  $('compRatio').textContent = pct(Number(comp.ratio || 0) * 100) + ' of ' + num(comp.tokens_before) + ' tokens';
+  $('compSaved').textContent = '~' + num(comp.tokens_saved) + ' tok';
   $('compTokensPct').textContent = pct(Number(comp.ratio || 0) * 100);
-  $('compBefore').textContent = '~' + num(comp.tokens_before);
-  $('compAfter').textContent = '~' + num(comp.tokens_after);
+  $('compRatio').textContent = '~' + num(comp.tokens_before) + ' → ' + num(comp.tokens_after) + ' tok';
   $('ri').textContent = num(rt.input);
   $('ro').textContent = num(rt.output);
   $('rcr').textContent = num(rt.cache_read);
@@ -407,8 +337,6 @@ function apply(data) {
   $('pcr').textContent = num(pt.cache_read);
   $('pcc').textContent = num(pt.cache_creation);
   buildModelRows(data);
-  buildAgentRows(data);
-  buildSessionRows(data);
   const rowStats = buildRecentRows(data);
   const shown = Math.min(rowStats.total || 0, 20);
   if (rowStats.total > 20) {
