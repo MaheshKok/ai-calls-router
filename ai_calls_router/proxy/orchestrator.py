@@ -295,6 +295,8 @@ async def handle(ctx: RequestContext, *, routes_loader: RoutesLoader) -> Respons
         adapter_default=adapter.default_agent_group,
     )
     if group is None:
+        m.incr_error()
+        logger.info("outcome=error %s agent=%s reason=unresolved_agent_identity", ctx.path, agent)
         return JSONResponse({"error": "unresolved agent identity"}, status_code=400)
     attempt = await route_dispatch.try_route(
         ctx.body_bytes,

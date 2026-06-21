@@ -182,10 +182,10 @@ td .muted, td.muted { color: var(--faint); }
 
   <div class="section-label">tool_result compression</div>
   <section class="grid-4">
-    <div class="card emerald"><div class="label">chars shrunk</div><div class="value" id="compSaved">--</div><div class="sub" id="compRatio">reduce + compress</div></div>
-    <div class="card cyan"><div class="label">est tokens shrunk</div><div class="value" id="compTokens">--</div><div class="sub">~3.5 chars/token</div></div>
-    <div class="card"><div class="label">chars before</div><div class="value" id="compBefore">--</div><div class="sub">tool_result in</div></div>
-    <div class="card"><div class="label">chars after</div><div class="value" id="compAfter">--</div><div class="sub">tool_result out</div></div>
+    <div class="card emerald"><div class="label">tokens shrunk</div><div class="value" id="compSaved">--</div><div class="sub" id="compRatio">reduce + compress</div></div>
+    <div class="card cyan"><div class="label">reduction</div><div class="value" id="compTokensPct">--</div><div class="sub">of tool_result tokens</div></div>
+    <div class="card"><div class="label">tokens before</div><div class="value" id="compBefore">--</div><div class="sub">tool_result in</div></div>
+    <div class="card"><div class="label">tokens after</div><div class="value" id="compAfter">--</div><div class="sub">tool_result out</div></div>
   </section>
 
   <div class="section-label">token usage</div>
@@ -393,11 +393,11 @@ function apply(data) {
   const ring = $('saveRing');
   if (ring) ring.style.setProperty('--v', Number.isFinite(saveRateVal) ? Math.max(0, Math.min(100, saveRateVal)) : 0);
   const comp = data.compression || {};
-  $('compSaved').textContent = num(comp.chars_saved) + ' ch';
-  $('compRatio').textContent = pct(Number(comp.ratio || 0) * 100) + ' of ' + num(comp.chars_before) + ' chars';
-  $('compTokens').textContent = '~' + num(comp.est_tokens_saved);
-  $('compBefore').textContent = num(comp.chars_before);
-  $('compAfter').textContent = num(comp.chars_after);
+  $('compSaved').textContent = '~' + num(comp.tokens_saved);
+  $('compRatio').textContent = pct(Number(comp.ratio || 0) * 100) + ' of ' + num(comp.tokens_before) + ' tokens';
+  $('compTokensPct').textContent = pct(Number(comp.ratio || 0) * 100);
+  $('compBefore').textContent = '~' + num(comp.tokens_before);
+  $('compAfter').textContent = '~' + num(comp.tokens_after);
   $('ri').textContent = num(rt.input);
   $('ro').textContent = num(rt.output);
   $('rcr').textContent = num(rt.cache_read);

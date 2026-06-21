@@ -748,7 +748,11 @@ class _Metrics:
                 {
                     "uptime_seconds": round(time.time() - self._started_at, 1),
                     "requests": {
-                        "total": self._routed_requests + self._passthrough_requests,
+                        "total": (
+                            self._routed_requests
+                            + self._passthrough_requests
+                            + self._error_requests
+                        ),
                         "routed": self._routed_requests,
                         "passthrough": self._passthrough_requests,
                         "errors": self._error_requests,
@@ -773,11 +777,10 @@ class _Metrics:
                         "saved_usd": round(self._saved_usd, 8),
                     },
                     "compression": {
-                        "chars_before": compression.chars_before,
-                        "chars_after": compression.chars_after,
-                        "chars_saved": compression.chars_saved,
+                        "tokens_before": compression.est_tokens_before(),
+                        "tokens_after": compression.est_tokens_after(),
+                        "tokens_saved": compression.est_tokens_saved(),
                         "ratio": round(compression.ratio, 4),
-                        "est_tokens_saved": compression.est_tokens_saved(),
                     },
                     "last_requests": copy.deepcopy(self._last_requests[:50]),
                     "routed_by_model": dict(self._routed_by_model),

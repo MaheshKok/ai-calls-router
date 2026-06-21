@@ -149,7 +149,7 @@ class TestMetricsBootstrapCounters:
             snap = m.snapshot()
 
             assert snap["requests"]["routed"] == 2
-            assert snap["requests"]["total"] == 2  # total = routed + passthrough (2 + 0)
+            assert snap["requests"]["total"] == 2  # routed + passthrough + errors (2 + 0 + 0)
             assert snap["routed_tokens"]["input"] == 300
             assert snap["routed_tokens"]["output"] == 130
             assert snap["routed_tokens"]["cache_read"] == 30
@@ -343,47 +343,48 @@ class TestMetricsBootstrapIntegration:
 
 class TestMetricsCompression:
     """add_shrink accumulates per-turn tool_result character deltas, and the
-    snapshot exposes a compression block with the derived savings figures. The
-    character counts are authoritative; est_tokens_saved is a coarse divisor
-    estimate (chars_saved / 3.5, truncated)."""
+    snapshot exposes a compression block using token estimates as the single
+    source of truth (chars / DEFAULT_CHARS_PER_TOKEN, truncated to int).
+    The ratio is still derived from characters (chars_saved / chars_before)."""
 
     def test_fresh_metrics_report_zero_compression(self) -> None:
         snap = _Metrics().snapshot()
         comp = snap["compression"]
-        assert comp["chars_before"] == 0
-        assert comp["chars_after"] == 0
-        assert comp["chars_saved"] == 0
+        assert comp["tokens_before"] == 0
+        assert comp["tokens_after"] == 0
+        assert comp["tokens_saved"] == 0
         assert comp["ratio"] == 0.0
-        assert comp["est_tokens_saved"] == 0
+        # chars_* keys must not leak into snapshot
+        assert "chars_before" not in comp
+        assert "chars_saved" not in comp
 
     def test_add_shrink_accumulates_across_turns(self) -> None:
         # Two turns: 10000->4000 and 5000->2000. Totals derived independently:
         # before=15000, after=6000, saved=9000, ratio=9000/15000=0.6,
-        # est=floor(9000/3.5)=2571.
+        # tokens_before=floor(15000/3.5)=4285, tokens_after=floor(6000/3.5)=1714,
+        # tokens_saved=floor(9000/3.5)=2571.
         m = _Metrics()
         m.add_shrink(chars_before=10000, chars_after=4000)
         m.add_shrink(chars_before=5000, chars_after=2000)
         comp = m.snapshot()["compression"]
-        assert comp["chars_before"] == 15000
-        assert comp["chars_after"] == 6000
-        assert comp["chars_saved"] == 9000
+        assert comp["tokens_before"] == 4285
+        assert comp["tokens_after"] == 1714
+        assert comp["tokens_saved"] == 2571
         assert comp["ratio"] == pytest.approx(0.6)
-        assert comp["est_tokens_saved"] == 2571
 
     def test_add_shrink_clamps_negative_inputs(self) -> None:
         m = _Metrics()
         m.add_shrink(chars_before=-100, chars_after=-40)
         comp = m.snapshot()["compression"]
-        assert comp["chars_before"] == 0
-        assert comp["chars_after"] == 0
+        assert comp["tokens_before"] == 0
+        assert comp["tokens_after"] == 0
 
     def test_no_op_pass_reports_zero_savings_not_negative(self) -> None:
-        # A pass that does not shrink (after == before) contributes no savings,
-        # and chars_saved is floored at 0 even if a later turn grows the body.
+        # A pass that does not shrink (after == before) contributes no savings.
         m = _Metrics()
         m.add_shrink(chars_before=3000, chars_after=3000)
         comp = m.snapshot()["compression"]
-        assert comp["chars_saved"] == 0
+        assert comp["tokens_saved"] == 0
         assert comp["ratio"] == 0.0
 
     def test_bootstrap_restores_shrink_chars_from_ledger(self) -> None:
@@ -403,9 +404,11 @@ class TestMetricsCompression:
             m = _Metrics()
             m.bootstrap(ledger_path=ledger_path, max_recent=2)
             comp = m.snapshot()["compression"]
-            assert comp["chars_before"] == 10000
-            assert comp["chars_after"] == 4000
-            assert comp["chars_saved"] == 6000
+            # chars: before=10000, after=4000, saved=6000
+            # tokens: floor(10000/3.5)=2857, floor(4000/3.5)=1142, floor(6000/3.5)=1714
+            assert comp["tokens_before"] == 2857
+            assert comp["tokens_after"] == 1142
+            assert comp["tokens_saved"] == 1714
         finally:
             ledger_path.unlink(missing_ok=True)
 
@@ -420,8 +423,8 @@ class TestMetricsCompression:
             m = _Metrics()
             m.bootstrap(ledger_path=ledger_path, max_recent=1)
             comp = m.snapshot()["compression"]
-            assert comp["chars_before"] == 0
-            assert comp["chars_after"] == 0
+            assert comp["tokens_before"] == 0
+            assert comp["tokens_after"] == 0
         finally:
             ledger_path.unlink(missing_ok=True)
 
@@ -438,8 +441,8 @@ class TestMetricsCompression:
             m = _Metrics()
             m.bootstrap(ledger_path=ledger_path, max_recent=1)
             comp = m.snapshot()["compression"]
-            assert comp["chars_before"] == 0
-            assert comp["chars_after"] == 0
+            assert comp["tokens_before"] == 0
+            assert comp["tokens_after"] == 0
         finally:
             ledger_path.unlink(missing_ok=True)
 
@@ -558,7 +561,7 @@ class TestRecordRequestPerRowShrink:
         assert snap["requests"]["routed"] == 1
         assert snap["routed_tokens"]["input"] == 0
         assert snap["costs"]["saved_usd"] == 0
-        assert snap["compression"]["chars_before"] == 0
+        assert snap["compression"]["tokens_before"] == 0
 
 
 class TestBootstrapPerRowShrink:
@@ -893,3 +896,48 @@ class TestPremiumTokenBootstrap:
             "cache_read": 0,
             "cache_creation": 0,
         }
+
+
+class TestRequestsTotal:
+    """requests.total must equal routed + passthrough + errors."""
+
+    def test_total_is_zero_on_fresh_metrics(self) -> None:
+        m = _Metrics()
+        assert m.snapshot()["requests"]["total"] == 0
+
+    def test_total_includes_routed_only(self) -> None:
+        m = _Metrics()
+        m.incr_routed()
+        m.incr_routed()
+        snap = m.snapshot()
+        assert snap["requests"]["total"] == 2
+        assert snap["requests"]["routed"] == 2
+        assert snap["requests"]["errors"] == 0
+
+    def test_total_includes_passthrough_only(self) -> None:
+        m = _Metrics()
+        m.incr_passthrough()
+        snap = m.snapshot()
+        assert snap["requests"]["total"] == 1
+        assert snap["requests"]["passthrough"] == 1
+
+    def test_total_includes_errors(self) -> None:
+        m = _Metrics()
+        m.incr_error()
+        snap = m.snapshot()
+        assert snap["requests"]["total"] == 1
+        assert snap["requests"]["errors"] == 1
+        assert snap["requests"]["routed"] == 0
+        assert snap["requests"]["passthrough"] == 0
+
+    def test_total_sums_all_three_categories(self) -> None:
+        m = _Metrics()
+        m.incr_routed()
+        m.incr_routed()
+        m.incr_passthrough()
+        m.incr_error()
+        snap = m.snapshot()
+        assert snap["requests"]["total"] == 4
+        assert snap["requests"]["routed"] == 2
+        assert snap["requests"]["passthrough"] == 1
+        assert snap["requests"]["errors"] == 1

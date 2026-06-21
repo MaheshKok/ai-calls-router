@@ -166,6 +166,34 @@ class ShrinkStats:
             return 0
         return int(self.chars_saved / chars_per_token)
 
+    def est_tokens_before(self, *, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:
+        """Estimate tool_result tokens before the pass.
+
+        Args:
+            chars_per_token: Positive characters per token divisor.
+
+        Returns:
+            ``chars_before / chars_per_token`` truncated to an int, or 0 when the
+            divisor is not positive.
+        """
+        if chars_per_token <= 0:
+            return 0
+        return int(self.chars_before / chars_per_token)
+
+    def est_tokens_after(self, *, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:
+        """Estimate tool_result tokens after the pass.
+
+        Args:
+            chars_per_token: Positive characters per token divisor.
+
+        Returns:
+            ``chars_after / chars_per_token`` truncated to an int, or 0 when the
+            divisor is not positive.
+        """
+        if chars_per_token <= 0:
+            return 0
+        return int(self.chars_after / chars_per_token)
+
 
 def compute_shrink(*, path: str, before: JsonObject, after: JsonObject) -> ShrinkStats:
     """Measure the tool_result shrink between a body and its shrunk form.
