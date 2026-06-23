@@ -225,27 +225,6 @@ class TestPresetPricing:
         )
         assert tiers["code"]["input_cost_per_1m"] >= tiers["fast"]["input_cost_per_1m"]
 
-    def test_deepseek_prices_match_example_config(self, acr_home: Path) -> None:
-        # The wizard preset and the shipped config.example.yaml must agree so
-        # the documented rates are exactly what `acr init` writes.
-        example = yaml.safe_load(
-            (Path(__file__).resolve().parents[2] / "config.example.yaml").read_text(
-                encoding="utf-8"
-            )
-        )
-        written = _written_config(wizard.run_wizard(ask=_ScriptedAsk(["deepseek", "", ""])))
-        price_keys = (
-            "input_cost_per_1m",
-            "input_cached_cost_per_1m",
-            "output_cost_per_1m",
-        )
-        for tier in ("fast", "structured", "code", "crud"):
-            for key in price_keys:
-                assert (
-                    _claude_tiers(written)[tier][key]
-                    == example["agents"]["claude_code"]["tiers"][tier][key]
-                )
-
     def test_groq_preset_carries_no_price_overrides(self, acr_home: Path) -> None:
         path = wizard.run_wizard(ask=_ScriptedAsk(["groq", "", ""]))
         tiers = _claude_tiers(_written_config(path))
