@@ -29,6 +29,14 @@ AGENT_DEFAULT_TOOLS: dict[str, dict[str, str]] = {
         "Task": "premium",
         "ExitPlanMode": "premium",
         "AskUserQuestion": "premium",
+        # MCP tools: trailing-* glob routes read/search-class tools to cheap
+        # tiers; exact entries win over the glob (decide.py tier_for_tool). New
+        # tools the server adds later are covered automatically.
+        "mcp__lean-ctx__*": "code",
+        "mcp__lean-ctx__ctx_shell": "fast",
+        "mcp__lean-ctx__shell": "fast",
+        "mcp__lean-ctx__ctx_edit": "premium",
+        "mcp__codebase-memory-mcp__*": "code",
     },
     "hermes": {
         "terminal": "fast",

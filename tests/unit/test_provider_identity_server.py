@@ -66,7 +66,7 @@ def _provider_payload(group: str, *, upstream: str) -> dict[str, object]:
     }
     endpoints = {
         "claude_code": ["/v1/messages"],
-        "hermes": ["/v1/chat/completions"],
+        "hermes": ["/v1/chat/completions", "/v1/responses"],
     }
     tools = {
         "claude_code": {"Bash": "fast", "Edit": "premium"},

@@ -99,7 +99,7 @@ def test_templates_carry_no_cheap_key_env_and_pass_validation(acr_home: Path) ->
         assert not _has_forbidden_key_env(payload)
 
     assembled = provider_config.assemble_routes(_base_routes(), provider_files=loaded)
-    assert assembled["agents"]["hermes"]["tiers"]["fast"]["auth"]["mode"] == "api_key_env"
+    assert assembled["agents"]["hermes"]["tiers"]["fast"]["auth"]["mode"] == "oauth"
 
 
 def test_templates_label_reserved_fields(acr_home: Path) -> None:

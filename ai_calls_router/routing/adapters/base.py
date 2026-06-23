@@ -23,7 +23,7 @@ AGENT_GROUP_WIRES: dict[str, str] = {
 
 AGENT_GROUP_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "claude_code": ("/v1/messages",),
-    "hermes": ("/v1/chat/completions",),
+    "hermes": ("/v1/chat/completions", "/v1/responses"),
 }
 
 
