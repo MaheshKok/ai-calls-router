@@ -9,9 +9,9 @@
   ╚═╝  ╚═╝  ╚═════╝ ╚═╝  ╚═╝
 ```
 
-**The cheap-turn router for coding agents**
+**The model right-sizing router for coding agents**
 
-route mechanical turns to a cheaper model · Claude Code · Hermes · subscription-OAuth · fail-open · local-first · zero agent changes · honest accounting
+route mechanical turns to an efficient model · Claude Code · Hermes · subscription-OAuth · fail-open · local-first · zero agent changes · honest accounting
 
 [![CI](https://github.com/maheshkokare/ai-calls-router/actions/workflows/ci.yml/badge.svg)](https://github.com/maheshkokare/ai-calls-router/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ai-calls-router.svg)](https://pypi.org/project/ai-calls-router/)
@@ -36,7 +36,7 @@ ai-calls-router sits between your agent and the upstream API and splits the
 stream:
 
 - **Routed** — tool-result turns (digesting `Read`, `Grep`, `Bash`, … output)
-  go to a cheaper model.
+  go to an efficient model.
 - **Passthrough** — decision turns (a fresh prompt, an `Edit`, a `Write`,
   anything it cannot classify) go straight to the premium upstream, untouched.
 
@@ -49,7 +49,7 @@ premium spend.
 - **Proxy** — a local Starlette + uvicorn daemon on `127.0.0.1:8747`.
 - **Per-agent routing** — independent tool→tier maps and upstreams for
   `claude_code` and `hermes`.
-- **Subscription-OAuth serving** — route cheap turns to Sonnet / Codex on your
+- **Subscription-OAuth serving** — route routine turns to Sonnet / Codex on your
   *subscription* bearer, off the premium quota.
 - **Savings ledger + live dashboard** — every routed turn recorded against its
   true model, never a guessed number.
@@ -69,7 +69,7 @@ premium spend.
     ┌─────┴───────────────────────────┐
     ▼                                  ▼
   ROUTED                          PASSTHROUGH
-  tool_result → cheap tier        fresh / premium / unknown / any failure
+  tool_result → routed tier       fresh / premium / unknown / any failure
   tier model + tier credential    client headers forwarded verbatim
     │                                  │
     ▼                                  ▼
@@ -81,7 +81,7 @@ premium spend.
 
 A request carrying `tool_result` blocks is digesting a tool's output. The proxy
 finds which tool produced each result, maps it to a tier (`tools:` in the
-config), and serves that turn on the tier's cheap model. Everything else streams
+config), and serves that turn on the tier's efficient model. Everything else streams
 straight through in the client's native format — the proxy never translates a
 passthrough body.
 
@@ -148,13 +148,13 @@ tool use; there is little mechanical work to route, so the win is small.
 
 ## Agent compatibility
 
-| Agent              | Endpoint(s)                                  | Routed cheap model (default)                                           | Auth                              | Status |
+| Agent              | Endpoint(s)                                  | Routed model (default)                                                 | Auth                              | Status |
 | ------------------ | -------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------- | :----: |
 | **Claude Code**    | `POST /v1/messages`                          | `claude-sonnet-4-6`                                                    | Anthropic subscription OAuth      |   ✅   |
 | **Hermes**         | `POST /v1/chat/completions`, `/v1/responses` | `gpt-5.4-mini` (fast) · `gpt-5.3-codex-spark` (code/crud/structured)  | ChatGPT subscription OAuth        |   ✅   |
 | **Claude Desktop** | via embedded shim                            | same as Claude Code                                                    | Anthropic subscription OAuth      |   ✅   |
 
-- Claude Code's cheap tiers route to **Sonnet 4.6 on the subscription OAuth
+- Claude Code's routed tiers go to **Sonnet 4.6 on the subscription OAuth
   bearer** — separate Sonnet quota, premium (Opus) passthrough untouched, and a
   Sonnet-quota `429` fails open to it.
 - Provider files are **create-only**: the proxy never overwrites an edited file.
@@ -269,11 +269,11 @@ tiers read `auth.key_env` from the environment or `~/.ai-calls-router/.env`.
 | --- | --- | --- | --- | --- |
 | **Raw premium (no proxy)** | every turn billed at premium | — | — | — |
 | **Headroom** | compresses tokens *within* each call | local proxy / lib / MCP | yes | none |
-| **ai-calls-router** | routes whole cheap *turns* to a cheaper model | local proxy | yes (fail-open) | none |
+| **ai-calls-router** | routes whole mechanical *turns* to an efficient model | local proxy | yes (fail-open) | none |
 
 Complementary, not competing: ai-calls-router can call Headroom's compressor on
 its routed path (`[compression]` extra) to shrink the body *before* it serves
-the turn on the cheap model.
+the turn on the routed model.
 
 ---
 
