@@ -8,6 +8,14 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 from [Conventional Commit](https://www.conventionalcommits.org/) messages, so new
 entries are added here when a release pull request is merged.
 
+## [0.5.2](https://github.com/MaheshKok/ai-calls-router/compare/ai-calls-router-v0.5.1...ai-calls-router-v0.5.2) (2026-06-23)
+
+
+### Features
+
+* compress tool_result blocks on the Anthropic OAuth routed path ([0108d1d](https://github.com/MaheshKok/ai-calls-router/commit/0108d1da7639905e8a14202fce122abe1a3c3f1e))
+* compress tool_result blocks on the Anthropic OAuth routed path ([34d7951](https://github.com/MaheshKok/ai-calls-router/commit/34d7951717163fa5854ab0207fedc7e310b12106))
+
 ## [0.5.1](https://github.com/MaheshKok/ai-calls-router/compare/ai-calls-router-v0.5.0...ai-calls-router-v0.5.1) (2026-06-23)
 
 
