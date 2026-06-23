@@ -459,3 +459,103 @@ def test_strip_long_context_passthrough_does_not_mutate_input_headers() -> None:
     anthropic_oauth.strip_long_context_passthrough(body, headers)
 
     assert headers == {"anthropic-beta": "context-1m-2025-08-07,tool-streaming"}
+
+
+@pytest.mark.asyncio
+async def test_messages_call_compresses_routed_payload_before_post_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # compress=True must run the routed payload through compress_anthropic and
+    # POST the compressed body upstream, returning that pass's shrink stat.
+    seen: list[dict[str, object]] = []
+
+    def fake_compress(
+        body: dict[str, object], *, enable_text_ml: bool = False
+    ) -> tuple[dict[str, object], anthropic_oauth.shrink_stats.ShrinkStats]:
+        seen.append({"model": body.get("model"), "enable_text_ml": enable_text_ml})
+        compressed = {**body, "_compressed": True}
+        return compressed, anthropic_oauth.shrink_stats.ShrinkStats("compress", 120, 40)
+
+    monkeypatch.setattr(anthropic_oauth, "compress_anthropic", fake_compress)
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_ok_response())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await anthropic_oauth.messages_call(
+            body=_body(),
+            tier_cfg=_tier(),
+            oauth_headers={},
+            compress=True,
+            client=client,
+        )
+
+    assert result is not None
+    _response, _usage, shrink = result
+    # The returned stat is the compress pass's, not a no-op.
+    assert shrink.path == "compress"
+    assert shrink.chars_before == 120
+    assert shrink.chars_after == 40
+    # Compression saw the already-model-swapped routed payload.
+    assert seen == [{"model": "claude-sonnet-4-6", "enable_text_ml": False}]
+    # The compressed body — not the original — is what reached api.anthropic.com.
+    assert json.loads(captured[0].content)["_compressed"] is True
+
+
+@pytest.mark.asyncio
+async def test_messages_call_does_not_compress_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # compress=False (the default) must never invoke the compressor and must
+    # report a no-op shrink so the payload is forwarded verbatim.
+    def fail_compress(
+        body: dict[str, object], *, enable_text_ml: bool = False
+    ) -> tuple[dict[str, object], anthropic_oauth.shrink_stats.ShrinkStats]:
+        pytest.fail("compress_anthropic must not run when compress is False")
+
+    monkeypatch.setattr(anthropic_oauth, "compress_anthropic", fail_compress)
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_ok_response())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await anthropic_oauth.messages_call(
+            body=_body(), tier_cfg=_tier(), oauth_headers={}, client=client
+        )
+
+    assert result is not None
+    _response, _usage, shrink = result
+    assert shrink.path == "none"
+    assert "_compressed" not in json.loads(captured[0].content)
+
+
+@pytest.mark.asyncio
+async def test_messages_call_forwards_text_ml_flag_to_compressor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The per-tier text-ML opt-in must reach compress_anthropic unchanged.
+    seen: list[bool] = []
+
+    def fake_compress(
+        body: dict[str, object], *, enable_text_ml: bool = False
+    ) -> tuple[dict[str, object], anthropic_oauth.shrink_stats.ShrinkStats]:
+        seen.append(enable_text_ml)
+        return body, anthropic_oauth.shrink_stats.ShrinkStats("none", 0, 0)
+
+    monkeypatch.setattr(anthropic_oauth, "compress_anthropic", fake_compress)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=_ok_response()))
+    async with httpx.AsyncClient(transport=transport) as client:
+        await anthropic_oauth.messages_call(
+            body=_body(),
+            tier_cfg=_tier(),
+            oauth_headers={},
+            compress=True,
+            enable_text_ml=True,
+            client=client,
+        )
+
+    assert seen == [True]
