@@ -40,6 +40,7 @@ class TestPaths:
         assert config.log_path() == tmp_path / "acr.log"
         assert config.daemon_log_path() == tmp_path / "acr.daemon.out"
         assert config.ledger_path() == tmp_path / "savings.jsonl"
+        assert config.metrics_db_path() == tmp_path / "metrics.db"
 
     def test_daemon_log_path_is_distinct_from_structured_log(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -53,6 +54,13 @@ class TestPaths:
         override = tmp_path / "ledger.jsonl"
         monkeypatch.setenv("ACR_SAVINGS_LEDGER", str(override))
         assert config.ledger_path() == override
+
+    def test_metrics_db_path_honors_env_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        override = tmp_path / "metrics.sqlite"
+        monkeypatch.setenv("ACR_METRICS_DB", str(override))
+        assert config.metrics_db_path() == override
 
 
 class TestServerSettings:

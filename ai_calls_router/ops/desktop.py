@@ -12,9 +12,12 @@ import json
 from dataclasses import dataclass
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 from ai_calls_router._lib import config
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject, JsonValue
 
 ENV_KEY = "ANTHROPIC_BASE_URL"
 DEFAULT_SETTINGS_RELATIVE_PATH = Path(".claude") / "settings.json"
@@ -55,7 +58,7 @@ class DesktopBackup:
     env_existed: bool
     file_existed: bool
 
-    def to_json(self) -> dict[str, Any]:
+    def to_json(self) -> JsonObject:
         """Return the stable JSON representation written to the sidecar."""
         return {
             "config_path": self.config_path,
@@ -264,12 +267,12 @@ def _resolve_backup_path(path: Path | None) -> Path:
     return selected.expanduser().resolve(strict=False)
 
 
-def _read_settings(path: Path) -> tuple[dict[str, Any], bool]:
+def _read_settings(path: Path) -> tuple[JsonObject, bool]:
     if not path.exists():
         return {}, False
     try:
         raw = path.read_text(encoding="utf-8")
-        parsed = json.loads(raw)
+        parsed = cast("JsonValue", json.loads(raw))
     except JSONDecodeError as exc:
         raise DesktopError(f"{path} is not valid JSON: {exc.msg}") from exc
     if not isinstance(parsed, dict):
@@ -277,12 +280,12 @@ def _read_settings(path: Path) -> tuple[dict[str, Any], bool]:
     return parsed, True
 
 
-def _write_settings(path: Path, settings: dict[str, Any]) -> None:
+def _write_settings(path: Path, settings: JsonObject) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 
 
-def _current_env_state(settings: dict[str, Any]) -> tuple[bool, str | None]:
+def _current_env_state(settings: JsonObject) -> tuple[bool, str | None]:
     if "env" not in settings:
         return False, None
     env = settings["env"]
@@ -296,7 +299,7 @@ def _current_env_state(settings: dict[str, Any]) -> tuple[bool, str | None]:
     return True, value
 
 
-def _current_base_url(settings: dict[str, Any]) -> str | None:
+def _current_base_url(settings: JsonObject) -> str | None:
     env = settings.get("env")
     if not isinstance(env, dict):
         return None
@@ -304,14 +307,15 @@ def _current_base_url(settings: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _ensure_env_mapping(settings: dict[str, Any]) -> dict[str, Any]:
+def _ensure_env_mapping(settings: JsonObject) -> JsonObject:
     if "env" not in settings:
-        env: dict[str, Any] = {}
+        env: JsonObject = {}
         settings["env"] = env
     else:
-        env = settings["env"]
-    if not isinstance(env, dict):
-        raise DesktopError("Claude settings env must be a JSON object")
+        env_value = settings["env"]
+        if not isinstance(env_value, dict):
+            raise DesktopError("Claude settings env must be a JSON object")
+        env = env_value
     return env
 
 
@@ -319,7 +323,7 @@ def _read_backup(path: Path) -> DesktopBackup | None:
     if not path.exists():
         return None
     try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
+        parsed = cast("JsonValue", json.loads(path.read_text(encoding="utf-8")))
     except JSONDecodeError as exc:
         raise DesktopError(f"{path} is not valid JSON: {exc.msg}") from exc
     if not isinstance(parsed, dict):

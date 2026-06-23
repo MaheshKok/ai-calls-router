@@ -14,11 +14,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 import yaml
 
 from ai_calls_router._lib import config
+from ai_calls_router.ops import bootstrap
+from ai_calls_router.routing.agent_defaults import (
+    AGENT_DEFAULT_PREMIUM_TOOLS,
+    AGENT_DEFAULT_TOOLS,
+)
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject
 
 DEFAULT_PROVIDER = "deepseek"
 
@@ -27,24 +35,28 @@ DEFAULT_PROVIDER = "deepseek"
 PRESETS: dict[str, dict[str, str]] = {
     "deepseek": {
         "fast": "deepseek/deepseek-v4-flash",
+        "structured": "deepseek/deepseek-v4-flash",
         "code": "deepseek/deepseek-v4-pro",
         "crud": "deepseek/deepseek-v4-flash",
         "key_env": "DEEPSEEK_API_KEY",
     },
     "groq": {
         "fast": "groq/llama-3.3-70b-versatile",
+        "structured": "groq/llama-3.3-70b-versatile",
         "code": "groq/llama-3.3-70b-versatile",
         "crud": "groq/llama-3.1-8b-instant",
         "key_env": "GROQ_API_KEY",
     },
     "kimi": {
         "fast": "moonshot/kimi-k2-0905-preview",
+        "structured": "moonshot/kimi-k2-0905-preview",
         "code": "moonshot/kimi-k2-0905-preview",
         "crud": "moonshot/kimi-k2-0905-preview",
         "key_env": "MOONSHOT_API_KEY",
     },
     "openrouter": {
         "fast": "openrouter/qwen/qwen3-coder",
+        "structured": "openrouter/qwen/qwen3-coder",
         "code": "openrouter/moonshotai/kimi-k2",
         "crud": "openrouter/qwen/qwen3-coder",
         "key_env": "OPENROUTER_API_KEY",
@@ -66,6 +78,11 @@ PRESET_PRICES: dict[str, dict[str, dict[str, float]]] = {
             "input_cached_cost_per_1m": 0.0028,
             "output_cost_per_1m": 0.28,
         },
+        "structured": {
+            "input_cost_per_1m": 0.14,
+            "input_cached_cost_per_1m": 0.0028,
+            "output_cost_per_1m": 0.28,
+        },
         "code": {
             "input_cost_per_1m": 0.435,
             "input_cached_cost_per_1m": 0.003625,
@@ -79,41 +96,24 @@ PRESET_PRICES: dict[str, dict[str, dict[str, float]]] = {
     },
 }
 
-TIER_MAX_TOKENS: dict[str, int] = {"fast": 8192, "code": 8192, "crud": 4096}
-
-DEFAULT_TOOLS: dict[str, str] = {
-    "Bash": "fast",
-    "BashOutput": "fast",
-    "KillShell": "fast",
-    "WebFetch": "fast",
-    "WebSearch": "fast",
-    "Read": "code",
-    "Grep": "code",
-    "Glob": "code",
-    "LSP": "code",
-    "TodoWrite": "crud",
-    "TaskList": "crud",
-    "TaskGet": "crud",
-    "Edit": "premium",
-    "Write": "premium",
-    "MultiEdit": "premium",
-    "NotebookEdit": "premium",
-    "Task": "premium",
-    "ExitPlanMode": "premium",
-    "AskUserQuestion": "premium",
-}
-
-PREMIUM_TOOLS: list[str] = [
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "NotebookEdit",
-    "Task",
-    "ExitPlanMode",
-    "AskUserQuestion",
-]
+TIER_MAX_TOKENS: dict[str, int] = {"fast": 8192, "structured": 8192, "code": 8192, "crud": 4096}
 
 AskFn = Callable[[str], str]
+
+
+def _router_config() -> JsonObject:
+    """Return the default Phase 7 identity routing block for config.yaml."""
+    return {
+        "endpoint_defaults": {
+            "/v1/messages": "claude_code",
+            "/v1/chat/completions": "hermes",
+        },
+        "user_agent_map": [
+            {"contains": "claude", "group": "claude_code"},
+            {"contains": "hermes", "group": "hermes"},
+        ],
+        "fallback": None,
+    }
 
 
 def _ask_port(ask: AskFn) -> int:
@@ -177,9 +177,7 @@ def _default_key_env(provider: str, models: dict[str, str]) -> str:
     return f"{prefix.upper().replace('-', '_')}_API_KEY"
 
 
-def _build_config(
-    *, port: int, models: dict[str, str], key_env: str, provider: str
-) -> dict[str, Any]:
+def _build_config(*, port: int, models: dict[str, str], key_env: str, provider: str) -> JsonObject:
     """Assemble the full config.yaml mapping.
 
     Args:
@@ -195,36 +193,72 @@ def _build_config(
         LiteLLM's pricing table is the only cost source.
     """
     prices = PRESET_PRICES.get(provider, {})
-    tiers = {
+    claude_tiers = {
         tier: {
+            "provider": provider,
             "model": models[tier],
-            "key_env": key_env,
+            "auth": {"mode": "api_key_env", "key_env": key_env},
             "max_tokens": TIER_MAX_TOKENS[tier],
             **prices.get(tier, {}),
         }
         for tier in TIER_MAX_TOKENS
     }
-    return {
-        "server": {
-            "host": config.DEFAULT_HOST,
-            "port": port,
-            "upstream": config.DEFAULT_UPSTREAM,
+    hermes_tiers = {
+        "fast": {
+            "provider": "openai",
+            "model": "gpt-4.1-mini",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
+            "max_tokens": 8192,
         },
-        "premium": {"provider": "anthropic"},
-        "settings": {
-            "tier_precedence": ["premium", "code", "fast", "crud"],
-            "compress_routed": True,
-            "compression": {
-                "keep_recent_messages": 6,
-                "max_tool_result_chars": 4000,
-                "use_rtk": "auto",
-            },
-            "premium_tools": list(PREMIUM_TOOLS),
-            "escalate_on_premium_tools": True,
+        "code": {
+            "provider": "openai",
+            "model": "gpt-4.1",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
+            "max_tokens": 8192,
         },
-        "tiers": tiers,
-        "tools": dict(DEFAULT_TOOLS),
+        "crud": {
+            "provider": "openai",
+            "model": "gpt-4.1-mini",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
+            "max_tokens": 4096,
+        },
+        "structured": {
+            "provider": "openai",
+            "model": "gpt-4.1",
+            "auth": {"mode": "api_key_env", "key_env": "OPENAI_API_KEY"},
+            "max_tokens": 8192,
+        },
     }
+    return cast(
+        "JsonObject",
+        {
+            "server": {
+                "host": config.DEFAULT_HOST,
+                "port": port,
+                "upstream": config.DEFAULT_UPSTREAM,
+            },
+            "premium": {"provider": "anthropic"},
+            "router": _router_config(),
+            "settings": {
+                "tier_precedence": ["premium", "structured", "code", "fast", "crud"],
+                "escalate_on_premium_tools": True,
+            },
+            "agents": {
+                "claude_code": {
+                    "upstream": config.DEFAULT_UPSTREAM,
+                    "tools": dict(AGENT_DEFAULT_TOOLS["claude_code"]),
+                    "premium_tools": list(AGENT_DEFAULT_PREMIUM_TOOLS["claude_code"]),
+                    "tiers": claude_tiers,
+                },
+                "hermes": {
+                    "upstream": "https://api.openai.com",
+                    "tools": dict(AGENT_DEFAULT_TOOLS["hermes"]),
+                    "premium_tools": list(AGENT_DEFAULT_PREMIUM_TOOLS["hermes"]),
+                    "tiers": hermes_tiers,
+                },
+            },
+        },
+    )
 
 
 def run_wizard(ask: AskFn = input) -> Path:
@@ -262,4 +296,5 @@ def run_wizard(ask: AskFn = input) -> Path:
         ),
         encoding="utf-8",
     )
+    bootstrap.ensure_provider_configs()
     return path

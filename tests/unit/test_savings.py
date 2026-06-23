@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -23,7 +22,7 @@ from ai_calls_router.accounting.shrink_stats import ShrinkStats
 CHEAP_MODEL = "deepseek/acr-test-cheap"
 PREMIUM_MODEL = "deepseek/acr-test-premium"
 
-PRICED_ROUTES: dict[str, Any] = {
+PRICED_ROUTES: dict[str, object] = {
     "tiers": {
         "fast": {
             "model": CHEAP_MODEL,
@@ -45,7 +44,7 @@ def _register_test_prices() -> None:
     savings.register_tier_prices(PRICED_ROUTES)
 
 
-def _read_entries(ledger: Path) -> list[dict[str, Any]]:
+def _read_entries(ledger: Path) -> list[dict[str, object]]:
     """Parse all JSONL entries from a ledger file."""
     if not ledger.exists():
         return []
@@ -150,7 +149,7 @@ class TestRegisterTierPrices:
         ],
         ids=["empty", "none-tiers", "str-tiers", "int-tier", "non-str-model"],
     )
-    def test_malformed_routes_never_raise(self, routes: dict[str, Any]) -> None:
+    def test_malformed_routes_never_raise(self, routes: dict[str, object]) -> None:
         savings.register_tier_prices(routes)
 
     def test_re_registration_is_idempotent(self) -> None:
@@ -392,14 +391,14 @@ class TestRoutedPricesFromTier:
         [None, "deepseek/x", 5, 1.5, ["model"], {"model": "deepseek/x"}],
         ids=["none", "str", "int", "float", "list", "no-prices"],
     )
-    def test_returns_none_for_unpriceable_tier(self, tier_cfg: Any) -> None:
+    def test_returns_none_for_unpriceable_tier(self, tier_cfg: object) -> None:
         assert savings._routed_prices_from_tier(tier_cfg) is None
 
     def test_returns_none_when_output_price_missing(self) -> None:
         assert savings._routed_prices_from_tier({"input_cost_per_1m": 0.5}) is None
 
     @pytest.mark.parametrize("bad", ["0.5", True, None], ids=["str", "bool", "none"])
-    def test_returns_none_when_input_price_not_a_number(self, bad: Any) -> None:
+    def test_returns_none_when_input_price_not_a_number(self, bad: object) -> None:
         tier = {"input_cost_per_1m": bad, "output_cost_per_1m": 1.0}
         assert savings._routed_prices_from_tier(tier) is None
 
@@ -423,7 +422,7 @@ class TestRoutedPricesFromTier:
         assert cached == miss == pytest.approx(0.5 / 1_000_000)
 
     @pytest.mark.parametrize("bad", ["x", True, None], ids=["str", "bool", "none"])
-    def test_cached_rate_falls_back_when_not_a_number(self, bad: Any) -> None:
+    def test_cached_rate_falls_back_when_not_a_number(self, bad: object) -> None:
         miss, cached, _ = savings._routed_prices_from_tier(
             {
                 "input_cost_per_1m": 0.5,

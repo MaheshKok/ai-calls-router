@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from ai_calls_router import cli
 
@@ -12,8 +11,8 @@ from ai_calls_router import cli
 def test_desktop_on_status_off_round_trip_with_tmp_config(
     *,
     tmp_path: Path,
-    monkeypatch: Any,
-    capsys: Any,
+    monkeypatch: object,
+    capsys: object,
 ) -> None:
     """The desktop CLI operates only on the requested settings file in tests."""
     settings_path = tmp_path / "settings.json"

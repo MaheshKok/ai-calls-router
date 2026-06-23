@@ -1,18 +1,23 @@
 """Read-only measurement of how much a shrink pass removed from a request body.
 
-The two routing shrink passes -- ``reduce.reduce_tool_results`` (DeepSeek direct
-path) and ``compression.compress_body`` (LiteLLM path) -- are pure functions that
-map a request body to a smaller body. This module counts the tool_result
-characters in a body and packages a before/after measurement (``ShrinkStats``)
-so the engine can report compression savings to logs, the savings ledger, and
-the metrics snapshot without changing what is sent. Counting walks the Anthropic
-body shape, never mutates it, and treats any non-tool_result content as zero.
+This module counts tool-output characters in a request body and packages a
+before/after measurement (``ShrinkStats``) so the engine can report compression
+savings to logs, the savings ledger, and the metrics snapshot without changing
+what is sent. The router no longer runs a shrink pass of its own on native
+direct paths -- token reduction is delegated to the upstream Headroom layer --
+so those paths usually feed an unchanged body as both before and after and the
+stats report a no-op (path "none", zero chars saved). Counting walks Anthropic
+tool_result and OpenAI Responses function_call_output shapes, never mutates the
+body, and treats any non-tool-output content as zero.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject, JsonValue
 
 # Average characters per token. A coarse, model-agnostic divisor used only to
 # turn a measured character delta into an order-of-magnitude token estimate; the
@@ -20,7 +25,7 @@ from typing import Any
 DEFAULT_CHARS_PER_TOKEN = 3.5
 
 
-def _content_chars(content: Any) -> int:
+def _content_chars(content: JsonValue) -> int:
     """Count characters in one tool_result content value.
 
     Args:
@@ -35,7 +40,7 @@ def _content_chars(content: Any) -> int:
         return len(content)
     if isinstance(content, list):
         return sum(
-            len(block["text"])
+            len(cast("str", block["text"]))
             for block in content
             if isinstance(block, dict)
             and block.get("type") == "text"
@@ -44,7 +49,7 @@ def _content_chars(content: Any) -> int:
     return 0
 
 
-def _message_tool_result_chars(message: Any) -> int:
+def _message_tool_result_chars(message: JsonValue) -> int:
     """Count tool_result characters in one message.
 
     Args:
@@ -66,13 +71,30 @@ def _message_tool_result_chars(message: Any) -> int:
     )
 
 
-def tool_result_chars(body: dict[str, Any]) -> int:
-    """Sum the character length of every tool_result text in a request body.
+def _responses_tool_output_chars(item: JsonValue) -> int:
+    """Count OpenAI Responses tool-output characters in one input item."""
+    if not isinstance(item, dict):
+        return 0
+    if item.get("type") not in {"function_call_output", "custom_tool_call_output"}:
+        return 0
+    return _content_chars(item.get("output"))
 
-    Walks all messages and counts only tool_result content -- the bytes the
-    shrink passes target. Non-tool_result content, malformed messages, and a
-    missing or non-list ``messages`` field all contribute 0. The body is never
-    mutated.
+
+def _responses_input_tool_output_chars(body: JsonObject) -> int:
+    """Count OpenAI Responses tool-output characters in a request body."""
+    input_value = body.get("input")
+    if not isinstance(input_value, list):
+        return 0
+    return sum(_responses_tool_output_chars(item) for item in input_value)
+
+
+def tool_result_chars(body: JsonObject) -> int:
+    """Sum the character length of every tool-output text in a request body.
+
+    Walks Anthropic ``messages`` and OpenAI Responses ``input`` and counts only
+    tool-output content -- the bytes the shrink passes target. Non-tool-output
+    content, malformed messages, and missing containers all contribute 0. The
+    body is never mutated.
 
     Args:
         body: Anthropic-format request body.
@@ -81,9 +103,12 @@ def tool_result_chars(body: dict[str, Any]) -> int:
         Total tool_result characters in the body (0 when there are none).
     """
     messages = body.get("messages")
-    if not isinstance(messages, list):
-        return 0
-    return sum(_message_tool_result_chars(message) for message in messages)
+    message_chars = (
+        sum(_message_tool_result_chars(message) for message in messages)
+        if isinstance(messages, list)
+        else 0
+    )
+    return message_chars + _responses_input_tool_output_chars(body)
 
 
 @dataclass(frozen=True)
@@ -141,8 +166,36 @@ class ShrinkStats:
             return 0
         return int(self.chars_saved / chars_per_token)
 
+    def est_tokens_before(self, *, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:
+        """Estimate tool_result tokens before the pass.
 
-def compute_shrink(*, path: str, before: dict[str, Any], after: dict[str, Any]) -> ShrinkStats:
+        Args:
+            chars_per_token: Positive characters per token divisor.
+
+        Returns:
+            ``chars_before / chars_per_token`` truncated to an int, or 0 when the
+            divisor is not positive.
+        """
+        if chars_per_token <= 0:
+            return 0
+        return int(self.chars_before / chars_per_token)
+
+    def est_tokens_after(self, *, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:
+        """Estimate tool_result tokens after the pass.
+
+        Args:
+            chars_per_token: Positive characters per token divisor.
+
+        Returns:
+            ``chars_after / chars_per_token`` truncated to an int, or 0 when the
+            divisor is not positive.
+        """
+        if chars_per_token <= 0:
+            return 0
+        return int(self.chars_after / chars_per_token)
+
+
+def compute_shrink(*, path: str, before: JsonObject, after: JsonObject) -> ShrinkStats:
     """Measure the tool_result shrink between a body and its shrunk form.
 
     Args:

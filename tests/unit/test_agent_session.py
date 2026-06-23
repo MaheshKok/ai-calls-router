@@ -30,7 +30,7 @@ def test_identify_agent_api_node() -> None:
 
 
 def test_identify_agent_unknown() -> None:
-    """Anything else surfaces as the agent string truncated."""
+    """objectthing else surfaces as the agent string truncated."""
     ua = "curl/8.4.0"
     assert metrics.identify_agent(ua) == ua
 

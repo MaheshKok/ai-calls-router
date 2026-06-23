@@ -11,8 +11,6 @@ including when the client disconnects mid-stream.
 
 from __future__ import annotations
 
-from typing import Any
-
 import httpx
 from starlette.responses import Response
 
@@ -84,6 +82,11 @@ class TestFilterRequestHeaders:
         assert filtered["authorization"] == "Bearer oauth-token"
         assert filtered["anthropic-version"] == "2023-06-01"
         assert filtered["content-type"] == "application/json"
+
+    def test_acr_control_headers_dropped(self) -> None:
+        filtered = pt.filter_request_headers({"x-acr-agent": "hermes", "authorization": "Bearer c"})
+        assert "x-acr-agent" not in {key.lower(): value for key, value in filtered.items()}
+        assert filtered["authorization"] == "Bearer c"
 
 
 class TestForward:
@@ -262,6 +265,7 @@ class TestForward:
             )
         assert response.status_code == 502
         assert b'"type": "error"' in response.body
+        assert b"connection refused" not in response.body
 
 
 class _FakeUpstreamResponse:
@@ -273,7 +277,7 @@ class _FakeUpstreamResponse:
         self.headers: dict[str, str] = {}
         self.closed = False
 
-    async def aiter_raw(self) -> Any:
+    async def aiter_raw(self) -> object:
         for chunk in self._chunks:
             yield chunk
 

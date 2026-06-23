@@ -8,86 +8,119 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 from [Conventional Commit](https://www.conventionalcommits.org/) messages, so new
 entries are added here when a release pull request is merged.
 
+## [Unreleased]
+
+### Added
+
+- Added ChatGPT-OAuth routed serving for Hermes. Decision and premium turns pass
+  through to `https://chatgpt.com/backend-api/codex` with the client's own OAuth;
+  cheap tool-result turns are served by smaller GPT models (`gpt-5.4-mini`,
+  `gpt-5.3-codex-spark`) on the same ChatGPT plan. Routing reuses the existing
+  plan quota — it changes which model serves a turn, not the billing source.
+- Added `auth.mode: oauth` tier authentication so agent-local tiers can serve on
+  the client's ChatGPT OAuth instead of an API key.
+- Added `POST /v1/responses` inbound support so Hermes can route on either the
+  OpenAI Chat Completions or the Responses wire, with conversion between the
+  Anthropic and Responses formats.
+
+### Fixed
+
+- Fixed a startup schema-validation failure (`Input should be 'api_key_env'`)
+  that rejected `auth.mode: oauth` tiers and disabled routing, forcing all
+  traffic to premium passthrough.
+
+### Notes
+
+- This branch (`codex/support-codex-hermes`) originally targeted both a
+  standalone `codex` client and Hermes. The standalone `codex` agent group and
+  its experimental ChatGPT WebSocket transport were dropped before release; only
+  Hermes ships and all routing is HTTP-only. The Responses serving that codex
+  used is folded into the `hermes` group.
+
+## [0.5.0] - 2026-06-17
+
+### Added
+
+- Added provider-specific YAML files under `~/.ai-calls-router/config/` for
+  `claude-code.yaml` and `hermes.yaml`.
+- Added startup bootstrap that creates missing provider config files without
+  overwriting operator-edited files.
+- Added canonical assembly from global `config.yaml` plus provider YAML files
+  into the existing `routes["agents"]` shape used by the decision core.
+- Added validation that rejects cheap-tier `key_env` entries in provider files;
+  cheap provider credentials stay under tier config.
+- Added `router:` identity policy with endpoint defaults, `user_agent_map`, and
+  fail-closed `fallback: null`.
+- Added strict JSON structural typing and stricter static checks across package
+  and tests.
+
+### Changed
+
+- Passthrough now targets the resolved agent group's configured upstream instead
+  of always using the global premium upstream.
+- `acr init` now seeds router policy and relies on bootstrap for provider files.
+- `config.example.yaml` now shows agent-local tiers so Claude Code and Hermes
+  can route the same semantic tier names to different models.
+
+### Fixed
+
+- Fixed cross-provider passthrough so Hermes and Claude Code non-routed turns go
+  to their own configured upstreams.
+- Fixed unresolved identity handling so the router returns `400` before any
+  upstream request when a strict router policy cannot attribute the agent.
+- Removed unrecognized type-checker config keys while keeping strict checking
+  active.
+
+### Tests
+
+- Added provider-config tests for YAML assembly, missing and malformed provider
+  files, identity precedence, fail-closed attribution, key rejection, and
+  immutability.
+- Added bootstrap tests proving provider files are create-only, idempotent,
+  valid, and free of cheap-tier keys.
+- Added compatibility smoke coverage for Claude Code and Hermes routed and
+  premium turns.
+
+## [0.4.0] - 2026-06-17
+
+### Added
+
+- Added `POST /v1/chat/completions` support for Hermes sessions that speak the
+  OpenAI Chat Completions wire format.
+- Added an OpenAI Chat adapter with Hermes as its default agent group.
+- Added deterministic Chat-to-Anthropic request conversion for routed turns.
+- Added Anthropic-to-Chat response synthesis for non-streaming routed responses.
+- Added Chat Completions SSE synthesis for streamed routed responses.
+- Added Hermes pending-tool extraction from the last run of OpenAI tool-result
+  messages.
+
+### Changed
+
+- Generalized server handling so adapter-backed endpoints share the same routing
+  and passthrough path.
+- Threaded the real request path through routing metrics instead of hardcoding
+  the Anthropic Messages path.
+
+### Tests
+
+- Added Chat conversion, SSE, adapter, and server integration tests.
+- Verified malformed Chat requests fail open to passthrough.
+- Verified Hermes premium-tool responses escalate to passthrough.
+
+## [0.3.0] - 2026-06-14
+
+### Added
+
+- Added the OpenAI compatibility roadmap and Phase 0 findings for multi-client
+  routing.
+- Added per-agent tool-map planning for Claude Code and Hermes.
+- Added risk notes for credential isolation, fail-open routing, cache stability,
+  and provider-file drift.
+
 ## [0.2.0] - 2026-06-14
 
 ### Added
 
-- Live dashboard at `/dashboard` with per-request table, per-agent grouping,
-  per-session breakdown, and auto-refresh. Removed `tier` and `route` columns;
-  split cache into `cache hit` (read) and `cache miss` (write) columns.
-- Model-column prefix stripping (shows `deepseek-v4-flash` instead of
-  `deepseek/deepseek-v4-flash`).
-- Agent identification from `User-Agent` header with friendly display labels
-  (🖥️ Claude-Code CLI, 💻 Claude Desktop, 🔧 API).
-- Session fingerprinting: SHA-256 hash of the first system message content,
-  first 12 hex chars, shown in the dashboard.
-- Provider identification from model string: maps arbitrary model IDs to a
-  dashboard-friendly provider label (anthropic, openai, deepseek, google, aws,
-  azure, meta, mistral, cohere, groq, fireworks, perplexity, together, unknown).
-- Metrics persistence: `bootstrap()` replays `savings.jsonl` on proxy startup to
-  restore routed-token counters and recent-request history, so the dashboard
-  survives restarts.
-- Cache-Control `no-cache, no-store, must-revalidate` headers on `/dashboard` to
-  prevent stale cache after HTML updates.
-
-### Fixed
-
-- Dashboard JavaScript syntax error caused by escaped quotes in the `esc()`
-  sanitizer function — rewritten with clean quoting and validated via
-  `node --check`.
-
-## [0.1.0] - 2026-06-14
-
-First tagged release. Anthropic passthrough routing is verified working
-end-to-end against Claude Code (CLI and desktop) via `ANTHROPIC_BASE_URL`.
-
-### Added
-
-#### Proxy and routing
-
-- Standalone reverse proxy that routes Claude Code's tool-result-processing turns
-  to a cheap LiteLLM-supported model while passing every decision-making turn
-  through to Anthropic untouched.
-- Tool-to-tier routing engine with premium-tool escalation and a fail-open
-  passthrough on every error path.
-- DeepSeek direct path that speaks Anthropic format natively, bypassing LiteLLM
-  to preserve byte-for-byte prefix stability for provider-side prefix caching.
-- Deterministic `tool_result` reducer on the DeepSeek direct path for stable,
-  cache-friendly request prefixes.
-- Built-in tool-result compressor with an optional `rtk` backend.
-- Structured per-route logging: tier, model, route (direct/litellm), token and
-  cache hit/miss counts, and request duration.
-
-#### Accounting
-
-- JSONL savings ledger and an `acr savings` report that prices routed models from
-  LiteLLM's pricing table and omits models it cannot price.
-- Cache-aware ledger pricing that accounts for cache-read versus cache-creation
-  input tokens on supported providers.
-
-#### CLI and operations
-
-- `acr` command-line interface: `init`, `start`, `stop`, `status`, `serve`,
-  `code`, `desktop`, `savings`, and `version`.
-- Background daemon with pidfile, log, and health-check management.
-- Interactive `acr init` configuration wizard with provider presets.
-- `acr desktop` for persistent routing by managing the `ANTHROPIC_BASE_URL`
-  setting in Claude's settings file, with `on`, `off`, and `status` actions.
-
-#### Conversion fidelity
-
-- Anthropic <-> OpenAI message conversion with golden-pair fidelity tests.
-
-#### Packaging, tooling, and governance
-
-- Layered package architecture (proxy, routing, accounting, ops) with the routed
-  call engine split into engine and synthesis modules.
-- Single-source versioning from `__init__.py`, PEP 561 `py.typed` marker, and
-  reproducible sdist/wheel builds.
-- CI/CD workflows plus a blocking quality-gate stack: ruff, pyright, pytest with
-  98% coverage floor, deptry, pip-audit, radon/xenon complexity limits, bandit,
-  and pre-commit hooks.
-- OSS governance files: LICENSE, CONTRIBUTING, SECURITY, Code of Conduct, and
-  issue/PR templates.
-
-[0.1.0]: https://github.com/maheshkokare/ai-calls-router/releases/tag/v0.1.0
+- Added the initial Claude Code routing proxy.
+- Added DeepSeek direct Anthropic-native serving for cache-stable routed calls.
+- Added savings ledger and live dashboard foundations.

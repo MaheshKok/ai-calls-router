@@ -12,10 +12,13 @@ no network or routing dependencies.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonArray, JsonObject
 
 
-def _sse_event(name: str, data: dict[str, Any]) -> str:
+def _sse_event(name: str, data: JsonObject) -> str:
     """Render one server-sent event.
 
     Args:
@@ -28,7 +31,7 @@ def _sse_event(name: str, data: dict[str, Any]) -> str:
     return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def synthesize_sse(response_body: dict[str, Any]) -> bytes:
+def synthesize_sse(response_body: JsonObject) -> bytes:
     """Render a finished Anthropic response as a Messages SSE stream.
 
     Routed calls are buffered (the escalation check needs the complete
@@ -42,7 +45,8 @@ def synthesize_sse(response_body: dict[str, Any]) -> bytes:
     Returns:
         UTF-8 encoded SSE payload.
     """
-    usage = response_body.get("usage") or {}
+    usage_raw = response_body.get("usage")
+    usage: JsonObject = usage_raw if isinstance(usage_raw, dict) else {}
     parts: list[str] = [
         _sse_event(
             "message_start",
@@ -65,7 +69,9 @@ def synthesize_sse(response_body: dict[str, Any]) -> bytes:
         )
     ]
 
-    for index, block in enumerate(response_body.get("content") or []):
+    content = response_body.get("content")
+    blocks: JsonArray = cast("JsonArray", content) if isinstance(content, list) else []
+    for index, block in enumerate(blocks):
         if not isinstance(block, dict):
             continue
         if block.get("type") == "tool_use":

@@ -201,6 +201,30 @@ def test_compute_shrink_measures_before_and_after() -> None:
     assert stats.chars_saved == 7
 
 
+def test_compute_shrink_counts_responses_function_outputs() -> None:
+    before = {
+        "input": [
+            {"type": "function_call_output", "call_id": "call_1", "output": "abcdef"},
+            {"type": "custom_tool_call_output", "call_id": "call_2", "output": "xyz"},
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "ignore"}],
+            },
+        ]
+    }
+    after = {
+        "input": [
+            {"type": "function_call_output", "call_id": "call_1", "output": "abc"},
+            {"type": "custom_tool_call_output", "call_id": "call_2", "output": "x"},
+        ]
+    }
+    stats = compute_shrink(path="compress", before=before, after=after)
+    assert stats.chars_before == 9
+    assert stats.chars_after == 4
+    assert stats.chars_saved == 5
+
+
 def test_compute_shrink_no_op_identity_gives_zero_saved() -> None:
     body = {"messages": [_tool_result_msg("unchanged")]}
     stats = compute_shrink(path="reduce", before=body, after=body)
@@ -214,3 +238,42 @@ def test_compute_shrink_handles_bodies_without_tool_results() -> None:
     after = {"messages": [{"role": "user", "content": "hi"}]}
     stats = compute_shrink(path="none", before=before, after=after)
     assert stats == ShrinkStats(path="none", chars_before=0, chars_after=0)
+
+
+def test_est_tokens_before_uses_default_divisor() -> None:
+    stats = ShrinkStats(path="reduce", chars_before=350, chars_after=70)
+    assert stats.est_tokens_before() == int(350 / DEFAULT_CHARS_PER_TOKEN)
+
+
+def test_est_tokens_before_zero_when_no_content() -> None:
+    stats = ShrinkStats(path="none", chars_before=0, chars_after=0)
+    assert stats.est_tokens_before() == 0
+
+
+def test_est_tokens_before_zero_when_divisor_not_positive() -> None:
+    stats = ShrinkStats(path="reduce", chars_before=100, chars_after=0)
+    assert stats.est_tokens_before(chars_per_token=0.0) == 0
+    assert stats.est_tokens_before(chars_per_token=-1.0) == 0
+
+
+def test_est_tokens_after_uses_default_divisor() -> None:
+    stats = ShrinkStats(path="reduce", chars_before=350, chars_after=70)
+    assert stats.est_tokens_after() == int(70 / DEFAULT_CHARS_PER_TOKEN)
+
+
+def test_est_tokens_after_zero_when_no_content() -> None:
+    stats = ShrinkStats(path="none", chars_before=0, chars_after=0)
+    assert stats.est_tokens_after() == 0
+
+
+def test_est_tokens_after_zero_when_divisor_not_positive() -> None:
+    stats = ShrinkStats(path="reduce", chars_before=100, chars_after=50)
+    assert stats.est_tokens_after(chars_per_token=0.0) == 0
+    assert stats.est_tokens_after(chars_per_token=-2.0) == 0
+
+
+def test_est_tokens_before_and_after_consistent_with_saved() -> None:
+    # tokens_before - tokens_after >= tokens_saved (truncation can produce small diff)
+    stats = ShrinkStats(path="reduce", chars_before=700, chars_after=350)
+    assert stats.est_tokens_before() >= stats.est_tokens_after()
+    assert stats.est_tokens_saved() >= 0

@@ -6,8 +6,9 @@
 #
 # Routing model: each pending tool-result turn is served on the tier mapped to
 # the tool that produced it. Decision-making turns (no pending tool results)
-# and any tool mapped to "premium" pass straight through to Anthropic with the
-# client's OAuth/api-key untouched. Any failure falls back to passthrough.
+# and any tool mapped to "premium" pass straight through to the agent group's
+# own upstream with the client's OAuth/api-key untouched. Any failure falls
+# back to passthrough.
 
 server:
   host: 127.0.0.1
@@ -28,77 +29,218 @@ settings:
   # Highest-to-lowest tier ranking. When one turn carries tool results from
   # several tiers, the highest-ranked tier serves it; "premium" always wins
   # and forces passthrough.
-  tier_precedence: [premium, code, fast, crud]
+  tier_precedence: [premium, structured, code, fast, crud]
 
-  compress_routed: true
-  compression:
-    keep_recent_messages: 6        # never truncate the last N messages
-    max_tool_result_chars: 4000    # char budget for older tool_result text
-    use_rtk: auto                  # auto = use the rtk CLI when on PATH; never = built-in only
-
-  # Tools whose appearance in a routed response means the cheap model is trying
-  # to take a premium action. The turn is escalated back to passthrough.
-  premium_tools: [Edit, Write, MultiEdit, NotebookEdit, Task, ExitPlanMode, AskUserQuestion]
   escalate_on_premium_tools: true   # false disables the guard (routed responses are served as-is)
 
-# Cheap serving tiers. `model` is any LiteLLM-supported id; `key_env` names the
-# environment variable holding that provider's API key (never the Anthropic
-# credential). `max_tokens` caps the routed completion.
-#
-# input_cost_per_1m / output_cost_per_1m are price overrides in USD per one
-# million tokens; input_cached_cost_per_1m is the cheaper rate a provider bills
-# for prompt tokens served from its prefix cache. Supply prices when LiteLLM
-# does not already price the model (the `acr savings` ledger uses LiteLLM's own
-# table first). The DeepSeek tiers below route through DeepSeek's native
-# Anthropic endpoint -- bypassing LiteLLM entirely so consecutive turns keep
-# byte-identical prefixes for the provider's cache -- so their ids are not in
-# LiteLLM's table and the ledger depends on these overrides: cache hits bill at
-# input_cached_cost_per_1m, misses at input_cost_per_1m. The values are
-# PLACEHOLDERS -- verify against each provider's published rates before trusting
-# the savings report. An unpriced model is never guessed at: it is simply
-# omitted from the ledger.
-tiers:
-  fast:
-    model: deepseek/deepseek-v4-flash
-    key_env: DEEPSEEK_API_KEY
-    max_tokens: 8192
-    input_cost_per_1m: 0.14            # cache miss -- placeholder, verify
-    input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
-    output_cost_per_1m: 0.28           # placeholder, verify
-  code:
-    model: deepseek/deepseek-v4-pro
-    key_env: DEEPSEEK_API_KEY
-    max_tokens: 8192
-    input_cost_per_1m: 0.435           # cache miss -- placeholder, verify
-    input_cached_cost_per_1m: 0.003625 # cache hit  -- placeholder, verify
-    output_cost_per_1m: 0.87           # placeholder, verify
-  crud:
-    model: deepseek/deepseek-v4-flash
-    key_env: DEEPSEEK_API_KEY
-    max_tokens: 4096
-    input_cost_per_1m: 0.14            # cache miss -- placeholder, verify
-    input_cached_cost_per_1m: 0.0028   # cache hit  -- placeholder, verify
-    output_cost_per_1m: 0.28           # placeholder, verify
+  # Run routed messages through headroom on the LiteLLM (non-direct) path only.
+  # Compression applies to the OpenAI-format messages after conversion and
+  # respects headroom's defaults, so coding-agent tool output (Read/Edit/Bash)
+  # is left verbatim; non-coding-agent tool output (the OpenAI providers this
+  # router will serve) is shrunk. The DeepSeek direct path is never compressed
+  # (it must keep byte-identical prefixes for the provider cache). Requires the
+  # "compression" extra (`pip install ai-calls-router[compression]`); a no-op
+  # when headroom-ai is not installed. Default: true.
+  compress_routed: true
 
-# Tool -> tier mapping. Exact names match first, then trailing-`*` globs.
-# Any tool not listed here (and any unresolvable tool) routes to premium.
-tools:
-  Bash: fast
-  BashOutput: fast
-  KillShell: fast
-  WebFetch: fast
-  WebSearch: fast
-  Read: code
-  Grep: code
-  Glob: code
-  LSP: code
-  TodoWrite: crud
-  TaskList: crud
-  TaskGet: crud
-  Edit: premium
-  Write: premium
-  MultiEdit: premium
-  NotebookEdit: premium
-  Task: premium
-  ExitPlanMode: premium
-  AskUserQuestion: premium
+# Agent-local serving tiers. `tools` maps each agent's tool vocabulary to a
+# semantic tier name; `agents.<group>.tiers.<tier>` decides the actual model for
+# that agent. This lets Claude Code `fast` route to DeepSeek while Hermes `fast`
+# routes to a GPT model, without inventing names like `claude_fast`.
+#
+# Auth:
+#   auth.mode: api_key_env uses auth.key_env from process env or settings.env_file.
+#
+# effort (optional, per tier): reasoning level forced on this tier's routed
+#   turns -- one of low | medium | high | max. Each tier decides independently,
+#   so a cheap tier can run low while another runs high. "xhigh" is rejected
+#   because only premium Opus accepts it (a routed Sonnet turn returns HTTP 400).
+#   Premium passthrough is never routed and keeps its own level (set in the
+#   client), so there is nothing to sync. Omit to leave the client's level
+#   as-is, downgrading only the Opus-only xhigh to high as a safety net. Only
+#   Anthropic routed models read effort; DeepSeek/OpenAI tiers ignore it.
+#
+# text_ml_compression (optional, per tier): set true to also run headroom's
+#   lossy ML plain-text compressor (Kompress) on this tier's tool-output text.
+#   Off by default -- the lossless compressors (JSON tables, code, diffs, logs)
+#   always run, so this only adds prose-token shrinking. Requires the ML extra
+#   (`pip install ai-calls-router[compression-ml]`); without it the flag is a
+#   silent no-op. Leave false for tiers serving coding agents, where dropping
+#   prose tokens from tool output can corrupt the model's context.
+agents:
+  claude_code:
+    upstream: https://api.anthropic.com
+    auth:
+      mode: oauth_passthrough
+    wire: anthropic_messages
+    endpoints:
+      - /v1/messages
+    model_defaults: {}
+    tool_choice: passthrough
+    reasoning: strip
+    tools:
+      Bash: fast
+      BashOutput: fast
+      KillShell: fast
+      WebFetch: fast
+      WebSearch: fast
+      Read: code
+      Grep: code
+      Glob: code
+      LSP: code
+      TodoWrite: crud
+      TaskList: crud
+      TaskGet: crud
+      Edit: premium
+      Write: premium
+      MultiEdit: premium
+      NotebookEdit: premium
+      Task: premium
+      ExitPlanMode: premium
+      AskUserQuestion: premium
+      # MCP tools: trailing-* glob routes read/search-class tools to cheap tiers;
+      # exact entries win over the glob (decide.py tier_for_tool). New tools the
+      # server adds later are covered automatically.
+      mcp__lean-ctx__*: code
+      mcp__lean-ctx__ctx_shell: fast
+      mcp__lean-ctx__shell: fast
+      mcp__lean-ctx__ctx_edit: premium
+      mcp__codebase-memory-mcp__*: code
+    premium_tools:
+      - Edit
+      - Write
+      - MultiEdit
+      - NotebookEdit
+      - Task
+      - ExitPlanMode
+      - AskUserQuestion
+    tiers:
+      # Cheap claude_code turns route to Sonnet 4.6 on the subscription OAuth bearer
+      # (auth.mode: oauth) so they draw the subscription's separate Sonnet quota
+      # instead of a pay-per-token key. The premium (Opus) passthrough is untouched.
+      # On Sonnet-quota exhaustion (HTTP 429) the turn fails open to premium Opus.
+      #
+      # effort pins each tier's routed reasoning level (low|medium|high|max),
+      # independent of premium. Sonnet rejects the Opus-only xhigh Claude Code sends,
+      # so these levels replace it. Edit per tier; premium keeps its own level.
+      #
+      # Omitted max_tokens means ACR preserves Claude Code's incoming max_tokens.
+      # crud stays capped because low-value admin/task-list turns should stay bounded.
+      fast:
+        provider: anthropic
+        model: anthropic/claude-sonnet-4-6
+        auth:
+          mode: oauth
+        effort: low
+        input_cost_per_1m: 3.0
+        input_cached_cost_per_1m: 0.30
+        output_cost_per_1m: 15.0
+      code:
+        provider: anthropic
+        model: anthropic/claude-sonnet-4-6
+        auth:
+          mode: oauth
+        effort: high
+        input_cost_per_1m: 3.0
+        input_cached_cost_per_1m: 0.30
+        output_cost_per_1m: 15.0
+      crud:
+        provider: anthropic
+        model: anthropic/claude-sonnet-4-6
+        auth:
+          mode: oauth
+        max_tokens: 4096
+        effort: low
+        input_cost_per_1m: 3.0
+        input_cached_cost_per_1m: 0.30
+        output_cost_per_1m: 15.0
+      structured:
+        provider: anthropic
+        model: anthropic/claude-sonnet-4-6
+        auth:
+          mode: oauth
+        effort: high
+        input_cost_per_1m: 3.0
+        input_cached_cost_per_1m: 0.30
+        output_cost_per_1m: 15.0
+    fallback: passthrough
+
+  hermes:
+    upstream: https://api.openai.com
+    tools:
+      terminal: fast
+      process: fast
+      read_file: code
+      search_files: code
+      execute_code: code
+      skill_view: code
+      todo: crud
+      memory: crud
+      session_search: crud
+      skills_list: crud
+      write_file: structured
+      skill_manage: structured
+      cronjob: structured
+      patch: premium
+      clarify: premium
+      delegate_task: premium
+      browser_vision: premium
+      browser_*: premium
+    premium_tools: [patch, clarify, delegate_task]
+    tiers:
+      fast:
+        provider: openai
+        model: gpt-4.1-mini
+        auth:
+          mode: api_key_env
+          key_env: OPENAI_API_KEY
+        max_tokens: 8192
+      code:
+        provider: openai
+        model: gpt-4.1
+        auth:
+          mode: api_key_env
+          key_env: OPENAI_API_KEY
+        max_tokens: 8192
+      crud:
+        provider: openai
+        model: gpt-4.1-mini
+        auth:
+          mode: api_key_env
+          key_env: OPENAI_API_KEY
+        max_tokens: 4096
+      structured:
+        provider: openai
+        model: gpt-4.1
+        auth:
+          mode: api_key_env
+          key_env: OPENAI_API_KEY
+        max_tokens: 8192
+
+# Agent identity routing. `x-acr-agent` wins, then user-agent contains rules,
+# then endpoint defaults, then fallback. `fallback: null` deliberately fails
+# closed with 400 when identity cannot be resolved.
+router:
+  endpoint_defaults:
+    /v1/messages: claude_code
+    /v1/chat/completions: hermes
+  user_agent_map:
+    - contains: claude
+      group: claude_code
+    - contains: hermes
+      group: hermes
+  fallback: null
+
+# Per-provider config may also live in separate files under
+# ~/.ai-calls-router/config/{claude-code,hermes}.yaml. `acr init` and
+# server startup create missing files without overwriting edits.
+#
+# Runtime-consumed provider fields:
+#   upstream       Passthrough target for that agent group's non-routed turns.
+#   tools          Tool -> tier map.
+#   premium_tools  Tools that force passthrough after response synthesis.
+#
+# Reserved/validated provider fields:
+#   auth, wire, endpoints, model_defaults, tool_choice, reasoning, fallback.
+#   The router validates wire/endpoints but still selects adapters from the
+#   request path and identity rules above.

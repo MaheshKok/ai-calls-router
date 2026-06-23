@@ -10,16 +10,15 @@ human-readable summary for the acr savings command.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from ai_calls_router.accounting import ledger
 
 
-def _entry(**overrides: Any) -> dict[str, Any]:
+def _entry(**overrides: object) -> dict[str, object]:
     """Build a complete ledger entry with overridable fields."""
-    base: dict[str, Any] = {
+    base: dict[str, object] = {
         "ts": 1_770_000_000,
         "premium_model": "claude-fable-5",
         "routed_model": "deepseek/deepseek-v4-flash",
@@ -119,6 +118,17 @@ class TestAggregate:
         assert totals["input_tokens"] == 0
         assert totals["saved_usd"] == 0.0
         assert totals["savings_pct"] == 0.0
+
+    def test_shrink_fields_clamp_to_non_negative_totals(self) -> None:
+        summary = ledger.aggregate(
+            [
+                _entry(shrink_chars_before=8000, shrink_chars_after=3000),
+                _entry(shrink_chars_before=-500, shrink_chars_after=-9),
+            ]
+        )
+        totals = summary["totals"]
+        assert totals["shrink_chars_before"] == 8000
+        assert totals["shrink_chars_after"] == 3000
 
     def test_savings_pct_rounded_to_one_decimal(self) -> None:
         summary = ledger.aggregate([_entry(saved_usd=1.0, premium_usd=3.0, routed_usd=2.0)])

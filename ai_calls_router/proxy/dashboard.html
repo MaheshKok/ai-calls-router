@@ -5,94 +5,213 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>acr &middot; dashboard</title>
 <style>
+:root {
+  --bg:        #0a0e17;
+  --bg-grad-1: #0c1322;
+  --bg-grad-2: #0a0e17;
+  --surface:   #111826;
+  --surface-2: #0e1521;
+  --elevated:  #141d2e;
+  --line:      rgba(255,255,255,0.07);
+  --line-soft: rgba(255,255,255,0.04);
+  --text:   #e6ebf5;
+  --muted:  #8b97ad;
+  --faint:  #586377;
+  --indigo:  #818cf8;
+  --violet:  #a78bfa;
+  --cyan:    #22d3ee;
+  --emerald: #34d399;
+  --amber:   #fbbf24;
+  --rose:    #fb7185;
+  --indigo-dim:  rgba(129,140,248,0.14);
+  --grad-brand: linear-gradient(135deg, #818cf8 0%, #22d3ee 100%);
+  --grad-save:  linear-gradient(135deg, #34d399 0%, #22d3ee 100%);
+  --radius:   14px;
+  --shadow:   0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.28);
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Code", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; background: #0d1117; color: #c9d1d9; padding: 24px; }
-.app { max-width: 1200px; margin: 0 auto; }
-.header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; }
-.header h1 { font-size: 18px; font-weight: 600; color: #58a6ff; }
-.header h1 span { color: #f78166; }
-.meta { font-size: 13px; color: #8b949e; }
-.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
-.card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; }
-.card .label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
-.card .value { font-size: 26px; font-weight: 700; margin: 4px 0; }
-.card .sub { font-size: 12px; color: #484f58; }
-.card.accent .value { color: #58a6ff; }
-.card.green .value { color: #3fb950; }
-.card.amber .value { color: #d29922; }
-.card.red .value { color: #f85149; }
-.panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
-.panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; }
-.panel h2 { font-size: 13px; color: #58a6ff; margin-bottom: 8px; font-weight: 600; }
-.panel .row { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; color: #c9d1d9; }
-.table-panel { grid-column: 1 / -1; }
-.table-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
-.status { font-size: 12px; color: #484f58; }
-table {width: 100%; border-collapse: collapse; font-size: 13px;}
-th { text-align: left; padding: 6px 8px; border-bottom: 1px solid #30363d; color: #8b949e; font-weight: 500; white-space: nowrap;}
-td { padding: 6px 8px; border-bottom: 1px solid #21262d; }
-td.empty { color:#484f58; text-align:center; padding: 24px;}
-.truncate {max-width: 180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-.badge {display:inline-block; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:600;}
-.badge-fast {background:#1a3320; color:#3fb950}
-.badge-code {background:#1a3320; color:#3fb950}
-.badge-premium {background:#331a1a; color:#f85149}
+html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+body {
+  font-family: var(--sans); color: var(--text);
+  background:
+    radial-gradient(1200px 600px at 12% -8%, rgba(129,140,248,0.10), transparent 60%),
+    radial-gradient(1000px 600px at 95% 0%, rgba(34,211,238,0.07), transparent 55%),
+    linear-gradient(180deg, var(--bg-grad-1) 0%, var(--bg-grad-2) 100%);
+  background-attachment: fixed; min-height: 100vh;
+  padding: 28px 22px 48px; font-size: 14px; line-height: 1.45;
+}
+.app { max-width: 1240px; margin: 0 auto; }
+
+.topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; gap: 16px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand .mark {
+  width: 38px; height: 38px; border-radius: 11px; background: var(--grad-brand);
+  display: grid; place-items: center; font-family: var(--mono); font-weight: 700;
+  font-size: 14px; color: #0a0e17; box-shadow: 0 6px 18px rgba(129,140,248,0.35); letter-spacing: -0.5px;
+}
+.brand .title { font-size: 16px; font-weight: 650; letter-spacing: 0.2px; }
+.brand .title b { background: var(--grad-brand); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.brand .subtitle { font-size: 12px; color: var(--faint); margin-top: 1px; }
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 7px; background: var(--surface);
+  border: 1px solid var(--line); padding: 7px 12px; border-radius: 999px;
+  font-size: 12px; color: var(--muted); font-family: var(--mono);
+}
+.chip .k { color: var(--faint); }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--emerald); box-shadow: 0 0 0 0 rgba(52,211,153,0.6); animation: pulse 2s infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(52,211,153,0.5); } 70% { box-shadow: 0 0 0 7px rgba(52,211,153,0); } 100% { box-shadow: 0 0 0 0 rgba(52,211,153,0); } }
+
+.section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--faint); font-weight: 600; margin: 22px 2px 12px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+.card {
+  position: relative; background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 17px;
+  box-shadow: var(--shadow); transition: transform 0.16s ease, border-color 0.16s ease; overflow: hidden;
+}
+.card::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; background: var(--accent, transparent); opacity: 0.85; }
+.card:hover { transform: translateY(-2px); border-color: rgba(255,255,255,0.13); }
+.card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; }
+.card .value { font-family: var(--mono); font-size: 27px; font-weight: 700; margin: 7px 0 3px; letter-spacing: -0.5px; color: var(--text); }
+.card .sub { font-size: 12px; color: var(--faint); }
+.card.indigo { --accent: var(--indigo); } .card.indigo .value { color: var(--indigo); }
+.card.emerald { --accent: var(--emerald); } .card.emerald .value { color: var(--emerald); }
+.card.amber { --accent: var(--amber); } .card.amber .value { color: var(--amber); }
+.card.rose { --accent: var(--rose); } .card.rose .value { color: var(--rose); }
+.card.cyan { --accent: var(--cyan); } .card.cyan .value { color: var(--cyan); }
+
+.hero { display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 14px; margin-top: 14px; }
+.hero-card {
+  background: radial-gradient(420px 180px at 100% 0%, rgba(52,211,153,0.10), transparent 60%), linear-gradient(180deg, var(--elevated) 0%, var(--surface-2) 100%);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 22px;
+  box-shadow: var(--shadow); display: flex; flex-direction: column; justify-content: center;
+}
+.hero-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }
+.hero-card .big { font-family: var(--mono); font-size: 46px; font-weight: 800; letter-spacing: -1.5px; margin: 6px 0 4px; background: var(--grad-save); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.hero-card .big-sub { font-size: 13px; color: var(--muted); }
+.ring-card { align-items: center; text-align: center; }
+.ring {
+  --v: 0; width: 116px; height: 116px; border-radius: 50%;
+  background: radial-gradient(closest-side, var(--surface-2) 70%, transparent 71% 100%), conic-gradient(var(--cyan) calc(var(--v) * 1%), rgba(255,255,255,0.06) 0);
+  display: grid; place-items: center; margin: 6px auto 8px; transition: background 0.5s ease;
+}
+.ring .ring-val { font-family: var(--mono); font-size: 23px; font-weight: 800; color: var(--text); }
+.ring-card .ring-label { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: 1px; }
+.hero-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; }
+.hero-row + .hero-row { border-top: 1px solid var(--line-soft); }
+.hero-row .k { color: var(--muted); font-size: 13px; }
+.hero-row .v { font-family: var(--mono); font-size: 17px; }
+.good { color: var(--emerald); }
+
+.panel {
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow);
+}
+.panel h2 { font-size: 12px; color: var(--muted); margin-bottom: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; display: flex; align-items: center; gap: 8px; }
+.panel h2::before { content: ""; width: 6px; height: 6px; border-radius: 2px; background: var(--grad-brand); }
+.panel .row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
+.panel .row:last-child { border-bottom: none; }
+.panel .row > span:first-child { color: var(--muted); }
+.mono { font-family: var(--mono); color: var(--text); }
+
+.table-card { background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px 8px; margin-top: 14px; }
+.table-head-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 12px; flex-wrap: wrap; }
+.table-head-bar h2 { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+.status { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th { position: sticky; top: 0; text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); color: var(--faint); font-weight: 600; white-space: nowrap; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.6px; background: var(--surface-2); }
+tbody td { padding: 9px 10px; border-bottom: 1px solid var(--line-soft); font-family: var(--mono); color: var(--text); white-space: nowrap; }
+tbody tr { transition: background 0.12s ease; }
+tbody tr:hover { background: rgba(129,140,248,0.05); }
+td.empty { color: var(--faint); text-align: center; padding: 32px; font-family: var(--sans); }
+.truncate { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td .muted, td.muted { color: var(--faint); }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; font-family: var(--mono); background: var(--indigo-dim); color: var(--indigo); }
+.tok-head { display: inline-flex; gap: 20px; }
+.tok-col { display: inline-block; min-width: 78px; text-align: right; font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.6px; }
+.tok-col.mono { font-size: 13px; color: var(--text); text-transform: none; letter-spacing: 0; }
+
+@media (max-width: 980px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } .hero { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .grid-4, .grid-2 { grid-template-columns: 1fr; } body { padding: 18px 14px 36px; } }
 </style>
 </head>
 <body>
 <div class="app">
-  <header class="header">
-    <h1><span>acr</span> dashboard</h1>
-    <div class="meta">uptime <span id="uptime">--</span></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark">acr</div>
+      <div>
+        <div class="title"><b>AI Calls Router</b></div>
+        <div class="subtitle">live routing &amp; savings telemetry</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="chip"><span class="live-dot"></span>live</span>
+      <span class="chip"><span class="k">uptime</span> <span id="uptime">--</span></span>
+    </div>
   </header>
-  <section class="grid">
-    <div class="card accent"><div class="label">total</div><div class="value" id="total">--</div><div class="sub">requests seen</div></div>
-    <div class="card green"><div class="label">routed</div><div class="value" id="routed">--</div><div class="sub" id="routedPct">--</div></div>
-    <div class="card amber"><div class="label">passthrough</div><div class="value" id="passthrough">--</div><div class="sub">premium path</div></div>
-    <div class="card red"><div class="label">errors</div><div class="value" id="errors">--</div><div class="sub" id="escFallback">--</div></div>
-  </section>
-  <section class="grid">
-    <div class="card green"><div class="label">routed cost</div><div class="value" id="costRouted">--</div><div class="sub">cheap models</div></div>
-    <div class="card amber"><div class="label">premium cost</div><div class="value" id="costPremium">--</div><div class="sub">estimated</div></div>
-    <div class="card accent"><div class="label">saved</div><div class="value" id="saved">--</div><div class="sub">total delta</div></div>
-    <div class="card accent"><div class="label">save rate</div><div class="value" id="saveRate">--</div><div class="sub">vs premium</div></div>
-  </section>
-  <section class="grid">
-    <div class="card green"><div class="label">tool_result shrunk</div><div class="value" id="compSaved">--</div><div class="sub" id="compRatio">reduce + compress</div></div>
-    <div class="card accent"><div class="label">est tokens shrunk</div><div class="value" id="compTokens">--</div><div class="sub">~3.5 chars/token</div></div>
-    <div class="card"><div class="label">chars before</div><div class="value mono" id="compBefore">--</div><div class="sub">tool_result in</div></div>
-    <div class="card"><div class="label">chars after</div><div class="value mono" id="compAfter">--</div><div class="sub">tool_result out</div></div>
-  </section>
-  <section class="panels">
-    <div class="panel" id="agent-panel"><h2>agents</h2><div class="row"><span class="mono">--</span><span>no data yet</span></div></div>
-    <div class="panel" id="session-panel"><h2>sessions</h2><div class="row"><span class="mono">--</span><span>no sessions yet</span></div></div>
-  </section>
-  <section class="panels">
-    <div class="panel">
-      <h2>routed tokens</h2>
-      <div class="row"><span>input</span><span class="mono" id="ri">--</span></div>
-      <div class="row"><span>output</span><span class="mono" id="ro">--</span></div>
-      <div class="row"><span>cache read</span><span class="mono" id="rcr">--</span></div>
-      <div class="row"><span>cache creation</span><span class="mono" id="rcc">--</span></div>
+
+  <div class="section-label">savings</div>
+  <section class="hero">
+    <div class="hero-card">
+      <div class="label">total saved</div>
+      <div class="big" id="saved">--</div>
+      <div class="big-sub">cheap-model routing vs estimated premium spend</div>
     </div>
-    <div class="panel">
-      <h2>premium tokens</h2>
-      <div class="row"><span>input</span><span class="mono" id="pi">--</span></div>
-      <div class="row"><span>output</span><span class="mono" id="po">--</span></div>
-      <div class="row"><span>cache read</span><span class="mono" id="pcr">--</span></div>
-      <div class="row"><span>cache creation</span><span class="mono" id="pcc">--</span></div>
+    <div class="hero-card ring-card">
+      <div class="label">save rate</div>
+      <div class="ring" id="saveRing"><span class="ring-val" id="saveRate">--</span></div>
+      <div class="ring-label">vs premium cost</div>
+    </div>
+    <div class="hero-card">
+      <div class="hero-row"><span class="k">routed cost</span><span class="v good" id="costRouted">--</span></div>
+      <div class="hero-row"><span class="k">premium cost</span><span class="v" id="costPremium" style="color:var(--amber)">--</span></div>
+      <div class="hero-row"><span class="k">tokens shrunk</span><span class="v good" id="compSaved">--</span></div>
     </div>
   </section>
-  <section class="panel table-panel">
-    <div class="table-header"><h2>recent requests</h2><span class="status" id="status">loading</span></div>
-    <table>
-      <thead id="table-head">
-        <tr><th>time</th><th>model</th><th>tools</th><th>total input</th><th>cache miss</th><th>output</th><th>shrunk</th><th>ms</th><th>agent</th><th>session</th></tr>
-      </thead>
-      <tbody id="rows"><tr><td colspan="10" class="empty">no requests yet</td></tr></tbody>
-    </table>
+
+  <div class="section-label">at a glance</div>
+  <section class="grid-4">
+    <div class="card indigo"><div class="label">requests</div><div class="value" id="total">--</div><div class="sub" id="reqSplit">--</div></div>
+    <div class="card emerald"><div class="label">routing hit rate</div><div class="value" id="hitRate">--</div><div class="sub" id="routedPct">--</div></div>
+    <div class="card cyan"><div class="label">tool_result reduction</div><div class="value" id="compTokensPct">--</div><div class="sub" id="compRatio">--</div></div>
+    <div class="card rose"><div class="label">errors</div><div class="value" id="errors">--</div><div class="sub" id="escFallback">--</div></div>
   </section>
+
+  <div class="section-label">routing &amp; tokens</div>
+  <section class="grid-2">
+    <div class="panel" id="model-panel"><h2>routed calls per model</h2><div class="row"><span class="mono">--</span><span>no routed calls yet</span></div></div>
+    <div class="panel">
+      <h2>token usage</h2>
+      <div class="row"><span class="muted">&nbsp;</span><span class="tok-head"><span class="tok-col">routed</span><span class="tok-col">premium</span></span></div>
+      <div class="row"><span>input</span><span class="tok-head"><span class="tok-col mono" id="ri">--</span><span class="tok-col mono" id="pi">--</span></span></div>
+      <div class="row"><span>output</span><span class="tok-head"><span class="tok-col mono" id="ro">--</span><span class="tok-col mono" id="po">--</span></span></div>
+      <div class="row"><span>cache read</span><span class="tok-head"><span class="tok-col mono" id="rcr">--</span><span class="tok-col mono" id="pcr">--</span></span></div>
+      <div class="row"><span>cache creation</span><span class="tok-head"><span class="tok-col mono" id="rcc">--</span><span class="tok-col mono" id="pcc">--</span></span></div>
+    </div>
+  </section>
+
+  <section class="table-card">
+    <div class="table-head-bar">
+      <h2>recent requests</h2>
+      <span class="status" id="status">loading</span>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead id="table-head">
+          <tr><th>date/time</th><th>model</th><th>tools</th><th>input</th><th>cache miss</th><th>output</th><th>saved</th><th>ms</th><th>agent</th></tr>
+        </thead>
+        <tbody id="rows"><tr><td colspan="9" class="empty">no requests yet</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -103,71 +222,35 @@ const usd = (n) => '$' + Number(n || 0).toFixed(Number(n || 0) >= 1 ? 2 : 4);
 const pct = (n) => Number.isFinite(n) ? n.toFixed(1) + '%' : '--';
 function uptime(s) { s = Number(s || 0); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60); return (h ? h + 'h ' : '') + (m ? m + 'm ' : '') + sec + 's'; }
 function shortModel(m) { m = (m || '').trim(); const idx = m.lastIndexOf('/'); return idx >= 0 ? m.substring(idx + 1) : m; }
+function requestTime(ts) {
+  return new Date(Number(ts || 0) * 1000).toLocaleString(undefined, {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: 'numeric', minute: '2-digit', second: '2-digit'
+  });
+}
 function shrunkCell(x) {
   const before = Number(x.shrink_chars_before || 0);
   const after = Number(x.shrink_chars_after || 0);
-  if (before <= 0) return '--';
+  if (before <= 0) return '<span class="muted">--</span>';
   const saved = Math.max(before - after, 0);
-  return num(saved) + ' (' + pct(saved / before * 100) + ')';
+  const p = saved / before * 100;
+  return saved > 0 ? '<span class="good">' + pct(p) + '</span>' : '<span class="muted">' + pct(p) + '</span>';
 }
 function agentKey(agent) {
   const a = (agent || '').trim();
   if (!a) return 'unknown';
-  if (a === 'claude-code-cli') return '\u{1F5A5}\uFE0F Claude-Code CLI';
+  if (a === 'claude-code-cli') return '\u{1F5A5}️ Claude-Code CLI';
   if (a === 'claude-desktop') return '\u{1F4BB} Claude Desktop';
   if (a === 'api') return '\u{1F527} API';
   return a;
 }
-function buildAgentRows(data) {
-  const rows = data.last_requests || [];
-  const buckets = {};
-  for (const r of rows) {
-    const key = (r.agent || '').trim() || 'unknown';
-    buckets[key] = (buckets[key] || 0) + 1;
-  }
-  const html = ['<h2>agents</h2>'];
-  const keys = Object.keys(buckets).sort((a,b) => buckets[b] - buckets[a]);
-  if (keys.length === 0) {
-    html.push('<div class="row"><span class="mono">--</span><span>no data yet</span></div>');
-  } else {
-    for (const k of keys) {
-      html.push('<div class="row"><span class="mono">' + esc(agentKey(k)) + '</span><span class="mono">' + num(buckets[k]) + ' reqs</span></div>');
-    }
-  }
-  $('agent-panel').innerHTML = html.join('');
-}
-function buildSessionRows(data) {
-  const rows = data.last_requests || [];
-  const buckets = {};
-  for (const r of rows) {
-    const sid = (r.session_id || '').trim() || '__no__session__';
-    const agent = (r.agent || '').trim() || 'unknown';
-    if (!buckets[sid]) buckets[sid] = { count: 0, agent };
-    buckets[sid].count++;
-  }
-  const entries = Object.entries(buckets).sort((a, b) => b[1].count - a[1].count).slice(0, 20);
-  const sessionHtml = ['<h2>sessions</h2>'];
-  if (entries.length === 0) {
-    sessionHtml.push('<div class="row"><span class="mono">--</span><span>no sessions yet</span></div>');
-  } else {
-    let shown = 0;
-    for (const [sid, info] of entries) {
-      if (sid === '__no__session__') continue;
-      const label = sid.substring(0, 8) + '…';
-      sessionHtml.push('<div class="row"><span class="mono">' + esc(label) + '</span><span class="mono">' + esc(agentKey(info.agent)) + ' · ' + num(info.count) + ' reqs</span></div>');
-      shown++;
-    }
-    if (shown === 0 && entries.length > 0) {
-      for (const [_, info] of entries) {
-        sessionHtml.push('<div class="row"><span class="mono">--</span><span class="mono">' + esc(agentKey(info.agent)) + ' · ' + num(info.count) + ' reqs</span></div>');
-      }
-    }
-  }
-  $('session-panel').innerHTML = sessionHtml.join('');
-}
 
 function rowTotalInput(x) {
   return Number(x.input_tokens || 0) + Number(x.cache_read_tokens || 0) + Number(x.cache_creation_tokens || 0);
+}
+
+function hasVisibleRequestData(x) {
+  return rowTotalInput(x) > 0;
 }
 
 function buildRecentRows(data) {
@@ -175,28 +258,49 @@ function buildRecentRows(data) {
   // Skip rows whose total input is still 0: token usage is filled in by a
   // later accounting pass, so a fresh row would otherwise read as a real
   // zero-input request and confuse the viewer.
-  const scored = rows.filter((x) => rowTotalInput(x) > 0);
+  const scored = rows.filter(hasVisibleRequestData);
   const recentRows = scored.slice(0, 20);
   const rowHtml = recentRows.length ? recentRows.map((x) => {
     const totalInput = rowTotalInput(x);
     const cacheMiss = Math.max(totalInput - Number(x.cache_read_tokens || 0), 0);
     return (
       '<tr>' +
-      '<td>' + new Date(Number(x.ts || 0) * 1000).toLocaleTimeString() + '</td>' +
+      '<td class="muted">' + requestTime(x.ts) + '</td>' +
       '<td class="truncate">' + esc(shortModel(x.model) || '--') + '</td>' +
-      '<td class="truncate">' + esc((x.tool_names || []).join(', ') || '--') + '</td>' +
+      '<td class="truncate muted">' + esc((x.tool_names || []).join(', ') || '--') + '</td>' +
       '<td>' + num(totalInput) + '</td>' +
       '<td>' + num(cacheMiss) + '</td>' +
       '<td>' + num(x.output_tokens || 0) + '</td>' +
       '<td>' + shrunkCell(x) + '</td>' +
       '<td>' + num(x.duration_ms) + '</td>' +
-      '<td class="truncate">' + esc(agentKey(x.agent) || '--') + '</td>' +
-      '<td class="truncate">' + esc((x.session_id || '--').substring(0, 12)) + '</td>' +
+      '<td class="truncate muted">' + esc(agentKey(x.agent) || '--') + '</td>' +
       '</tr>'
     );
-  }).join('') : '<tr><td colspan="10" class="empty">no requests yet</td></tr>';
+  }).join('') : '<tr><td colspan="9" class="empty">no requests yet</td></tr>';
   $('rows').innerHTML = rowHtml;
   return { shown: recentRows.length, total: scored.length };
+}
+
+function buildModelRows(data) {
+  // Lifetime routed-call counts per model from the backend counter
+  // (bootstrapped from the savings ledger, survives restarts). Collapse the
+  // raw model id to its short name for display, summing any ids that share one.
+  const raw = data.routed_by_model || {};
+  const buckets = {};
+  for (const model of Object.keys(raw)) {
+    const label = shortModel(model) || 'unknown';
+    buckets[label] = (buckets[label] || 0) + Number(raw[model] || 0);
+  }
+  const keys = Object.keys(buckets).sort((a, b) => buckets[b] - buckets[a]);
+  const html = ['<h2>routed calls per model</h2>'];
+  if (keys.length === 0) {
+    html.push('<div class="row"><span class="mono">--</span><span>no routed calls yet</span></div>');
+  } else {
+    for (const k of keys) {
+      html.push('<div class="row"><span class="mono">' + esc(k) + '</span><span class="mono">' + num(buckets[k]) + ' reqs</span></div>');
+    }
+  }
+  $('model-panel').innerHTML = html.join('');
 }
 
 function apply(data) {
@@ -208,21 +312,22 @@ function apply(data) {
   const routed = Number(r.routed || 0);
   $('uptime').textContent = uptime(data.uptime_seconds);
   $('total').textContent = num(total);
-  $('routed').textContent = num(routed);
-  $('routedPct').textContent = (total ? pct(routed / total * 100) : '--') + ' of total';
-  $('passthrough').textContent = num(r.passthrough);
+  $('reqSplit').textContent = num(routed) + ' routed · ' + num(r.passthrough) + ' premium';
+  $('hitRate').textContent = total ? pct(routed / total * 100) : '--';
+  $('routedPct').textContent = num(routed) + ' of ' + num(total) + ' routed';
   $('errors').textContent = num(r.errors);
-  $('escFallback').textContent = num(r.escalated) + ' escalated / ' + num(r.fallback) + ' fallback';
+  $('escFallback').textContent = num(r.escalated) + ' escalated · ' + num(r.fallback) + ' fallback';
   $('costRouted').textContent = usd(c.routed_usd);
   $('costPremium').textContent = usd(c.premium_usd);
   $('saved').textContent = usd(c.saved_usd);
-  $('saveRate').textContent = pct(Number(c.premium_usd) ? Number(c.saved_usd) / Number(c.premium_usd) * 100 : NaN);
+  const saveRateVal = Number(c.premium_usd) ? Number(c.saved_usd) / Number(c.premium_usd) * 100 : NaN;
+  $('saveRate').textContent = pct(saveRateVal);
+  const ring = $('saveRing');
+  if (ring) ring.style.setProperty('--v', Number.isFinite(saveRateVal) ? Math.max(0, Math.min(100, saveRateVal)) : 0);
   const comp = data.compression || {};
-  $('compSaved').textContent = num(comp.chars_saved) + ' ch';
-  $('compRatio').textContent = pct(Number(comp.ratio || 0) * 100) + ' of ' + num(comp.chars_before) + ' chars';
-  $('compTokens').textContent = '~' + num(comp.est_tokens_saved);
-  $('compBefore').textContent = num(comp.chars_before);
-  $('compAfter').textContent = num(comp.chars_after);
+  $('compSaved').textContent = '~' + num(comp.tokens_saved) + ' tok';
+  $('compTokensPct').textContent = pct(Number(comp.ratio || 0) * 100);
+  $('compRatio').textContent = '~' + num(comp.tokens_before) + ' → ' + num(comp.tokens_after) + ' tok';
   $('ri').textContent = num(rt.input);
   $('ro').textContent = num(rt.output);
   $('rcr').textContent = num(rt.cache_read);
@@ -231,12 +336,11 @@ function apply(data) {
   $('po').textContent = num(pt.output);
   $('pcr').textContent = num(pt.cache_read);
   $('pcc').textContent = num(pt.cache_creation);
-  buildAgentRows(data);
-  buildSessionRows(data);
+  buildModelRows(data);
   const rowStats = buildRecentRows(data);
   const shown = Math.min(rowStats.total || 0, 20);
   if (rowStats.total > 20) {
-    $('status').textContent = 'showing recent 20 of ' + num(rowStats.total) + ' · refreshed ' + new Date().toLocaleTimeString();
+    $('status').textContent = 'showing stored recent 20 of ' + num(rowStats.total) + ' · refreshed ' + new Date().toLocaleTimeString();
   } else if (rowStats.total === 0) {
     $('status').textContent = 'no recent requests · refreshed ' + new Date().toLocaleTimeString();
   } else {
@@ -250,7 +354,7 @@ async function refresh() {
     if (!res.ok) throw new Error(res.statusText);
     apply(await res.json());
   } catch (err) {
-    $('status').textContent = 'offline \u00B7 ' + err.message;
+    $('status').textContent = 'offline · ' + err.message;
   }
 }
 refresh();

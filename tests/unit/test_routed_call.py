@@ -1,6 +1,6 @@
 """Spec-derived tests for the routing engine and its SSE synthesis.
 
-Contract under test: _prepare_routed_body swaps in the tier model, clamps
+Contract under test: prepare_routed_body swaps in the tier model, clamps
 max_tokens, and strips Claude-specific thinking blocks without mutating the
 input; escalates flags routed responses that call premium tools; routed_call
 serves a request on the tier provider with only the tier key, records honest
@@ -17,22 +17,38 @@ import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
 from ai_calls_router.accounting import savings
+from ai_calls_router.routing import compression, synthesis
 from ai_calls_router.routing import engine as rc
-from ai_calls_router.routing import synthesis
 from tests.acr_testkit import FakeLitellm
 from tests.acr_testkit import make_response as _fake_response
+
+
+def _halving_compressor(messages: list[dict[str, object]], **_: object) -> object:
+    """Fake headroom.compress: halve every string role="tool" content.
+
+    Returns a CompressResult-shaped object (``.messages``) without mutating the
+    input, so engine tests can assert real shrinkage on the LiteLLM path without
+    depending on headroom's heuristics.
+    """
+    out = [
+        {**m, "content": m["content"][: len(m["content"]) // 2]}
+        if m.get("role") == "tool" and isinstance(m.get("content"), str)
+        else m
+        for m in messages
+    ]
+    return SimpleNamespace(messages=out)
+
 
 # Non-DeepSeek ids keep these tests on the LiteLLM path: DeepSeek tier models
 # are diverted to the native direct path (see TestRoutedCallDeepSeekDirect).
 CHEAP_MODEL = "groq/acr-test-cheap"
 PREMIUM_MODEL = "groq/acr-test-premium"
 
-PRICED_ROUTES: dict[str, Any] = {
+PRICED_ROUTES: dict[str, object] = {
     "tiers": {
         "fast": {
             "model": CHEAP_MODEL,
@@ -47,12 +63,11 @@ PRICED_ROUTES: dict[str, Any] = {
     }
 }
 
-TIER_CFG: dict[str, Any] = {"model": CHEAP_MODEL, "max_tokens": 8192}
+TIER_CFG: dict[str, object] = {"model": CHEAP_MODEL, "max_tokens": 8192}
 
-SETTINGS: dict[str, Any] = {
+SETTINGS: dict[str, object] = {
     "premium_tools": ["Edit", "Write", "Task", "ExitPlanMode", "AskUserQuestion"],
     "escalate_on_premium_tools": True,
-    "compress_routed": False,
 }
 
 
@@ -65,7 +80,7 @@ def ledger_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
-def _request_body(model: str = PREMIUM_MODEL) -> dict[str, Any]:
+def _request_body(model: str = PREMIUM_MODEL) -> dict[str, object]:
     """Build a tool-result-processing Anthropic request body."""
     return {
         "model": model,
@@ -87,7 +102,7 @@ def _request_body(model: str = PREMIUM_MODEL) -> dict[str, Any]:
     }
 
 
-def _fake_tool_call(*, call_id: str, name: str, arguments: str) -> Any:
+def _fake_tool_call(*, call_id: str, name: str, arguments: str) -> object:
     """Build an OpenAI-shaped tool call object."""
     return SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=arguments))
 
@@ -96,11 +111,12 @@ def _call(
     *,
     monkeypatch: pytest.MonkeyPatch,
     fake: FakeLitellm,
-    body: dict[str, Any] | None = None,
-    settings: dict[str, Any] | None = None,
+    body: dict[str, object] | None = None,
+    settings: dict[str, object] | None = None,
+    premium_tools: list[str] | None = None,
     api_key: str = "test-tier-key",
-    on_premium_guard: Any = None,
-) -> Any:
+    on_premium_guard: object = None,
+) -> object:
     """Run routed_call against the fake litellm module."""
     monkeypatch.setattr(rc, "load_litellm", lambda: fake)
     return asyncio.run(
@@ -110,6 +126,7 @@ def _call(
             tier_cfg=TIER_CFG,
             api_key=api_key,
             settings=settings if settings is not None else SETTINGS,
+            premium_tools=premium_tools if premium_tools is not None else SETTINGS["premium_tools"],
             on_premium_guard=on_premium_guard,
         )
     )
@@ -117,35 +134,35 @@ def _call(
 
 class TestPrepareRoutedBody:
     def test_model_swapped_to_tier_model(self) -> None:
-        routed = rc._prepare_routed_body(_request_body(), TIER_CFG)
+        routed = rc.prepare_routed_body(_request_body(), TIER_CFG)
         assert routed["model"] == CHEAP_MODEL
 
     def test_stream_flag_removed(self) -> None:
-        routed = rc._prepare_routed_body(_request_body(), TIER_CFG)
+        routed = rc.prepare_routed_body(_request_body(), TIER_CFG)
         assert "stream" not in routed
 
     def test_max_tokens_clamped_when_over_tier_limit(self) -> None:
         body = _request_body()
         body["max_tokens"] = 100_000
-        routed = rc._prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
+        routed = rc.prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
         assert routed["max_tokens"] == 4096
 
     def test_max_tokens_set_when_missing(self) -> None:
         body = _request_body()
         del body["max_tokens"]
-        routed = rc._prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
+        routed = rc.prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
         assert routed["max_tokens"] == 4096
 
     def test_max_tokens_below_tier_limit_preserved(self) -> None:
         body = _request_body()
         body["max_tokens"] = 100
-        routed = rc._prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
+        routed = rc.prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": 4096})
         assert routed["max_tokens"] == 100
 
     @pytest.mark.parametrize("tier_max", [None, 0, -1, "4096", True])
-    def test_unusable_tier_max_never_clamps(self, tier_max: Any) -> None:
+    def test_unusable_tier_max_never_clamps(self, tier_max: object) -> None:
         body = _request_body()
-        routed = rc._prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": tier_max})
+        routed = rc.prepare_routed_body(body, {"model": CHEAP_MODEL, "max_tokens": tier_max})
         assert routed["max_tokens"] == 32000
 
     def test_thinking_blocks_stripped(self) -> None:
@@ -153,7 +170,7 @@ class TestPrepareRoutedBody:
         body["messages"][1]["content"].insert(
             0, {"type": "thinking", "thinking": "secret", "signature": "s"}
         )
-        routed = rc._prepare_routed_body(body, TIER_CFG)
+        routed = rc.prepare_routed_body(body, TIER_CFG)
         types = [b["type"] for b in routed["messages"][1]["content"]]
         assert "thinking" not in types
         assert "tool_use" in types
@@ -161,7 +178,7 @@ class TestPrepareRoutedBody:
     def test_redacted_thinking_blocks_stripped(self) -> None:
         body = _request_body()
         body["messages"][1]["content"].insert(0, {"type": "redacted_thinking", "data": "opaque"})
-        routed = rc._prepare_routed_body(body, TIER_CFG)
+        routed = rc.prepare_routed_body(body, TIER_CFG)
         types = [b["type"] for b in routed["messages"][1]["content"]]
         assert "redacted_thinking" not in types
 
@@ -174,12 +191,12 @@ class TestPrepareRoutedBody:
                 "content": [{"type": "thinking", "thinking": "only", "signature": "s"}],
             },
         )
-        routed = rc._prepare_routed_body(body, TIER_CFG)
+        routed = rc.prepare_routed_body(body, TIER_CFG)
         assert len(routed["messages"]) == 3
         assert all(msg.get("content") for msg in routed["messages"] if msg["role"] == "assistant")
 
     def test_string_content_messages_pass_through(self) -> None:
-        routed = rc._prepare_routed_body(_request_body(), TIER_CFG)
+        routed = rc.prepare_routed_body(_request_body(), TIER_CFG)
         assert routed["messages"][0] == {"role": "user", "content": "run ls"}
 
     def test_input_body_never_mutated(self) -> None:
@@ -188,12 +205,79 @@ class TestPrepareRoutedBody:
             0, {"type": "thinking", "thinking": "secret", "signature": "s"}
         )
         snapshot = copy.deepcopy(body)
-        rc._prepare_routed_body(body, TIER_CFG)
+        rc.prepare_routed_body(body, TIER_CFG)
+        assert body == snapshot
+
+    def test_xhigh_effort_downgraded_to_high(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        routed = rc.prepare_routed_body(body, TIER_CFG)
+        assert routed["output_config"]["effort"] == "high"
+
+    @pytest.mark.parametrize("effort", ["high", "medium", "low", "max"])
+    def test_supported_effort_levels_preserved(self, effort: str) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": effort}
+        routed = rc.prepare_routed_body(body, TIER_CFG)
+        assert routed["output_config"]["effort"] == effort
+
+    def test_other_output_config_keys_preserved_when_downgrading(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh", "format": {"type": "json"}}
+        routed = rc.prepare_routed_body(body, TIER_CFG)
+        assert routed["output_config"] == {"effort": "high", "format": {"type": "json"}}
+
+    def test_missing_output_config_not_added(self) -> None:
+        routed = rc.prepare_routed_body(_request_body(), TIER_CFG)
+        assert "output_config" not in routed
+
+    def test_effort_normalization_does_not_mutate_input(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        snapshot = copy.deepcopy(body)
+        rc.prepare_routed_body(body, TIER_CFG)
+        assert body == snapshot
+
+    def test_tier_effort_overrides_requested_xhigh(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        routed = rc.prepare_routed_body(body, {**TIER_CFG, "effort": "low"})
+        assert routed["output_config"]["effort"] == "low"
+
+    def test_tier_effort_overrides_an_already_supported_request_level(self) -> None:
+        # The tier pin wins even when the client's requested level is valid.
+        body = _request_body()
+        body["output_config"] = {"effort": "max"}
+        routed = rc.prepare_routed_body(body, {**TIER_CFG, "effort": "medium"})
+        assert routed["output_config"]["effort"] == "medium"
+
+    def test_tier_effort_preserves_other_output_config_keys(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh", "format": {"type": "json"}}
+        routed = rc.prepare_routed_body(body, {**TIER_CFG, "effort": "high"})
+        assert routed["output_config"] == {"effort": "high", "format": {"type": "json"}}
+
+    def test_tier_effort_not_added_when_request_has_no_output_config(self) -> None:
+        # Nothing to attach the level to: a turn without output_config is unchanged.
+        routed = rc.prepare_routed_body(_request_body(), {**TIER_CFG, "effort": "low"})
+        assert "output_config" not in routed
+
+    def test_tier_effort_matching_request_is_a_noop(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "high"}
+        routed = rc.prepare_routed_body(body, {**TIER_CFG, "effort": "high"})
+        assert routed["output_config"]["effort"] == "high"
+
+    def test_tier_effort_does_not_mutate_input(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        snapshot = copy.deepcopy(body)
+        rc.prepare_routed_body(body, {**TIER_CFG, "effort": "low"})
         assert body == snapshot
 
 
 class TestEscalates:
-    def _response_with_tool(self, name: str) -> dict[str, Any]:
+    def _response_with_tool(self, name: str) -> dict[str, object]:
         return {
             "content": [
                 {"type": "text", "text": "ok"},
@@ -202,28 +286,41 @@ class TestEscalates:
         }
 
     def test_premium_tool_call_escalates(self) -> None:
-        assert rc.escalates(self._response_with_tool("Edit"), SETTINGS) is True
+        assert (
+            rc.escalates(self._response_with_tool("Edit"), SETTINGS, premium_tools=["Edit"]) is True
+        )
 
     def test_non_premium_tool_call_does_not_escalate(self) -> None:
-        assert rc.escalates(self._response_with_tool("Bash"), SETTINGS) is False
+        assert (
+            rc.escalates(self._response_with_tool("Bash"), SETTINGS, premium_tools=["Edit"])
+            is False
+        )
 
     def test_text_only_response_does_not_escalate(self) -> None:
         body = {"content": [{"type": "text", "text": "summary"}]}
-        assert rc.escalates(body, SETTINGS) is False
+        assert rc.escalates(body, SETTINGS, premium_tools=["Edit"]) is False
 
     def test_disabled_guard_never_escalates(self) -> None:
         settings = {**SETTINGS, "escalate_on_premium_tools": False}
-        assert rc.escalates(self._response_with_tool("Edit"), settings) is False
+        assert (
+            rc.escalates(self._response_with_tool("Edit"), settings, premium_tools=["Edit"])
+            is False
+        )
 
     def test_empty_premium_tools_never_escalates(self) -> None:
-        settings = {**SETTINGS, "premium_tools": []}
-        assert rc.escalates(self._response_with_tool("Edit"), settings) is False
+        assert rc.escalates(self._response_with_tool("Edit"), SETTINGS, premium_tools=[]) is False
 
     def test_missing_settings_keys_default_safe(self) -> None:
-        assert rc.escalates(self._response_with_tool("Edit"), {}) is False
+        assert rc.escalates(self._response_with_tool("Edit"), {}, premium_tools=[]) is False
 
     def test_non_list_content_does_not_escalate(self) -> None:
-        assert rc.escalates({"content": "plain"}, SETTINGS) is False
+        assert rc.escalates({"content": "plain"}, SETTINGS, premium_tools=["Edit"]) is False
+
+    def test_other_group_premium_tool_does_not_escalate(self) -> None:
+        assert (
+            rc.escalates(self._response_with_tool("apply_patch"), SETTINGS, premium_tools=["Edit"])
+            is False
+        )
 
 
 class TestRoutedCall:
@@ -298,6 +395,15 @@ class TestRoutedCall:
         assert blocks[0]["name"] == "Bash"
         assert blocks[0]["input"] == {"command": "ls"}
 
+    def test_other_group_premium_tool_call_is_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        tool_calls = [_fake_tool_call(call_id="c1", name="apply_patch", arguments="{}")]
+        fake = FakeLitellm(
+            _fake_response(text=None, tool_calls=tool_calls, finish_reason="tool_calls")
+        )
+        response = _call(monkeypatch=monkeypatch, fake=fake, premium_tools=["Edit"])
+        assert response is not None
+        assert response.body["content"][0]["name"] == "apply_patch"
+
     def test_only_tier_key_sent_to_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Invariant 2: routed calls carry only the tier key.
         fake = FakeLitellm(_fake_response())
@@ -317,9 +423,15 @@ class TestRoutedCall:
         assert fake.calls[0]["max_tokens"] == 8192
         assert fake.calls[0]["model"] == CHEAP_MODEL
 
-    def test_compression_applied_before_provider_call(
+    def test_litellm_path_leaves_excluded_tool_output_verbatim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Contract: under headroom's default policy, output from excluded
+        # coding-agent tools (Bash here) is left verbatim even when compression
+        # is enabled on the LiteLLM path. A large, old Bash tool_result must
+        # therefore reach the provider unshrunk -- never truncated. This runs the
+        # real wrapper (no compressor injected); when headroom-ai is absent the
+        # wrapper no-ops, which yields the same verbatim outcome.
         body = _request_body()
         body["messages"] = [
             {
@@ -339,23 +451,74 @@ class TestRoutedCall:
                 "content": [{"type": "tool_result", "tool_use_id": "t2", "content": "short"}],
             },
         ]
-        settings = {
-            **SETTINGS,
-            "compress_routed": True,
-            "compression": {
-                "keep_recent_messages": 1,
-                "max_tool_result_chars": 50,
-                "use_rtk": "never",
-            },
-        }
         fake = FakeLitellm(_fake_response())
-        _call(monkeypatch=monkeypatch, fake=fake, body=body, settings=settings)
+        _call(monkeypatch=monkeypatch, fake=fake, body=body, settings=SETTINGS)
         sent = fake.calls[0]["messages"]
         old_result = next(m for m in sent if m.get("tool_call_id") == "t1")
-        assert "truncated" in old_result["content"]
-        assert len(old_result["content"]) < 200
+        assert old_result["content"] == "x" * 5000
+        assert "truncated" not in old_result["content"]
         recent_result = next(m for m in sent if m.get("tool_call_id") == "t2")
         assert recent_result["content"] == "short"
+
+    def test_litellm_path_compresses_non_excluded_tool_results(
+        self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
+    ) -> None:
+        # With compression enabled (the default) a non-excluded tool's output is
+        # shrunk on the converted OpenAI messages: the provider receives the
+        # smaller content and the ledger records path "compress" with a positive
+        # char delta. A fake compressor (halving role="tool" content) keeps the
+        # test hermetic and independent of headroom's real heuristics.
+        monkeypatch.setattr(compression, "_load_compressor", lambda: _halving_compressor)
+        body = _request_body()
+        body["messages"] = [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "shell", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x" * 4000}],
+            },
+        ]
+        fake = FakeLitellm(_fake_response())
+        _call(monkeypatch=monkeypatch, fake=fake, body=body, settings=SETTINGS)
+
+        sent = next(m for m in fake.calls[0]["messages"] if m.get("tool_call_id") == "t1")
+        assert sent["content"] == "x" * 2000
+        entries = [json.loads(line) for line in ledger_file.read_text().splitlines()]
+        assert entries[0]["shrink_path"] == "compress"
+        assert entries[0]["shrink_chars_after"] < entries[0]["shrink_chars_before"]
+
+    def test_compress_routed_false_disables_compression(
+        self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
+    ) -> None:
+        # compress_routed=False must bypass headroom entirely: the converted
+        # messages reach the provider verbatim and the ledger records a no-op
+        # ("none") shrink, even for a non-excluded tool with compressible output.
+        # The compressor seam raises if touched, proving it is never called.
+        def _must_not_run() -> object:
+            raise AssertionError("compressor loaded despite compress_routed=False")
+
+        monkeypatch.setattr(compression, "_load_compressor", _must_not_run)
+        body = _request_body()
+        body["messages"] = [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "shell", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x" * 4000}],
+            },
+        ]
+        fake = FakeLitellm(_fake_response())
+        settings = {**SETTINGS, "compress_routed": False}
+        _call(monkeypatch=monkeypatch, fake=fake, body=body, settings=settings)
+
+        sent = next(m for m in fake.calls[0]["messages"] if m.get("tool_call_id") == "t1")
+        assert sent["content"] == "x" * 4000
+        entries = [json.loads(line) for line in ledger_file.read_text().splitlines()]
+        assert entries[0]["shrink_path"] == "none"
 
     def test_zero_usage_serves_response_without_ledger_entry(
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
@@ -366,13 +529,54 @@ class TestRoutedCall:
         assert response is not None
         assert not ledger_file.exists()
 
+    def _route_capturing_compress_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch, *, tier_cfg: dict[str, object]
+    ) -> dict[str, object]:
+        """Route one turn and return the kwargs the engine handed the compressor."""
+        seen: dict[str, object] = {}
+
+        def _recorder(messages: list[dict[str, object]], **kwargs: object) -> object:
+            seen.update(kwargs)
+            return SimpleNamespace(messages=messages)
+
+        monkeypatch.setattr(compression, "_load_compressor", lambda: _recorder)
+        fake = FakeLitellm(_fake_response())
+        monkeypatch.setattr(rc, "load_litellm", lambda: fake)
+        asyncio.run(
+            rc.routed_call(
+                body=_request_body(),
+                tier_name="fast",
+                tier_cfg=tier_cfg,
+                api_key="k",
+                settings=SETTINGS,
+                premium_tools=SETTINGS["premium_tools"],
+            )
+        )
+        return seen
+
+    def test_tier_text_ml_flag_opts_into_kompress(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # text_ml_compression=True must reach the compressor as the absence of a
+        # kompress_model override, so headroom's ML text stage runs for this tier.
+        seen = self._route_capturing_compress_kwargs(
+            monkeypatch, tier_cfg={"model": CHEAP_MODEL, "text_ml_compression": True}
+        )
+        assert "kompress_model" not in seen
+
+    def test_tier_without_flag_keeps_text_ml_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A tier that omits the flag (the default) must disable Kompress, so
+        # installing the ML extra never silently turns lossy text compression on.
+        seen = self._route_capturing_compress_kwargs(monkeypatch, tier_cfg={"model": CHEAP_MODEL})
+        assert seen["kompress_model"] == "disabled"
+
 
 # --- DeepSeek direct path -------------------------------------------------
 
 DS_MODEL = "deepseek/deepseek-v4-pro"
 
 # Cache-aware tier prices: misses cost 120x a hit, exercised by the savings math.
-DS_TIER: dict[str, Any] = {
+DS_TIER: dict[str, object] = {
     "model": DS_MODEL,
     "max_tokens": 8192,
     "input_cost_per_1m": 0.435,
@@ -389,14 +593,14 @@ def _direct_body(
     cache_read: int = 0,
     cache_creation: int = 0,
     tool_name: str | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Build a DeepSeek-native Anthropic response body with a cache usage block.
 
     The model field carries the native id (no provider prefix), mirroring what
     the DeepSeek endpoint actually returns, so masking has something to rewrite.
     """
     if tool_name is not None:
-        content: list[dict[str, Any]] = [
+        content: list[dict[str, object]] = [
             {"type": "tool_use", "id": "t9", "name": tool_name, "input": {}}
         ]
     else:
@@ -419,25 +623,33 @@ def _direct_body(
 
 def _call_direct(
     monkeypatch: pytest.MonkeyPatch,
-    direct_response: dict[str, Any] | None | Exception,
+    direct_response: dict[str, object] | None | Exception,
     *,
-    body: dict[str, Any] | None = None,
-    settings: dict[str, Any] | None = None,
+    body: dict[str, object] | None = None,
+    settings: dict[str, object] | None = None,
+    premium_tools: list[str] | None = None,
     api_key: str = "ds-tier-key",
-    tier_cfg: dict[str, Any] | None = None,
-) -> tuple[Any, dict[str, Any], list[Any]]:
+    tier_cfg: dict[str, object] | None = None,
+) -> tuple[object, dict[str, object]]:
     """Run routed_call on the DeepSeek direct path with direct_call stubbed.
 
-    Guards that the direct path never touches LiteLLM or the compressor, and
-    captures the arguments handed to direct_call so the caller can assert
-    credential isolation and body preparation.
+    Guards that the direct path never touches LiteLLM, and captures the
+    arguments handed to direct_call so the caller can assert credential
+    isolation and body preparation.
 
     Returns:
-        (routed_call result, captured direct_call args, compressor call log).
+        (routed_call result, captured direct_call args).
     """
-    captured: dict[str, Any] = {}
+    captured: dict[str, object] = {}
 
-    async def _fake_direct(*, body: dict[str, Any], tier_cfg: dict[str, Any], api_key: str) -> Any:
+    async def _fake_direct(
+        *,
+        body: dict[str, object],
+        tier_cfg: dict[str, object],
+        api_key: str,
+        client: object | None = None,
+    ) -> object:
+        del client
         captured["body"] = body
         captured["tier_cfg"] = tier_cfg
         captured["api_key"] = api_key
@@ -445,18 +657,11 @@ def _call_direct(
             raise direct_response
         return direct_response
 
-    def _no_litellm() -> Any:
+    def _no_litellm() -> object:
         raise AssertionError("load_litellm must not run on the direct path")
-
-    compress_calls: list[Any] = []
-
-    def _spy_compress(b: dict[str, Any], s: dict[str, Any]) -> dict[str, Any]:
-        compress_calls.append(b)
-        return b
 
     monkeypatch.setattr(rc.anthropic_direct, "direct_call", _fake_direct)
     monkeypatch.setattr(rc, "load_litellm", _no_litellm)
-    monkeypatch.setattr(rc.compression, "compress_body", _spy_compress)
 
     result = asyncio.run(
         rc.routed_call(
@@ -465,9 +670,10 @@ def _call_direct(
             tier_cfg=tier_cfg if tier_cfg is not None else DS_TIER,
             api_key=api_key,
             settings=settings if settings is not None else SETTINGS,
+            premium_tools=premium_tools if premium_tools is not None else SETTINGS["premium_tools"],
         )
     )
-    return result, captured, compress_calls
+    return result, captured
 
 
 class TestRoutedCallDeepSeekDirect:
@@ -476,36 +682,43 @@ class TestRoutedCallDeepSeekDirect:
     ) -> None:
         # The guard in _call_direct raises if load_litellm runs; reaching a
         # served response proves the DeepSeek tier bypassed LiteLLM entirely.
-        result, captured, _ = _call_direct(monkeypatch, _direct_body())
+        result, captured = _call_direct(monkeypatch, _direct_body())
         assert result is not None
         assert captured["api_key"] == "ds-tier-key"
-
-    def test_direct_path_skips_compression(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # DeepSeek's prefix cache outperforms our compression, so the direct
-        # path must never compress -- compressing would break byte-identical
-        # prefixes and defeat the cache.
-        settings = {**SETTINGS, "compress_routed": True}
-        _, _, compress_calls = _call_direct(monkeypatch, _direct_body(), settings=settings)
-        assert compress_calls == []
 
     def test_direct_path_prepares_body_and_strips_stream(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # _prepare_routed_body still runs: model swapped to the tier id, the
+        # prepare_routed_body still runs: model swapped to the tier id, the
         # stream flag dropped, max_tokens clamped to the tier ceiling.
-        _, captured, _ = _call_direct(monkeypatch, _direct_body())
+        _, captured = _call_direct(monkeypatch, _direct_body())
         sent = captured["body"]
         assert sent["model"] == DS_MODEL
         assert "stream" not in sent
         assert sent["max_tokens"] == 8192
 
-    def test_direct_path_reduces_tool_result_noise_before_send(
+    def test_direct_path_request_body_serializes_stably(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Deterministic reduction must run before the body reaches the provider:
-        # ANSI escapes and blank-line runs in tool_result content are stripped so
-        # fewer tokens go on the wire, and because the reduction is a pure
-        # function the prefix stays byte-stable across turns (cache-safe).
+        _, first = _call_direct(monkeypatch, _direct_body())
+        _, second = _call_direct(monkeypatch, _direct_body())
+
+        first_bytes = json.dumps(
+            first["body"], separators=(",", ":"), ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
+        second_bytes = json.dumps(
+            second["body"], separators=(",", ":"), ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
+
+        assert first_bytes == second_bytes
+
+    def test_direct_path_sends_tool_result_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The router applies no reduction on the direct path: tool_result content
+        # reaches DeepSeek byte-for-byte as the client sent it, so the prefix
+        # stays whatever the client (or upstream Headroom) produced and DeepSeek's
+        # prefix cache stays stable. ANSI escapes and blank-line runs must be
+        # preserved, not stripped.
+        noisy = "\x1b[32mok\x1b[0m\n\n\n\ntail"
         noisy_request = {
             "model": PREMIUM_MODEL,
             "max_tokens": 32000,
@@ -520,20 +733,20 @@ class TestRoutedCallDeepSeekDirect:
                         {
                             "type": "tool_result",
                             "tool_use_id": "t1",
-                            "content": "\x1b[32mok\x1b[0m\n\n\n\ntail",
+                            "content": noisy,
                         }
                     ],
                 },
             ],
         }
-        _, captured, _ = _call_direct(monkeypatch, _direct_body(), body=noisy_request)
+        _, captured = _call_direct(monkeypatch, _direct_body(), body=noisy_request)
         sent_result = captured["body"]["messages"][-1]["content"][0]["content"]
-        assert sent_result == "ok\n\ntail"
+        assert sent_result == noisy
 
     def test_direct_path_forwards_only_tier_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Invariant 2: the client's credential never reaches the routed
         # provider; only the tier key is handed to direct_call.
-        _, captured, _ = _call_direct(monkeypatch, _direct_body(), api_key="only-the-tier-key")
+        _, captured = _call_direct(monkeypatch, _direct_body(), api_key="only-the-tier-key")
         assert captured["api_key"] == "only-the-tier-key"
 
     def test_direct_path_masks_response_to_client_model(
@@ -541,11 +754,11 @@ class TestRoutedCallDeepSeekDirect:
     ) -> None:
         # Invariant 1: the served body claims the client-requested model, not
         # the DeepSeek native id the endpoint returned.
-        result, _, _ = _call_direct(monkeypatch, _direct_body())
+        result, _ = _call_direct(monkeypatch, _direct_body())
         assert result.body["model"] == PREMIUM_MODEL
 
     def test_direct_path_escalates_on_premium_tool(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        result, _, _ = _call_direct(monkeypatch, _direct_body(text=None, tool_name="Edit"))
+        result, _ = _call_direct(monkeypatch, _direct_body(text=None, tool_name="Edit"))
         assert result is None
 
     def test_direct_path_no_ledger_entry_when_escalated(
@@ -559,14 +772,14 @@ class TestRoutedCallDeepSeekDirect:
     ) -> None:
         # Invariant 3: a failed direct call (None) must fall back to passthrough
         # and record nothing.
-        result, _, _ = _call_direct(monkeypatch, None)
+        result, _ = _call_direct(monkeypatch, None)
         assert result is None
         assert not ledger_file.exists()
 
     def test_direct_path_exception_falls_through(
         self, monkeypatch: pytest.MonkeyPatch, ledger_file: Path
     ) -> None:
-        result, _, _ = _call_direct(monkeypatch, RuntimeError("transport down"))
+        result, _ = _call_direct(monkeypatch, RuntimeError("transport down"))
         assert result is None
         assert not ledger_file.exists()
 
@@ -579,7 +792,7 @@ class TestRoutedCallDeepSeekDirect:
         #   routed = 100_000*0.435/1e6 + 900_000*0.003625/1e6 + 1_000*0.87/1e6
         #          = 0.0435 + 0.0032625 + 0.00087 = 0.0476325
         #   premium = 1_000_000*10/1e6 + 1_000*20/1e6 = 10.00 + 0.02 = 10.02
-        result, _, _ = _call_direct(
+        result, _ = _call_direct(
             monkeypatch,
             _direct_body(
                 input_tokens=0,
@@ -602,9 +815,9 @@ class TestRoutedCallDeepSeekDirect:
         assert entry["saved_usd"] == pytest.approx(9.9723675, abs=1e-6)
 
 
-def _parse_sse(payload: bytes) -> list[tuple[str, dict[str, Any]]]:
+def _parse_sse(payload: bytes) -> list[tuple[str, dict[str, object]]]:
     """Split an SSE payload into (event_name, data) pairs."""
-    events: list[tuple[str, dict[str, Any]]] = []
+    events: list[tuple[str, dict[str, object]]] = []
     for chunk in payload.decode("utf-8").strip().split("\n\n"):
         lines = chunk.split("\n")
         assert lines[0].startswith("event: ")
@@ -614,7 +827,7 @@ def _parse_sse(payload: bytes) -> list[tuple[str, dict[str, Any]]]:
 
 
 class TestSynthesizeSse:
-    def _response_body(self) -> dict[str, Any]:
+    def _response_body(self) -> dict[str, object]:
         return {
             "id": "msg_test123",
             "type": "message",

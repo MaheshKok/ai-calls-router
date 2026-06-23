@@ -15,13 +15,12 @@ import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
 from ai_calls_router._lib import conversion
 
-GOLDEN: dict[str, Any] = json.loads(
+GOLDEN: dict[str, object] = json.loads(
     (Path(__file__).resolve().parent.parent / "fixtures" / "conversion_golden.json").read_text(
         encoding="utf-8"
     )
@@ -45,7 +44,7 @@ def _cases(section: str) -> list[pytest.param]:
     ]
 
 
-def _make_response(spec: dict[str, Any]) -> SimpleNamespace:
+def _make_response(spec: dict[str, object]) -> SimpleNamespace:
     """Build an attribute-style litellm response object from a JSON spec.
 
     Mirrors fixtures/generate_golden.py:make_response so both Pythons feed
@@ -87,31 +86,31 @@ class TestGoldenProvenance:
 
 class TestConvertMessagesGolden:
     @pytest.mark.parametrize(("body", "expected"), _cases("convert_messages"))
-    def test_matches_original(self, body: list[dict[str, Any]], expected: Any) -> None:
+    def test_matches_original(self, body: list[dict[str, object]], expected: object) -> None:
         assert conversion.convert_messages_for_litellm(body) == expected
 
 
 class TestConvertToolGolden:
     @pytest.mark.parametrize(("tool", "expected"), _cases("convert_tool"))
-    def test_matches_original(self, tool: dict[str, Any], expected: Any) -> None:
+    def test_matches_original(self, tool: dict[str, object], expected: object) -> None:
         assert conversion.convert_anthropic_tool(tool) == expected
 
 
 class TestConvertToolChoiceGolden:
     @pytest.mark.parametrize(("choice", "expected"), _cases("convert_tool_choice"))
-    def test_matches_original(self, choice: Any, expected: Any) -> None:
+    def test_matches_original(self, choice: object, expected: object) -> None:
         assert conversion.convert_tool_choice(choice) == expected
 
 
 class TestParseToolArgumentsGolden:
     @pytest.mark.parametrize(("arguments", "expected"), _cases("parse_tool_arguments"))
-    def test_matches_original(self, arguments: Any, expected: Any) -> None:
+    def test_matches_original(self, arguments: object, expected: object) -> None:
         assert conversion.parse_tool_arguments(arguments) == expected
 
 
 class TestToAnthropicResponseGolden:
     @pytest.mark.parametrize(("spec", "expected"), _cases("to_anthropic_response"))
-    def test_matches_original(self, spec: dict[str, Any], expected: Any) -> None:
+    def test_matches_original(self, spec: dict[str, object], expected: object) -> None:
         result = conversion.to_anthropic_response(_make_response(spec), "claude-sonnet-4-6")
         msg_id = result.pop("id")
         assert MSG_ID_PATTERN.match(msg_id)
@@ -162,6 +161,55 @@ class TestConvertMessagesSpec:
             [{"role": "assistant", "content": "thought"}]
         )
         assert converted[0]["reasoning_content"] == ""
+
+    def test_tool_call_arguments_are_deterministic_bytes(self) -> None:
+        left = {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "Run",
+                    "input": {"z": 1, "a": {"unicode": "Ω", "nested": {"b": 2, "a": 1}}},
+                }
+            ],
+        }
+        right = {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "Run",
+                    "input": {"a": {"nested": {"a": 1, "b": 2}, "unicode": "Ω"}, "z": 1},
+                }
+            ],
+        }
+
+        left_args = conversion.convert_messages_for_litellm([left])[0]["tool_calls"][0]["function"][
+            "arguments"
+        ]
+        right_args = conversion.convert_messages_for_litellm([right])[0]["tool_calls"][0][
+            "function"
+        ]["arguments"]
+
+        assert left_args.encode("utf-8") == right_args.encode("utf-8")
+        assert json.loads(left_args) == {
+            "a": {"nested": {"a": 1, "b": 2}, "unicode": "Ω"},
+            "z": 1,
+        }
+
+    def test_empty_tool_call_input_serializes_deterministically(self) -> None:
+        converted = conversion.convert_messages_for_litellm(
+            [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "toolu_1", "name": "Run"}],
+                }
+            ]
+        )
+
+        assert converted[0]["tool_calls"][0]["function"]["arguments"] == "{}"
 
 
 class TestBackendResponse:

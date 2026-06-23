@@ -15,7 +15,6 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 sys.path.insert(0, str(Path.home() / ".headroom" / "extensions" / "tool-router"))
 
@@ -36,7 +35,7 @@ except Exception:  # pragma: no cover - fallback if extension import breaks
 # Fixture inputs (shared spec; test_conversion.py replays the same inputs)
 # ---------------------------------------------------------------------------
 
-MESSAGE_CASES: dict[str, list[dict[str, Any]]] = {
+MESSAGE_CASES: dict[str, list[dict[str, object]]] = {
     "string_content_user": [{"role": "user", "content": "hello"}],
     "string_content_assistant": [{"role": "assistant", "content": "hi there"}],
     "missing_role_defaults_user": [{"content": "no role"}],
@@ -141,7 +140,7 @@ MESSAGE_CASES: dict[str, list[dict[str, Any]]] = {
     ],
 }
 
-TOOL_CASES: dict[str, dict[str, Any]] = {
+TOOL_CASES: dict[str, dict[str, object]] = {
     "full_tool": {
         "name": "Bash",
         "description": "Run a command",
@@ -152,7 +151,7 @@ TOOL_CASES: dict[str, dict[str, Any]] = {
     "empty_tool": {},
 }
 
-TOOL_CHOICE_CASES: dict[str, Any] = {
+TOOL_CHOICE_CASES: dict[str, object] = {
     "string_auto": "auto",
     "string_none": "none",
     "dict_auto": {"type": "auto"},
@@ -164,7 +163,7 @@ TOOL_CHOICE_CASES: dict[str, Any] = {
     "non_str_non_dict": 42,
 }
 
-PARSE_ARGS_CASES: dict[str, Any] = {
+PARSE_ARGS_CASES: dict[str, object] = {
     "valid_json_string": '{"cmd": "ls", "n": 1}',
     "invalid_json_string": "not json at all",
     "json_null_string": "null",
@@ -175,7 +174,7 @@ PARSE_ARGS_CASES: dict[str, Any] = {
 
 # Each response spec is JSON; both the generator and the 3.13 test rebuild
 # attribute-style objects from it before calling the converter.
-RESPONSE_CASES: dict[str, dict[str, Any]] = {
+RESPONSE_CASES: dict[str, dict[str, object]] = {
     "text_stop": {
         "choices": [{"finish_reason": "stop", "message": {"content": "Done.", "tool_calls": None}}],
         "usage": {"prompt_tokens": 100, "completion_tokens": 20},
@@ -241,7 +240,7 @@ RESPONSE_CASES: dict[str, dict[str, Any]] = {
 }
 
 
-def make_response(spec: dict[str, Any]) -> SimpleNamespace:
+def make_response(spec: dict[str, object]) -> SimpleNamespace:
     """Build an attribute-style litellm response object from a JSON spec.
 
     Args:

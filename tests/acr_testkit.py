@@ -12,13 +12,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 from starlette.testclient import TestClient
 
 from ai_calls_router.proxy.server import create_app
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.conversion import LiteLLMResponse
+    from ai_calls_router._lib.types import JsonValue
 
 
 class FakeLitellm:
@@ -29,18 +33,20 @@ class FakeLitellm:
     response or raises an injected error to exercise the fail-open path.
     """
 
-    def __init__(self, response: Any = None, error: Exception | None = None) -> None:
+    def __init__(
+        self, response: LiteLLMResponse | None = None, error: Exception | None = None
+    ) -> None:
         """Initialize with a canned response or an error to raise.
 
         Args:
             response: ModelResponse stand-in returned from acompletion.
             error: Exception raised from acompletion instead of returning.
         """
-        self.calls: list[dict[str, Any]] = []
+        self.calls: list[dict[str, JsonValue]] = []
         self._response = response
         self._error = error
 
-    async def acompletion(self, **kwargs: Any) -> Any:
+    async def acompletion(self, **kwargs: JsonValue) -> LiteLLMResponse | None:
         """Record the call kwargs, then return the response or raise the error.
 
         Args:
@@ -61,11 +67,11 @@ class FakeLitellm:
 def make_response(
     *,
     text: str | None = "done",
-    tool_calls: list[Any] | None = None,
+    tool_calls: list[SimpleNamespace] | None = None,
     finish_reason: str = "stop",
     prompt_tokens: int = 1000,
     completion_tokens: int = 200,
-) -> Any:
+) -> SimpleNamespace:
     """Build a litellm ModelResponse stand-in (attribute access only).
 
     The defaults mirror a plain text completion; callers override token counts
@@ -136,6 +142,7 @@ def make_client(
     """
     config_file = tmp_path / "config.yaml"
     config_file.write_text(config_yaml, encoding="utf-8")
+    monkeypatch.setenv("ACR_HOME", str(tmp_path))
     monkeypatch.setenv("ACR_CONFIG", str(config_file))
     monkeypatch.setenv("ACR_TEST_KEY", "tier-key")
     monkeypatch.setenv("ACR_SAVINGS_LEDGER", str(tmp_path / "savings.jsonl"))
@@ -143,7 +150,7 @@ def make_client(
     return TestClient(app)
 
 
-def read_ledger(tmp_path: Path) -> list[dict[str, Any]]:
+def read_ledger(tmp_path: Path) -> list[dict[str, object]]:
     """Parse the savings ledger written during a test, if any.
 
     Args:

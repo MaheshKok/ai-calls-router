@@ -14,15 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
 
 import httpx
 import pytest
 
 from ai_calls_router.routing import direct as ad
 
-TIER_CFG: dict[str, Any] = {"model": "deepseek/deepseek-v4-pro", "max_tokens": 8192}
-RESPONSE_JSON: dict[str, Any] = {
+TIER_CFG: dict[str, object] = {"model": "deepseek/deepseek-v4-pro", "max_tokens": 8192}
+RESPONSE_JSON: dict[str, object] = {
     "id": "msg_1",
     "type": "message",
     "role": "assistant",
@@ -40,7 +39,7 @@ class _Recorder:
         self,
         *,
         status: int = 200,
-        payload: dict[str, Any] | None = None,
+        payload: dict[str, object] | None = None,
         raise_exc: Exception | None = None,
     ) -> None:
         self.requests: list[httpx.Request] = []
@@ -56,11 +55,11 @@ class _Recorder:
 
 
 def _run_direct(
-    *, body: dict[str, Any], tier_cfg: dict[str, Any], api_key: str, recorder: _Recorder
-) -> dict[str, Any] | None:
+    *, body: dict[str, object], tier_cfg: dict[str, object], api_key: str, recorder: _Recorder
+) -> dict[str, object] | None:
     """Drive direct_call with an injected MockTransport client."""
 
-    async def _go() -> dict[str, Any] | None:
+    async def _go() -> dict[str, object] | None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(recorder.handler)) as client:
             return await ad.direct_call(
                 body=body, tier_cfg=tier_cfg, api_key=api_key, client=client
@@ -86,7 +85,7 @@ class TestProviderPrefix:
         assert ad.provider_prefix(model) is None
 
     @pytest.mark.parametrize("model", [None, 42, ["deepseek/x"], {"m": 1}])
-    def test_non_string_has_no_prefix(self, model: Any) -> None:
+    def test_non_string_has_no_prefix(self, model: object) -> None:
         assert ad.provider_prefix(model) is None
 
 
@@ -113,7 +112,7 @@ class TestDirectEndpoint:
         assert ad.direct_endpoint("deepseek-v4-pro") is None
 
     @pytest.mark.parametrize("model", [None, 42, ["x"]])
-    def test_non_string_is_not_direct(self, model: Any) -> None:
+    def test_non_string_is_not_direct(self, model: object) -> None:
         assert ad.direct_endpoint(model) is None
 
 
@@ -215,12 +214,12 @@ class TestDirectCall:
         rec = _Recorder()
         real_async_client = httpx.AsyncClient
 
-        def _factory(*_args: Any, **_kwargs: Any) -> httpx.AsyncClient:
+        def _factory(*_args: object, **_kwargs: object) -> httpx.AsyncClient:
             return real_async_client(transport=httpx.MockTransport(rec.handler))
 
         monkeypatch.setattr(ad.httpx, "AsyncClient", _factory)
 
-        async def _go() -> dict[str, Any] | None:
+        async def _go() -> dict[str, object] | None:
             return await ad.direct_call(body={"messages": []}, tier_cfg=TIER_CFG, api_key="KEY")
 
         result = asyncio.run(_go())

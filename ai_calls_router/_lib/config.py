@@ -11,7 +11,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8747
@@ -57,6 +60,23 @@ def config_path() -> Path:
     return home_dir() / "config.yaml"
 
 
+def provider_config_dir() -> Path:
+    """Return the directory holding per-provider YAML files."""
+    return home_dir() / "config"
+
+
+def provider_config_path(group: str) -> Path:
+    """Return the per-provider YAML path for an agent group.
+
+    Args:
+        group: Agent group name, for example ``claude_code``.
+
+    Returns:
+        Path to the group's YAML file under ``provider_config_dir()``.
+    """
+    return provider_config_dir() / f"{group.replace('_', '-')}.yaml"
+
+
 def pid_path() -> Path:
     """Return the daemon pidfile location."""
     return home_dir() / "acr.pid"
@@ -89,7 +109,15 @@ def ledger_path() -> Path:
     return home_dir() / "savings.jsonl"
 
 
-def server_settings(routes: dict[str, Any]) -> ServerSettings:
+def metrics_db_path() -> Path:
+    """Return the metrics SQLite DB location ($ACR_METRICS_DB overrides)."""
+    override = os.environ.get("ACR_METRICS_DB")
+    if override:
+        return Path(override).expanduser()
+    return home_dir() / "metrics.db"
+
+
+def server_settings(routes: JsonObject) -> ServerSettings:
     """Resolve the server: block, failing open to safe defaults.
 
     Args:
@@ -99,9 +127,8 @@ def server_settings(routes: dict[str, Any]) -> ServerSettings:
         ServerSettings with defaults substituted for missing or malformed
         values (a bad config must not stop the proxy from serving).
     """
-    server = routes.get("server")
-    if not isinstance(server, dict):
-        server = {}
+    server_raw = routes.get("server")
+    server: JsonObject = server_raw if isinstance(server_raw, dict) else {}
 
     host = server.get("host")
     if not isinstance(host, str) or not host:
@@ -118,7 +145,7 @@ def server_settings(routes: dict[str, Any]) -> ServerSettings:
     return ServerSettings(host=host, port=port, upstream=upstream.rstrip("/"))
 
 
-def validate_premium(routes: dict[str, Any]) -> None:
+def validate_premium(routes: JsonObject) -> None:
     """Validate the premium: block against v1 capabilities.
 
     v1 only supports the Anthropic passthrough; the block exists so future

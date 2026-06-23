@@ -25,14 +25,15 @@ from typing import TYPE_CHECKING
 from ai_calls_router._lib import config
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
     from pathlib import Path
+    from typing import TextIO
 
 ACR_LOGGER_NAME = "acr"
 """Root of the proxy logger namespace; all module loggers are ``acr.*``."""
 
 LOG_FORMAT = (
-    "%(asctime)s %(levelname)-7s %(name)s %(filename)s:%(lineno)d " "[%(request_id)s] %(message)s"
+    "%(asctime)s %(levelname)-7s %(name)s %(filename)s:%(lineno)d [%(request_id)s] %(message)s"
 )
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
@@ -73,7 +74,7 @@ class RequestIdFilter(logging.Filter):
 
 
 @contextmanager
-def request_context(request_id: str | None = None) -> Iterator[str]:
+def request_context(request_id: str | None = None) -> Generator[str, None, None]:
     """Bind a correlation id for the duration of the ``with`` block.
 
     Args:
@@ -165,9 +166,11 @@ def _build_file_handler(level: int, request_filter: RequestIdFilter) -> Rotating
     return handler
 
 
-def _build_console_handler(level: int, request_filter: RequestIdFilter) -> logging.StreamHandler:
+def _build_console_handler(
+    level: int, request_filter: RequestIdFilter
+) -> logging.StreamHandler[TextIO]:
     """Build the stderr console handler for operator-visible lines."""
-    handler: logging.StreamHandler = logging.StreamHandler(stream=sys.stderr)
+    handler: logging.StreamHandler[TextIO] = logging.StreamHandler(stream=sys.stderr)
     handler.setLevel(level)
     handler.addFilter(request_filter)
     setattr(handler, _MANAGED_ATTR, True)

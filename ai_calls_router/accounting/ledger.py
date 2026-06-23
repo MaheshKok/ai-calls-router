@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TypeAlias, cast
 
-from ai_calls_router._lib import config
+from ai_calls_router._lib import config, jsonnum
+from ai_calls_router._lib.types import JsonObject, JsonValue
 
 _INT_FIELDS = (
     "input_tokens",
@@ -21,10 +22,15 @@ _INT_FIELDS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
+_NONNEGATIVE_INT_FIELDS = ("shrink_chars_before", "shrink_chars_after")
 _FLOAT_FIELDS = ("routed_usd", "premium_usd", "saved_usd")
 
+LedgerEntry: TypeAlias = JsonObject
+Bucket: TypeAlias = dict[str, int | float]
+Summary: TypeAlias = dict[str, Bucket | dict[str, Bucket]]
 
-def load_entries(ledger: Path | None = None) -> list[dict[str, Any]]:
+
+def load_entries(ledger: Path | None = None) -> list[LedgerEntry]:
     """Read all valid JSONL entries from the savings ledger.
 
     Blank lines, unparseable lines, and non-dict JSON values are skipped.
@@ -38,13 +44,13 @@ def load_entries(ledger: Path | None = None) -> list[dict[str, Any]]:
     ledger = ledger if ledger is not None else config.ledger_path()
     if not ledger.exists():
         return []
-    entries: list[dict[str, Any]] = []
+    entries: list[LedgerEntry] = []
     for line in ledger.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped:
             continue
         try:
-            entry = json.loads(stripped)
+            entry = cast("JsonValue", json.loads(stripped))
         except json.JSONDecodeError:
             continue
         if isinstance(entry, dict):
@@ -52,7 +58,7 @@ def load_entries(ledger: Path | None = None) -> list[dict[str, Any]]:
     return entries
 
 
-def _accumulate(bucket: dict[str, Any], entry: dict[str, Any]) -> None:
+def _accumulate(bucket: Bucket, entry: LedgerEntry) -> None:
     """Add one entry's counters into an aggregation bucket in place.
 
     Args:
@@ -61,26 +67,30 @@ def _accumulate(bucket: dict[str, Any], entry: dict[str, Any]) -> None:
     """
     bucket["requests"] += 1
     for key in _INT_FIELDS:
-        bucket[key] += int(entry.get(key, 0) or 0)
+        bucket[key] += jsonnum.int_value(entry.get(key, 0))
+    for key in _NONNEGATIVE_INT_FIELDS:
+        bucket[key] += jsonnum.int_value(entry.get(key, 0), minimum=0)
     for key in _FLOAT_FIELDS:
-        bucket[key] += float(entry.get(key, 0.0) or 0.0)
+        bucket[key] += jsonnum.float_value(entry.get(key, 0.0))
 
 
-def _empty_bucket() -> dict[str, Any]:
+def _empty_bucket() -> Bucket:
     """Create a zeroed aggregation bucket.
 
     Returns:
         Dict with all counter fields initialized to zero.
     """
-    bucket: dict[str, Any] = {"requests": 0}
+    bucket: Bucket = {"requests": 0}
     for key in _INT_FIELDS:
+        bucket[key] = 0
+    for key in _NONNEGATIVE_INT_FIELDS:
         bucket[key] = 0
     for key in _FLOAT_FIELDS:
         bucket[key] = 0.0
     return bucket
 
 
-def aggregate(entries: list[dict[str, Any]]) -> dict[str, Any]:
+def aggregate(entries: list[LedgerEntry]) -> Summary:
     """Roll ledger entries up into totals and a per-routed-model breakdown.
 
     Args:
@@ -92,7 +102,7 @@ def aggregate(entries: list[dict[str, Any]]) -> dict[str, Any]:
         when no premium cost was accumulated.
     """
     totals = _empty_bucket()
-    by_model: dict[str, dict[str, Any]] = {}
+    by_model: dict[str, Bucket] = {}
     for entry in entries:
         model = str(entry.get("routed_model", "?"))
         if model not in by_model:
@@ -104,7 +114,7 @@ def aggregate(entries: list[dict[str, Any]]) -> dict[str, Any]:
     return {"totals": totals, "by_model": by_model}
 
 
-def format_report(summary: dict[str, Any]) -> str:
+def format_report(summary: Summary) -> str:
     """Render an aggregated savings summary as a human-readable report.
 
     Args:
@@ -113,7 +123,7 @@ def format_report(summary: dict[str, Any]) -> str:
     Returns:
         Multi-line report text for the acr savings command.
     """
-    totals = summary["totals"]
+    totals = cast("Bucket", summary["totals"])
     if totals["requests"] == 0:
         return "No routed calls recorded yet (ledger empty)."
     lines = [
@@ -129,7 +139,8 @@ def format_report(summary: dict[str, Any]) -> str:
         "",
         "By routed model:",
     ]
-    for model in sorted(summary["by_model"]):
-        bucket = summary["by_model"][model]
+    by_model = cast("dict[str, Bucket]", summary["by_model"])
+    for model in sorted(by_model):
+        bucket = by_model[model]
         lines.append(f"  {model}: {bucket['requests']} requests, saved ${bucket['saved_usd']:.2f}")
     return "\n".join(lines)

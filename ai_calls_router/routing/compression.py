@@ -1,275 +1,150 @@
-"""Built-in lightweight compression for routed request bodies.
+"""Optional headroom compression for the LiteLLM serving path.
 
-compress_body shrinks the token footprint of a routed call by truncating
-tool_result text in messages older than the recent-message window; the recent
-window and all non-tool_result content stay byte-identical, and the input body
-is never mutated because the passthrough fallback still needs it. An optional
-rtk (Rust Token Killer) pass is applied first to old tool results whose
-producing tool has a known-safe rtk filter; rtk is detected on PATH, bounded
-by a timeout, and fail-open -- plain truncation always runs regardless.
+Compresses the OpenAI-format messages that litellm sends upstream, after the
+Anthropic-to-OpenAI conversion in completion_kwargs. That is the wire shape
+headroom's content router is effective on: tool output lives in role="tool"
+messages with string content, so the list-form and user-message protection gates
+that zero out compression on native Anthropic traffic do not fire. Headroom's
+default tool exclusions still leave coding-agent output (Read/Edit/Bash/...)
+verbatim. Compression is best-effort: when headroom-ai is not installed, or a
+compression call raises, the messages pass through unchanged so a proxied request
+is never broken by the optimizer.
 """
 
 from __future__ import annotations
 
-import copy
+import functools
 import logging
-import shutil
-import subprocess
-from typing import Any
+from typing import TYPE_CHECKING, Protocol, cast
+
+from ai_calls_router.accounting.shrink_stats import ShrinkStats
+
+if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonArray
 
 logger = logging.getLogger("acr.compression")
 
-DEFAULT_KEEP_RECENT_MESSAGES = 6
-DEFAULT_MAX_TOOL_RESULT_CHARS = 4000
-RTK_TIMEOUT_SECONDS = 5
-
-# Tool name -> rtk pipe filter, only where the tool's output format matches
-# the filter's expected input by construction. rtk filters are format-specific
-# (pytest, grep, git-log, ...) and destroy arbitrary text, so unmapped tools
-# never reach rtk and fall back to plain truncation.
-RTK_FILTERS: dict[str, str] = {"Grep": "grep"}
+DEFAULT_MODEL_LIMIT = 200_000
 
 
-def run_rtk(text: str, filter_name: str) -> str | None:
-    """Filter text through an rtk pipe subprocess, fail-open.
+class _CompressResult(Protocol):
+    """Headroom result shape used by this module."""
 
-    Args:
-        text: Raw tool output text to compress.
-        filter_name: rtk pipe filter name (e.g. "grep").
+    messages: JsonArray
+
+
+class _Compressor(Protocol):
+    """Headroom compression callable shape used by this module."""
+
+    def __call__(
+        self,
+        messages: JsonArray,
+        *,
+        model: str,
+        model_limit: int,
+        optimize: bool,
+        **kwargs: object,
+    ) -> _CompressResult: ...
+
+
+# Sentinel passed to headroom as ``kompress_model`` to skip its ML (Kompress)
+# plain-text compressor. Lossless compressors (SmartCrusher, code, log, diff,
+# search, html) still run; only the lossy ModernBERT token-dropping stage is off.
+_DISABLE_TEXT_ML = "disabled"
+
+
+@functools.lru_cache(maxsize=1)
+def _load_compressor() -> _Compressor | None:
+    """Return ``headroom.compress`` when importable, else ``None``.
+
+    Cached so the optional import is attempted once per process and the
+    missing-dependency warning is emitted at most once. This is also the seam
+    tests monkeypatch to inject a fake compressor or simulate headroom's absence.
 
     Returns:
-        rtk stdout when the subprocess succeeds with non-blank output,
-        otherwise None (non-zero exit, timeout, missing binary, any error).
+        The ``headroom.compress`` callable, or ``None`` when headroom-ai is not
+        installed.
     """
     try:
-        proc = subprocess.run(
-            ["rtk", "pipe", "--filter", filter_name],
-            input=text,
-            capture_output=True,
-            text=True,
-            timeout=RTK_TIMEOUT_SECONDS,
+        import headroom  # pyrefly: ignore[missing-import]
+    except ImportError:
+        logger.warning(
+            "headroom-ai not installed; LiteLLM-path compression is a no-op "
+            "(install the 'compression' extra to enable it)"
         )
-        if proc.returncode != 0 or not proc.stdout.strip():
-            return None
-        return proc.stdout
-    except Exception as exc:
-        logger.warning("rtk pipe failed (filter=%s): %s", filter_name, exc, exc_info=True)
         return None
+    else:
+        return cast("_Compressor", headroom.compress)
 
 
-def _positive_int(value: Any, default: int) -> int:
-    """Return value when it is a positive int, otherwise the default.
+def _messages_chars(messages: JsonArray) -> int:
+    """Sum the character length of string message content.
 
-    Args:
-        value: Candidate config value (bool excluded).
-        default: Fallback for missing or malformed values.
-
-    Returns:
-        A usable positive integer setting.
-    """
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return default
-
-
-def _names_from_message(message: dict[str, Any]) -> dict[str, str]:
-    """Collect tool_use id→name mappings from one assistant message."""
-    names: dict[str, str] = {}
-    content = message.get("content")
-    if not isinstance(content, list):
-        return names
-    for block in content:
-        if not isinstance(block, dict) or block.get("type") != "tool_use":
-            continue
-        block_id = block.get("id")
-        name = block.get("name")
-        if isinstance(block_id, str) and isinstance(name, str):
-            names[block_id] = name
-    return names
-
-
-def _tool_names_by_id(messages: list[Any]) -> dict[str, str]:
-    """Map tool_use ids to tool names across all assistant messages.
+    Only string ``content`` values are counted (the OpenAI ``role="tool"`` and
+    assistant text strings); list or ``None`` content contributes nothing, so the
+    figure tracks exactly the text headroom can shrink.
 
     Args:
-        messages: Anthropic-format message list (malformed entries skipped).
+        messages: OpenAI-format chat messages.
 
     Returns:
-        Mapping of tool_use_id to the tool name that produced it.
+        Total characters across string ``content`` fields.
     """
-    names: dict[str, str] = {}
+    total = 0
     for message in messages:
-        if not isinstance(message, dict) or message.get("role") != "assistant":
+        if not isinstance(message, dict):
             continue
-        names.update(_names_from_message(message))
-    return names
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+    return total
 
 
-def _truncate(text: str, budget: int) -> str:
-    """Cut text to a character budget with an explicit truncation marker.
+def compress_litellm_messages(
+    messages: JsonArray,
+    *,
+    model: str,
+    model_limit: int = DEFAULT_MODEL_LIMIT,
+    enable_text_ml: bool = False,
+) -> tuple[JsonArray, ShrinkStats]:
+    """Compress OpenAI-format messages with headroom's default policy.
+
+    Runs on the messages after the Anthropic-to-OpenAI conversion, where
+    headroom's content router is effective. Headroom's other defaults apply:
+    coding-agent tool output stays verbatim and user/system messages stay
+    protected. Savings are measured as the string-content character delta and
+    returned as a ShrinkStats so they flow through the existing accounting
+    plumbing. Headroom also exposes exact token counts on its ``CompressResult``;
+    the character delta is kept here to match the dashboard's existing units.
+
+    Best-effort: when headroom-ai is not installed, or compression raises, the
+    input messages are returned unchanged with a no-op (``"none"``) stat.
 
     Args:
-        text: Text longer than the budget.
-        budget: Number of leading characters to keep.
+        messages: OpenAI-format chat messages to compress (never mutated).
+        model: Provider model id, used by headroom for tokenizer/limit selection.
+        model_limit: Token budget passed to ``headroom.compress``.
+        enable_text_ml: When False (default), headroom's lossy ML plain-text
+            compressor (Kompress) is disabled so only the lossless content
+            compressors run; installing the ML extra never changes behaviour on
+            its own. Set True per tier to opt that tier's prose tool output into
+            ML compression.
 
     Returns:
-        The kept prefix plus a marker reporting how many chars were removed.
+        A pair of the (possibly new) message list and a ShrinkStats. The list is
+        headroom's compressed output on success, or the input list unchanged on
+        no-op.
     """
-    removed = len(text) - budget
-    return text[:budget] + f"\n...[truncated {removed} chars]"
-
-
-def _compress_text(*, text: str, budget: int, rtk_filter: str | None) -> str:
-    """Compress one over-budget text payload, optionally via rtk first.
-
-    Args:
-        text: Tool result text exceeding the budget.
-        budget: Character budget for the final text.
-        rtk_filter: rtk pipe filter to try first, or None to skip rtk.
-
-    Returns:
-        rtk-filtered and/or truncated text, always within budget plus marker.
-    """
-    if rtk_filter is not None:
-        filtered = run_rtk(text, rtk_filter)
-        if filtered is not None:
-            text = filtered
-    if len(text) <= budget:
-        return text
-    return _truncate(text, budget)
-
-
-def _compress_block(*, block: Any, remaining: int, rtk_filter: str | None) -> tuple[Any, int]:
-    """Compress one content block against the remaining shared budget.
-
-    Non-text and malformed blocks pass through untouched and consume nothing.
-    Text blocks within budget pass through and consume their length; over-budget
-    text blocks are compressed and consume the rest of the budget.
-
-    Args:
-        block: One content block from a tool_result list.
-        remaining: Characters left in the shared budget before this block.
-        rtk_filter: rtk pipe filter to try on over-budget text, or None.
-
-    Returns:
-        A (possibly-compressed block, remaining budget after it) pair.
-    """
-    text = block.get("text") if isinstance(block, dict) else None
-    if not isinstance(text, str) or block.get("type") != "text":
-        return block, remaining
-    if len(text) <= remaining:
-        return block, remaining - len(text)
-    compressed_text = _compress_text(text=text, budget=remaining, rtk_filter=rtk_filter)
-    return {**block, "text": compressed_text}, 0
-
-
-def _compress_tool_result_content(*, content: Any, budget: int, rtk_filter: str | None) -> Any:
-    """Compress a tool_result content payload to the character budget.
-
-    String content is compressed directly; list content shares one budget
-    across its text blocks while non-text and malformed blocks pass through
-    untouched. Any other content shape is returned as-is.
-
-    Args:
-        content: The tool_result block's content value.
-        budget: Character budget for the whole tool result.
-        rtk_filter: rtk pipe filter to try on over-budget text, or None.
-
-    Returns:
-        The compressed content, same shape as the input.
-    """
-    if isinstance(content, str):
-        if len(content) <= budget:
-            return content
-        return _compress_text(text=content, budget=budget, rtk_filter=rtk_filter)
-    if isinstance(content, list):
-        remaining = budget
-        new_blocks: list[Any] = []
-        for block in content:
-            new_block, remaining = _compress_block(
-                block=block, remaining=remaining, rtk_filter=rtk_filter
-            )
-            new_blocks.append(new_block)
-        return new_blocks
-    return content
-
-
-def _resolve_rtk_filter(
-    block: dict[str, Any], tool_names: dict[str, str], rtk_enabled: bool
-) -> str | None:
-    """Resolve an rtk filter name for a tool_result block, or None."""
-    if not rtk_enabled:
-        return None
-    tool_use_id = block.get("tool_use_id")
-    tool_name = tool_names.get(tool_use_id) if isinstance(tool_use_id, str) else None
-    return RTK_FILTERS.get(tool_name) if tool_name is not None else None
-
-
-def _compress_message(
-    *, message: Any, budget: int, tool_names: dict[str, str], rtk_enabled: bool
-) -> None:
-    """Compress every tool_result block in one (already copied) message.
-
-    Args:
-        message: A message from the deep-copied body; mutated in place.
-        budget: Character budget per tool_result block.
-        tool_names: tool_use_id to tool name mapping for rtk filter lookup.
-        rtk_enabled: Whether rtk is available and allowed by config.
-    """
-    if not isinstance(message, dict):
-        return
-    content = message.get("content")
-    if not isinstance(content, list):
-        return
-    for block in content:
-        if not isinstance(block, dict) or block.get("type") != "tool_result":
-            continue
-        rtk_filter = _resolve_rtk_filter(block, tool_names, rtk_enabled)
-        block["content"] = _compress_tool_result_content(
-            content=block.get("content"), budget=budget, rtk_filter=rtk_filter
-        )
-
-
-def compress_body(body: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-    """Compress old tool_result content in a request body for routing.
-
-    The last keep_recent_messages messages are preserved byte-identical;
-    tool_result text in older messages is truncated to max_tool_result_chars
-    (after an optional rtk pass for tools with a safe filter mapping). The
-    input body is never mutated. Compression is an optimization, never a
-    gate: any error returns the original body unchanged.
-
-    Args:
-        body: Anthropic-format request body.
-        settings: The config "settings" section; reads compress_routed and
-            the compression sub-mapping (keep_recent_messages,
-            max_tool_result_chars, use_rtk: auto|never).
-
-    Returns:
-        A compressed copy of the body, or the original body object when
-        compression is disabled, inapplicable, or fails.
-    """
+    compress = _load_compressor()
+    before = _messages_chars(messages)
+    if compress is None:
+        return messages, ShrinkStats(path="none", chars_before=before, chars_after=before)
+    extra: dict[str, object] = {} if enable_text_ml else {"kompress_model": _DISABLE_TEXT_ML}
     try:
-        if not settings.get("compress_routed", True):
-            return body
-        messages = body.get("messages")
-        if not isinstance(messages, list) or not messages:
-            return body
-        cfg = settings.get("compression")
-        cfg = cfg if isinstance(cfg, dict) else {}
-        keep_recent = _positive_int(cfg.get("keep_recent_messages"), DEFAULT_KEEP_RECENT_MESSAGES)
-        budget = _positive_int(cfg.get("max_tool_result_chars"), DEFAULT_MAX_TOOL_RESULT_CHARS)
-        cutoff = len(messages) - keep_recent
-        if cutoff <= 0:
-            return body
-        rtk_enabled = cfg.get("use_rtk", "auto") == "auto" and shutil.which("rtk") is not None
-        tool_names = _tool_names_by_id(messages)
-        out = copy.deepcopy(body)
-        for message in out["messages"][:cutoff]:
-            _compress_message(
-                message=message, budget=budget, tool_names=tool_names, rtk_enabled=rtk_enabled
-            )
-        return out
-    except Exception as exc:
-        logger.warning("compression failed, using original body: %s", exc, exc_info=True)
-        return body
+        result = compress(messages, model=model, model_limit=model_limit, optimize=True, **extra)
+    except Exception:
+        logger.exception("headroom compression failed; sending messages uncompressed")
+        return messages, ShrinkStats(path="none", chars_before=before, chars_after=before)
+    compressed = result.messages
+    after = _messages_chars(compressed)
+    return compressed, ShrinkStats(path="compress", chars_before=before, chars_after=after)

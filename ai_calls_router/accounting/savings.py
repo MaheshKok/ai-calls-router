@@ -16,13 +16,14 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
-from ai_calls_router._lib import config
+from ai_calls_router._lib import config, jsonnum
 from ai_calls_router._lib.litellm_guard import load_litellm
 from ai_calls_router.accounting.metrics import get_metrics, identify_provider
 
 if TYPE_CHECKING:
+    from ai_calls_router._lib.types import JsonObject, JsonValue
     from ai_calls_router.accounting.shrink_stats import ShrinkStats
 
 logger = logging.getLogger("acr.savings")
@@ -32,19 +33,17 @@ _register_lock = threading.Lock()
 _registered: set[tuple[str, float, float]] = set()
 
 
-def _is_number(value: Any) -> bool:
-    """Check whether a value is a real number (bool excluded).
+class _PricingLiteLLM(Protocol):
+    """LiteLLM pricing API used by savings accounting."""
 
-    Args:
-        value: Candidate price value from config.
+    def register_model(self, model_cost: dict[str, dict[str, float | str]]) -> None: ...
 
-    Returns:
-        True for int/float values that are not bool.
-    """
-    return isinstance(value, int | float) and not isinstance(value, bool)
+    def cost_per_token(
+        self, *, model: str, prompt_tokens: int, completion_tokens: int
+    ) -> tuple[float, float]: ...
 
 
-def register_tier_prices(routes: dict[str, Any]) -> None:
+def register_tier_prices(routes: JsonObject) -> None:
     """Teach LiteLLM the per-1M token prices declared on each tier.
 
     Tiers must carry a string model plus numeric input_cost_per_1m AND
@@ -59,7 +58,7 @@ def register_tier_prices(routes: dict[str, Any]) -> None:
         tiers = routes.get("tiers")
         if not isinstance(tiers, dict):
             return
-        litellm = load_litellm()
+        litellm = cast("_PricingLiteLLM", load_litellm())
         for tier_cfg in tiers.values():
             if not isinstance(tier_cfg, dict):
                 continue
@@ -68,10 +67,12 @@ def register_tier_prices(routes: dict[str, Any]) -> None:
             output_per_1m = tier_cfg.get("output_cost_per_1m")
             if not isinstance(model, str) or not model:
                 continue
-            if not _is_number(input_per_1m) or not _is_number(output_per_1m):
+            input_price = jsonnum.optional_float_value(input_per_1m)
+            output_price = jsonnum.optional_float_value(output_per_1m)
+            if input_price is None or output_price is None:
                 continue
-            input_per_token = float(cast("float", input_per_1m)) / 1_000_000
-            output_per_token = float(cast("float", output_per_1m)) / 1_000_000
+            input_per_token = input_price / 1_000_000
+            output_per_token = output_price / 1_000_000
             signature = (model, input_per_token, output_per_token)
             with _register_lock:
                 if signature in _registered:
@@ -99,7 +100,7 @@ def register_tier_prices(routes: dict[str, Any]) -> None:
 
 
 def _routed_prices_from_tier(
-    tier_cfg: Any,
+    tier_cfg: JsonValue,
 ) -> tuple[float, float, float] | None:
     """Derive per-token (miss, cached, output) rates from a tier config.
 
@@ -119,22 +120,27 @@ def _routed_prices_from_tier(
     """
     if not isinstance(tier_cfg, dict):
         return None
-    input_per_1m = tier_cfg.get("input_cost_per_1m")
-    output_per_1m = tier_cfg.get("output_cost_per_1m")
-    if not _is_number(input_per_1m) or not _is_number(output_per_1m):
+    input_per_1m = jsonnum.optional_float_value(tier_cfg.get("input_cost_per_1m"))
+    output_per_1m = jsonnum.optional_float_value(tier_cfg.get("output_cost_per_1m"))
+    if input_per_1m is None or output_per_1m is None:
         return None
-    cached_per_1m = tier_cfg.get("input_cached_cost_per_1m")
-    if not _is_number(cached_per_1m):
+    cached_per_1m = jsonnum.optional_float_value(tier_cfg.get("input_cached_cost_per_1m"))
+    if cached_per_1m is None:
         cached_per_1m = input_per_1m
     return (
-        float(cast("float", input_per_1m)) / 1_000_000,
-        float(cast("float", cached_per_1m)) / 1_000_000,
-        float(cast("float", output_per_1m)) / 1_000_000,
+        input_per_1m / 1_000_000,
+        cached_per_1m / 1_000_000,
+        output_per_1m / 1_000_000,
     )
 
 
+def routed_prices_from_tier(tier_cfg: JsonValue) -> tuple[float, float, float] | None:
+    """Return cache-aware routed prices from a tier config."""
+    return _routed_prices_from_tier(tier_cfg)
+
+
 def _compute_routed_usd(
-    litellm: Any,
+    litellm: _PricingLiteLLM,
     routed_model: str,
     total_input: int,
     hit_tokens: int,
@@ -149,7 +155,7 @@ def _compute_routed_usd(
     routed_in, routed_out = litellm.cost_per_token(
         model=routed_model, prompt_tokens=total_input, completion_tokens=output_tokens
     )
-    if not isinstance(routed_in, int | float) or routed_in < 0:
+    if routed_in < 0:
         return None
     return routed_in + routed_out
 
@@ -212,7 +218,7 @@ def record_routing_savings(
         miss_tokens = max(int(input_tokens), 0) + max(int(cache_creation_tokens), 0)
         total_input = hit_tokens + miss_tokens
         output_tokens = max(int(output_tokens), 0)
-        litellm = load_litellm()
+        litellm = cast("_PricingLiteLLM", load_litellm())
         premium_in, premium_out = litellm.cost_per_token(
             model=premium_model,
             prompt_tokens=total_input,
@@ -232,7 +238,10 @@ def record_routing_savings(
         )
         if routed_usd is None:
             return
-        entry = {
+        routed_usd_value = round(routed_usd, 8)
+        premium_usd_value = round(premium_usd, 8)
+        saved_usd_value = round(premium_usd - routed_usd, 8)
+        entry: JsonObject = {
             "ts": int(time.time()),
             "premium_model": premium_model,
             "routed_model": routed_model,
@@ -240,9 +249,9 @@ def record_routing_savings(
             "output_tokens": output_tokens,
             "cache_read_input_tokens": hit_tokens,
             "cache_creation_input_tokens": max(int(cache_creation_tokens), 0),
-            "routed_usd": round(routed_usd, 8),
-            "premium_usd": round(premium_usd, 8),
-            "saved_usd": round(premium_usd - routed_usd, 8),
+            "routed_usd": routed_usd_value,
+            "premium_usd": premium_usd_value,
+            "saved_usd": saved_usd_value,
             "tier_name": tier_name,
             "tool_names": tool_names,
             "user_agent": user_agent[:200],
@@ -258,10 +267,11 @@ def record_routing_savings(
             ledger.parent.mkdir(parents=True, exist_ok=True)
             with ledger.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            ledger.chmod(0o600)
         get_metrics().add_savings(
-            routed_usd=entry["routed_usd"],
-            premium_usd=entry["premium_usd"],
-            saved_usd=entry["saved_usd"],
+            routed_usd=routed_usd_value,
+            premium_usd=premium_usd_value,
+            saved_usd=saved_usd_value,
         )
     except Exception as exc:
         logger.warning("savings recording failed: %s", exc, exc_info=True)
@@ -271,9 +281,9 @@ def record_savings_from_response(
     *,
     premium_model: str | None,
     routed_model: str,
-    response_body: Any,
+    response_body: JsonValue,
     ledger: Path | None = None,
-    tier_cfg: Any = None,
+    tier_cfg: JsonValue = None,
     tier_name: str = "",
     tool_names: list[str] | None = None,
     user_agent: str = "",
@@ -303,12 +313,12 @@ def record_savings_from_response(
             cumulative compression survives a proxy restart.
     """
     try:
-        usage = response_body.get("usage") if isinstance(response_body, dict) else None
-        usage = usage if isinstance(usage, dict) else {}
-        input_tokens = int(usage.get("input_tokens", 0) or 0)
-        output_tokens = int(usage.get("output_tokens", 0) or 0)
-        cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
-        cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
+        usage_raw = response_body.get("usage") if isinstance(response_body, dict) else None
+        usage: JsonObject = usage_raw if isinstance(usage_raw, dict) else {}
+        input_tokens = jsonnum.int_value(usage.get("input_tokens", 0), strict=True)
+        output_tokens = jsonnum.int_value(usage.get("output_tokens", 0), strict=True)
+        cache_read = jsonnum.int_value(usage.get("cache_read_input_tokens", 0), strict=True)
+        cache_creation = jsonnum.int_value(usage.get("cache_creation_input_tokens", 0), strict=True)
     except Exception as exc:
         logger.warning("usage extraction failed: %s", exc, exc_info=True)
         return

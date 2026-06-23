@@ -8,6 +8,7 @@ share: the fixtures directory and a fresh mock premium upstream per test.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ import pytest
 # --import-mode=importlib, independent of plugin load ordering.
 sys.path.insert(0, str(Path(__file__).parent))
 
+from ai_calls_router._lib.logging_setup import ACR_LOGGER_NAME
 from tests.acr_testkit import Upstream
 
 _LAYER_MARKERS = ("unit", "integration", "e2e")
@@ -48,6 +50,20 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         layer = relative.parts[0] if len(relative.parts) > 1 else ""
         if layer in _LAYER_MARKERS:
             item.add_marker(getattr(pytest.mark, layer))
+
+
+@pytest.fixture(autouse=True)
+def _restore_acr_log_propagation() -> None:
+    """Re-enable ``acr`` logger propagation before each test for caplog capture.
+
+    ``setup_logging`` disables propagation on the ``acr`` logger so the proxy
+    never doubles into root logging. Any app-booting test therefore leaves
+    propagation off process-wide, which silences pytest's ``caplog`` (it captures
+    via a root-logger handler) for every later test that asserts on ``acr.*``
+    records. Resetting it at setup makes the suite order-independent without
+    altering production behavior, which re-disables propagation on the next boot.
+    """
+    logging.getLogger(ACR_LOGGER_NAME).propagate = True
 
 
 @pytest.fixture
