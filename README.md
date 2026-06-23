@@ -299,8 +299,11 @@ the turn on the routed model.
 | --- | --- |
 | `acr init` | Generate `config.yaml` and provider files. |
 | `acr start` / `acr stop` | Start / stop the background daemon. |
+| `acr restart` | Restart the daemon. |
 | `acr status` | Daemon state, pid, URL. |
 | `acr code [-- ARGS]` | Boot the daemon and launch `claude` through it. |
+| `acr wrap AGENT [-- ARGS]` | Launch an agent through the proxy. |
+| `acr unwrap AGENT` | Remove persistent agent wrap state. |
 | `acr desktop on/off/status` | Manage the persistent `ANTHROPIC_BASE_URL`. |
 | `acr savings` | Aggregated routing-savings report. |
 | `acr serve` | Run in the foreground (used by the daemon). |
