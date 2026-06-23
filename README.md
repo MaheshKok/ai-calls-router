@@ -1,457 +1,319 @@
-# ai-calls-router
+<div align="center">
+
+```
+   █████╗   ██████╗ ██████╗
+  ██╔══██╗ ██╔════╝ ██╔══██╗
+  ███████║ ██║      ██████╔╝
+  ██╔══██║ ██║      ██╔══██╗
+  ██║  ██║ ╚██████╗ ██║  ██║
+  ╚═╝  ╚═╝  ╚═════╝ ╚═╝  ╚═╝
+```
+
+**The cheap-turn router for coding agents**
+
+route mechanical turns to a cheaper model · Claude Code · Hermes · subscription-OAuth · fail-open · local-first · zero agent changes · honest accounting
 
 [![CI](https://github.com/maheshkokare/ai-calls-router/actions/workflows/ci.yml/badge.svg)](https://github.com/maheshkokare/ai-calls-router/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ai-calls-router.svg)](https://pypi.org/project/ai-calls-router/)
 [![Python versions](https://img.shields.io/pypi/pyversions/ai-calls-router.svg)](https://pypi.org/project/ai-calls-router/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen)](https://github.com/pre-commit/pre-commit)
 
-Per-tool-result model routing proxy for Claude Code and Hermes. It
-serves cheap tool-result-processing turns on any LiteLLM-supported model
-(DeepSeek, Groq, Kimi, OpenRouter, and others) while keeping decision-making
-turns on each agent's own premium upstream, wire format, and credential.
+[Install](#install) · [How it works](#how-it-works-30-seconds) · [Get started](#get-started-60-seconds) · [Configure](#configure) · [Compared to](#compared-to)
 
-Claude Code spends a large share of its API turns doing mechanical work:
-reading a file you just grepped, interpreting a `Bash` result, summarizing a
-web fetch. Those turns do not need a frontier model. `ai-calls-router` is a
-local reverse proxy that detects them and routes only those turns to a cheaper
-model, transparently, while the turns that actually require reasoning go
-straight to Anthropic untouched.
+</div>
 
-It is a standalone local proxy, not a Claude Code plugin. Claude Code connects
-through `ANTHROPIC_BASE_URL`; Hermes connects through `/v1/chat/completions`.
-Routed calls are normalized into Anthropic Messages for the internal serving
-core; passthrough calls stay byte-for-byte in the client's native provider
-format.
+---
 
-## What it supports now
+## What it does
 
-- `POST /v1/messages` for Claude Code and Anthropic Messages clients.
-- `POST /v1/chat/completions` for Hermes Chat Completions sessions.
-- Per-agent tool maps for `claude_code` and `hermes`.
-- Per-agent passthrough upstreams, so a Hermes turn goes to its configured
-  upstream and a Claude Code turn goes to Anthropic.
-- Provider-specific config files in
-  `~/.ai-calls-router/config/{claude-code,hermes}.yaml`.
-- Identity routing with `x-acr-agent`, `User-Agent` rules, endpoint defaults,
-  and fail-closed unresolved identity.
-- Chat Completions response synthesis for routed OpenAI-compatible clients.
-- DeepSeek direct Anthropic-native serving for cache-stable routed calls.
-- Savings accounting, live dashboard, compression stats, and per-session
-  request history.
+A coding agent spends most of its turns *not* thinking — it reads a file, runs a
+grep, runs a shell command, then spends the next turn just digesting that
+output. Those tool-result turns are mechanical. They do not need a flagship
+model's reasoning, but they are billed at the flagship's price, and on a
+subscription they burn the flagship's quota.
 
-## How it works
+ai-calls-router sits between your agent and the upstream API and splits the
+stream:
 
-```mermaid
-flowchart TD
-    CLIENT["Claude Code / Hermes"] --> SRV["acr daemon<br/>(Starlette + uvicorn)"]
-    SRV --> ID{"endpoint + x-acr-agent<br/>resolve agent group"}
-    ID --> DEC{"pending tool result?<br/>tool -> tier"}
-    DEC -- "no pending tool results /<br/>premium or unknown tool /<br/>serving error" --> PASS["Passthrough to agent upstream<br/>headers untouched"]
-    DEC -- "tool_result blocks mapped<br/>to a cheap tier" --> ROUTE["DeepSeek direct / LiteLLM<br/>tier model + tier key only"]
-    ROUTE -- "response calls a<br/>premium tool" --> PASS
-    ROUTE -- ok --> ACCT["savings.jsonl ledger<br/>(true routed model)"]
-    ACCT --> MASK["mask response model to<br/>client-requested id"]
-    MASK --> OUT["client-format JSON/SSE<br/>Anthropic or Chat"]
+- **Routed** — tool-result turns (digesting `Read`, `Grep`, `Bash`, … output)
+  go to a cheaper model.
+- **Passthrough** — decision turns (a fresh prompt, an `Edit`, a `Write`,
+  anything it cannot classify) go straight to the premium upstream, untouched.
+
+The agent never knows. The response always claims the model it asked for, so
+model display and session restore stay correct. Same session, fraction of the
+premium spend.
+
+**What's inside:**
+
+- **Proxy** — a local Starlette + uvicorn daemon on `127.0.0.1:8747`.
+- **Per-agent routing** — independent tool→tier maps and upstreams for
+  `claude_code` and `hermes`.
+- **Subscription-OAuth serving** — route cheap turns to Sonnet / Codex on your
+  *subscription* bearer, off the premium quota.
+- **Savings ledger + live dashboard** — every routed turn recorded against its
+  true model, never a guessed number.
+
+---
+
+## How it works (30 seconds)
+
+```
+  Claude Code / Hermes
+          │
+          ▼
+   ┌─────────────────┐   resolve agent group (endpoint + x-acr-agent)
+   │   acr daemon    │   classify turn (pending tool_result? tool → tier)
+   └─────────────────┘
+          │
+    ┌─────┴───────────────────────────┐
+    ▼                                  ▼
+  ROUTED                          PASSTHROUGH
+  tool_result → cheap tier        fresh / premium / unknown / any failure
+  tier model + tier credential    client headers forwarded verbatim
+    │                                  │
+    ▼                                  ▼
+  premium tool in response? ──► escalate to passthrough
+    │
+    ▼
+  savings.jsonl (true model) → mask response model → client-format JSON/SSE
 ```
 
-A request that carries `tool_result` blocks is processing the output of a tool.
-The proxy resolves which tool produced each result, maps it to a serving tier
-(`tools:` in the config), and routes the turn to that tier's cheap model. Every
-other request -- a fresh user turn, a plain assistant reply, anything mapped to
-`premium`, anything it cannot classify -- is streamed straight through to
-that agent group's upstream.
+A request carrying `tool_result` blocks is digesting a tool's output. The proxy
+finds which tool produced each result, maps it to a tier (`tools:` in the
+config), and serves that turn on the tier's cheap model. Everything else streams
+straight through in the client's native format — the proxy never translates a
+passthrough body.
 
-## Supported client endpoints
+---
 
-| Endpoint | Default agent group | Client format |
-| --- | --- | --- |
-| `POST /v1/messages` | `claude_code` | Anthropic Messages |
-| `POST /v1/chat/completions` | `hermes` | OpenAI Chat Completions |
+## Get started (60 seconds)
 
-`x-acr-agent` has highest precedence and can override the default group when a
-client family shares an endpoint. Without that header, the router uses
-`router.user_agent_map`, then `router.endpoint_defaults`, then
-`router.fallback`, then the adapter default. With a `router:` block and
-`fallback: null`, an unmatched request returns `400` with
-`{"error": "unresolved agent identity"}` before any upstream call; set an
-explicit fallback group only when that is the policy you want.
+```bash
+# 1 — Install (isolated)
+uv tool install ai-calls-router      # or: pipx install ai-calls-router
 
-## Guarantees
+# 2 — Write default config + provider files to ~/.ai-calls-router/
+acr init
 
-These hold on every turn:
+# 3 — Start the daemon
+acr start
+acr status                           # prints pid + URL
 
-1. The response a client receives always claims the model it asked for, so
-   session restore and model display stay correct. Routing is invisible.
-2. Your premium credential is never forwarded to a routed provider. Routed calls
-   carry only the tier key from `key_env`/`env_file`. Passthrough calls forward
-   the client's headers verbatim to that agent group's own upstream.
-3. Any serving failure on the routing path -- provider error, malformed config,
-   bad response -- falls back to that agent group's passthrough. Identity
-   attribution is stricter: unresolved identity returns `400`, not a guessed
-   upstream.
-4. The savings ledger records the real routed model; only the client-facing
-   response is masked.
-5. Cost numbers are never fabricated. A model LiteLLM cannot price is left out
-   of the ledger rather than guessed at.
+# 4 — Point Claude Code at it
+ANTHROPIC_BASE_URL=http://127.0.0.1:8747 claude -p "explain this repo"
+
+# 5 — Watch what routed and what it saved
+open http://127.0.0.1:8747/dashboard
+acr savings
+```
+
+Hermes instead of Claude Code:
+
+```bash
+OPENAI_BASE_URL=http://127.0.0.1:8747/v1 hermes
+```
+
+---
+
+## Proof
+
+ai-calls-router does not ask you to trust a marketing number — it proves the
+savings on your own traffic, locally, and refuses to invent figures it cannot
+back.
+
+- **Live dashboard** at `http://127.0.0.1:8747/dashboard` — recent requests,
+  routed-vs-passthrough counts, per-session grouping, cache read/write tokens,
+  compression stats, cumulative savings.
+- **Savings ledger** at `~/.ai-calls-router/savings.jsonl` — one row per routed
+  turn, recorded against the **true** routed model (never the masked client id).
+- **`acr savings`** — aggregated report from that ledger.
+
+> Pricing is best-effort and honest. A routed model is priced from LiteLLM's own
+> table first; a model it still cannot price is **omitted** from the ledger, not
+> estimated. Savings you see are savings that actually happened.
+
+---
+
+## When to use · When to skip
+
+**Use it when** your agent does real tool-heavy work — reading code, grepping,
+running commands, processing MCP tool output — and you want those turns off the
+premium model. The more tool churn, the more it saves.
+
+**Skip it when** your workload is mostly short conversational turns with little
+tool use; there is little mechanical work to route, so the win is small.
+
+---
+
+## Agent compatibility
+
+| Agent              | Endpoint(s)                                  | Routed cheap model (default)                                           | Auth                              | Status |
+| ------------------ | -------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------- | :----: |
+| **Claude Code**    | `POST /v1/messages`                          | `claude-sonnet-4-6`                                                    | Anthropic subscription OAuth      |   ✅   |
+| **Hermes**         | `POST /v1/chat/completions`, `/v1/responses` | `gpt-5.4-mini` (fast) · `gpt-5.3-codex-spark` (code/crud/structured)  | ChatGPT subscription OAuth        |   ✅   |
+| **Claude Desktop** | via embedded shim                            | same as Claude Code                                                    | Anthropic subscription OAuth      |   ✅   |
+
+- Claude Code's cheap tiers route to **Sonnet 4.6 on the subscription OAuth
+  bearer** — separate Sonnet quota, premium (Opus) passthrough untouched, and a
+  Sonnet-quota `429` fails open to it.
+- Provider files are **create-only**: the proxy never overwrites an edited file.
+  Change a model, tier, or tool mapping and your edit survives every restart.
+
+---
 
 ## Install
 
 Requires Python 3.11 or newer.
 
-Recommended isolated installs:
-
 ```bash
+# Isolated (recommended)
 uv tool install ai-calls-router
-# or
 pipx install ai-calls-router
+
+# Plain pip also works
+pip install ai-calls-router
+
+# Local dev from a checkout
+make install          # creates .venv if missing, installs acr + dev deps
 ```
 
-For local development from a checkout, use the repo-managed virtual environment:
-
-```bash
-make install
-```
-
-`make install` creates `.venv` when missing, reuses it when present, and installs
-`ai-calls-router` with development dependencies. Plain `pip install
-ai-calls-router` also works, but `uv tool`/`pipx` avoid mixing acr with unrelated
-site-packages.
-
-## Quick start
-
-1. Write the default config:
-
-   ```bash
-   acr init
-   ```
-
-   `acr init` writes `~/.ai-calls-router/config.yaml` and creates missing
-   provider files under `~/.ai-calls-router/config/`. See
-   [`config.example.yaml`](config.example.yaml) for the full annotated schema.
-
-2. Provide the API key for your cheap tier. The proxy reads it from the
-   environment variable named in your tier's `key_env` field (e.g.
-   `DEEPSEEK_API_KEY`). Put it in your shell rc or the proxy's `.env` file:
-
-   ```bash
-   # inside ~/.ai-calls-router/.env — process env wins
-   echo 'DEEPSEEK_API_KEY=your-key-here' >> ~/.ai-calls-router/.env
-   ```
-
-3. Start the proxy in the foreground so you can watch routing decisions live:
-
-   ```bash
-   acr serve
-   ```
-
-4. In another terminal, point a client at the proxy:
-
-   ```bash
-   # Claude Code / Anthropic Messages
-   ANTHROPIC_BASE_URL=http://127.0.0.1:8747 claude
-
-   # Hermes / OpenAI Chat Completions
-   OPENAI_BASE_URL=http://127.0.0.1:8747/v1 hermes
-   ```
-
-   The proxy intercepts every API call and routes tool-result-processing turns
-   to your cheap model transparently. Decision-making turns pass through to the
-   active agent group's own upstream with the client's original headers.
-
-   Claude Code also has a launcher that starts the daemon:
-   `acr code -- -p "task"`. For persistent Claude Code routing across all
-   sessions: `acr desktop on`.
-
-
-## How to point Claude Code at the proxy
-
-Claude Code discovers the proxy through the `ANTHROPIC_BASE_URL` environment
-variable. Set it any of these ways:
-
-### A. Per-invocation (testing, one-off sessions)
-
-```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8747 claude
-```
-
-No launcher, no config files, no persistence. Combine with `acr serve` in its
-own terminal for live log output during testing:
-
-```bash
-# Terminal 1 — watch routing decisions log live
-acr serve
-
-# Terminal 2 — use Claude Code normally through the proxy
-ANTHROPIC_BASE_URL=http://127.0.0.1:8747 claude -p "explain this repo"
-```
-
-### B. Shell-level (all terminal sessions)
-
-Add to `~/.zshrc` (or `~/.bashrc`):
-
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8747
-```
-
-Then every `claude` command routes through the proxy automatically. Keep
-the daemon running with `acr start` or `acr serve` in its own terminal.
-
-### C. Persistent Claude settings (terminal + IDE + desktop)
-
-```bash
-acr desktop on      # write ANTHROPIC_BASE_URL into ~/.claude/settings.json
-acr desktop off     # restore the previous value
-acr desktop status  # show current state
-```
-
-`acr desktop on` writes the proxy URL into `~/.claude/settings.json` under
-`env.ANTHROPIC_BASE_URL`. Claude Code reads that file on every launch. The
-`off` command restores whatever was there before — including a competing
-proxy like Headroom — so you can switch back without losing state.
-
-If `~/.claude/settings.json` already sets `ANTHROPIC_BASE_URL` for another
-proxy, `acr desktop on` backs up that value before overwriting it. Mixing
-persistent settings with per-invocation or shell-level env vars is redundant;
-pick one approach.
-
-All desktop commands accept `--config PATH` for tests or alternate settings
-stores.
-
-### D. The `acr code` launcher (also starts the daemon)
-
-```bash
-acr code -- -p "explain this repo"
-```
-
-`acr code` starts the daemon if needed, injects `ANTHROPIC_BASE_URL` for the
-child process only, and runs `claude` with any arguments passed after `--`.
-Useful for one-liners where you don't want to manage the daemon separately.
-
-### Troubleshooting
-
-If Claude seems to ignore the proxy:
-
-- Check for a conflicting `ANTHROPIC_BASE_URL` in
-  `~/.claude/settings.json` with `acr desktop status`.
-- Confirm the proxy is running: `acr status` (daemon) or watch the
-  `acr serve` terminal for request logs.
-- Inspect `~/.ai-calls-router/acr.log` to see which proxy received traffic.
-
-## How to point Hermes at the proxy
-
-Hermes Chat Completions traffic should target the same local OpenAI-compatible
-base and send `POST /v1/chat/completions`:
-
-```bash
-export OPENAI_API_KEY=your-hermes-upstream-key
-OPENAI_BASE_URL=http://127.0.0.1:8747/v1 hermes
-```
-
-Hermes defaults to the `hermes` agent group on `/v1/chat/completions`.
-
-If a client cannot be identified by endpoint or `User-Agent`, send
-`x-acr-agent: hermes` or `x-acr-agent: claude_code`. That header wins over
-every router rule.
-
-## Commands
-
-| Command | Purpose |
-| --- | --- |
-| `acr init` | Generate `config.yaml` interactively. |
-| `acr start` | Start the proxy daemon in the background. |
-| `acr stop` | Stop the daemon. |
-| `acr status` | Report whether the daemon is running, with its pid and URL. |
-| `acr code [-- ARGS]` | Boot the daemon if needed and launch `claude` through the proxy. |
-| `acr savings` | Print the aggregated routing savings report. |
-| `acr serve` | Run the proxy in the foreground (used by the daemon). |
-| `acr version` | Print the version. |
-
-## Dashboard and accounting
-
-The proxy exposes a local dashboard at:
-
-```text
-http://127.0.0.1:8747/dashboard
-```
-
-It shows recent requests, routed versus passthrough counts, provider labels,
-cache read/write tokens, per-session grouping, agent labels, shrink/compression
-stats, and cumulative savings. The dashboard is backed by in-process metrics
-plus `~/.ai-calls-router/savings.jsonl`; on startup, the proxy replays the
-ledger so routed-token counters and recent routed history survive restarts.
-
-Savings records use the true routed model, not the model name masked back to the
-client. Pricing is best-effort: when neither LiteLLM nor configured per-million
-prices can price a model, the router skips that savings row instead of inventing
-a number.
-
-## Configuration
-
-The global config lives at `~/.ai-calls-router/config.yaml` (override with
-`$ACR_CONFIG`). Per-provider files live under
-`~/.ai-calls-router/config/{claude-code,hermes}.yaml`. All are reloaded by
-mtime on each request, so edits apply without a restart. The global sections:
-
-```text
-~/.ai-calls-router/
-├── config.yaml
-├── config/
-│   ├── claude-code.yaml
-│   └── hermes.yaml
-├── .env
-├── acr.log
-├── acr.pid
-└── savings.jsonl
-```
-
-- `server`: bind host, port (default 8747), and the premium upstream.
-- `premium`: reserved for future premium providers; v1 accepts only
-  `provider: anthropic`.
-- `settings`: tier precedence, compression, and the premium-tool escalation
-  guard.
-- `tiers`: each cheap tier's LiteLLM model, key environment variable, token
-  cap, and optional price overrides.
-- `router`: identity rules. `x-acr-agent` wins, then
-  `router.user_agent_map`, then `router.endpoint_defaults`, then
-  `router.fallback`; `fallback: null` fails closed with `400` when identity is
-  unresolved.
-
-Example router policy:
-
-```yaml
-router:
-  endpoint_defaults:
-    /v1/messages: claude_code
-    /v1/chat/completions: hermes
-  user_agent_map:
-    - contains: claude
-      group: claude_code
-    - contains: hermes
-      group: hermes
-  fallback: null
-```
-
-Provider-file fields actually consumed at runtime:
-
-- `upstream`: passthrough target for that group.
-- `tools`: tool-to-tier mapping (exact match, then trailing-`*` glob; unmapped
-  tools route to premium).
-- `premium_tools`: tools that force passthrough even after a routed response.
-
-Provider-file fields reserved or validated but not behavior-driving in v1:
-`auth`, `wire`, `endpoints`, `model_defaults`, `tool_choice`, `reasoning`, and
-`fallback`. Provider files must not contain cheap-tier `key_env`; cheap
-credentials live only in global `tiers.*.key_env`.
-
-Example provider file:
-
-```yaml
-group: hermes
-upstream: https://api.openai.com
-auth:
-  mode: oauth_passthrough
-wire: openai_chat
-endpoints:
-  - /v1/chat/completions
-tools:
-  terminal: fast
-  read_file: code
-  patch: premium
-premium_tools:
-  - patch
-fallback: passthrough
-```
-
-The `auth` block names a credential source; it is not a secret. Do not put API
-keys in provider files. Put cheap-provider keys in environment variables named
-by `tiers.*.key_env`, or in `~/.ai-calls-router/.env`.
-
-Tier prices are optional. The ledger prices a routed model from LiteLLM's own
-pricing table first; supply `input_cost_per_1m` / `output_cost_per_1m` only for
-models LiteLLM does not already know. Unpriced models are omitted from the
-ledger rather than estimated.
-
-### Compression
-
-Routed LiteLLM-path turns can be compressed before they are sent to the cheap
-model. The optional `headroom-ai` integration is used when installed; otherwise
-compression is a no-op and serving continues. DeepSeek direct calls bypass this
-compression path so Anthropic-native request bytes stay deterministic for prefix
-caching.
-
-Install the optional compressor when you want it:
+**Granular extras** — optional headroom compression for the routed serving path
+(a deterministic no-op if not installed):
 
 ```bash
 uv tool install "ai-calls-router[compression]"
 ```
 
-## State and environment
+### Point Claude Code at the proxy
 
-| Path / variable | Meaning |
+`ANTHROPIC_BASE_URL` is how Claude Code finds the proxy. Pick one — mixing them
+is redundant.
+
+```bash
+# A — per-invocation (testing)
+ANTHROPIC_BASE_URL=http://127.0.0.1:8747 claude -p "..."
+
+# B — shell-level (~/.zshrc or ~/.bashrc)
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8747
+
+# C — persistent Claude settings (terminal + IDE + Desktop)
+acr desktop on        # write into ~/.claude/settings.json (backs up any existing value)
+acr desktop status
+acr desktop off       # restore the previous value
+
+# D — launcher that also boots the daemon
+acr code -- -p "explain this repo"
+```
+
+> **Claude Desktop** does not inherit your shell env and may reset the API base
+> URL. Install the embedded shim: `scripts/desktop-shim/apply.sh`
+> (`--revert` to remove). It refuses to clobber an existing `claude-real`
+> without `--force`.
+
+**Not routing?** `acr desktop status` (conflicting base URL?) · `acr status`
+(daemon up?) · `~/.ai-calls-router/acr.log` (who got the traffic?).
+
+---
+
+## Configure
+
+Everything is reloaded by file mtime on each request — edits apply with no
+restart. (Code changes still need a daemon restart.)
+
+```
+~/.ai-calls-router/
+├── config.yaml              # global: server, router rules, tier precedence
+├── config/
+│   ├── claude-code.yaml     # claude_code: upstream, tiers, tool→tier map
+│   └── hermes.yaml          # hermes:      upstream, tiers, tool→tier map
+├── .env                     # tier credentials (optional)
+└── savings.jsonl            # savings ledger
+```
+
+`config.example.yaml` in the repo is the documented template.
+
+**Tool → tier map** — an exact tool name wins over a trailing-`*` glob, so new
+MCP tools are covered automatically:
+
+```yaml
+tools:
+  Bash: fast
+  Read: code
+  Edit: premium                     # premium = always passthrough
+  mcp__lean-ctx__*: code            # glob covers every lean-ctx tool…
+  mcp__lean-ctx__ctx_edit: premium  # …except the ones named explicitly
+```
+
+**Tier** — model, credential, and reasoning effort:
+
+```yaml
+tiers:
+  code:
+    provider: anthropic
+    model: anthropic/claude-sonnet-4-6
+    auth: { mode: oauth }           # or { mode: api_key_env, key_env: MY_KEY }
+    effort: high                    # low | medium | high | max
+    input_cost_per_1m: 3.0          # optional — only if LiteLLM cannot price it
+    output_cost_per_1m: 15.0
+```
+
+OAuth tiers use the agent's own subscription bearer — no separate key. API-key
+tiers read `auth.key_env` from the environment or `~/.ai-calls-router/.env`.
+
+---
+
+## Compared to
+
+| | Scope | Where it runs | Reversible | Agent changes |
+| --- | --- | --- | --- | --- |
+| **Raw premium (no proxy)** | every turn billed at premium | — | — | — |
+| **Headroom** | compresses tokens *within* each call | local proxy / lib / MCP | yes | none |
+| **ai-calls-router** | routes whole cheap *turns* to a cheaper model | local proxy | yes (fail-open) | none |
+
+Complementary, not competing: ai-calls-router can call Headroom's compressor on
+its routed path (`[compression]` extra) to shrink the body *before* it serves
+the turn on the cheap model.
+
+---
+
+## Guarantees
+
+1. The response always claims the model the client asked for. Routing is
+   invisible.
+2. Your premium credential is never forwarded to a routed provider — routed
+   calls carry only the tier credential.
+3. Any serving failure on the routing path falls back to passthrough.
+   Unresolved *identity* is stricter: `400 {"error": "unresolved agent identity"}`
+   before any upstream call.
+4. The ledger records the real routed model; only the client-facing response is
+   masked.
+5. Cost numbers are never fabricated — an unpriceable model is left out of the
+   ledger.
+
+---
+
+## Commands
+
+| Command | Purpose |
 | --- | --- |
-| `~/.ai-calls-router/config.yaml` | Configuration (`$ACR_CONFIG` overrides). |
-| `~/.ai-calls-router/config/*.yaml` | Per-provider agent config files. |
-| `~/.ai-calls-router/savings.jsonl` | Savings ledger (`$ACR_SAVINGS_LEDGER` overrides). |
-| `~/.ai-calls-router/acr.pid` | Daemon pidfile. |
-| `~/.ai-calls-router/acr.log` | Daemon log. |
-| `$ACR_HOME` | Overrides the state directory root. |
+| `acr init` | Generate `config.yaml` and provider files. |
+| `acr start` / `acr stop` | Start / stop the background daemon. |
+| `acr status` | Daemon state, pid, URL. |
+| `acr code [-- ARGS]` | Boot the daemon and launch `claude` through it. |
+| `acr desktop on/off/status` | Manage the persistent `ANTHROPIC_BASE_URL`. |
+| `acr savings` | Aggregated routing-savings report. |
+| `acr serve` | Run in the foreground (used by the daemon). |
+| `acr version` | Print the version. |
 
-## Claude Desktop embedded Claude Code shim
-
-Claude Desktop does not inherit your shell's `ANTHROPIC_BASE_URL`, and its
-embedded Claude Code binary may reset the API base URL to Anthropic's default.
-For Desktop-launched Claude Code sessions, use the optional binary shim:
-
-```bash
-scripts/desktop-shim/apply.sh
-```
-
-The installer patches each Desktop-managed Claude Code version under
-`~/Library/Application Support/Claude/claude-code/`, saves the original Mach-O
-binary as `claude-real`, and replaces `claude` with a wrapper that routes only
-the default Anthropic endpoint through `http://127.0.0.1:8747` when ACR answers
-`/health`. Custom API endpoints pass through untouched, and a down ACR proxy
-does not break Desktop sessions.
-
-To confirm the shim state without changing anything:
-
-```bash
-scripts/desktop-shim/apply.sh --status
-```
-
-Do not run `scripts/desktop-shim/claude-shim.zsh` directly from the repo; it is
-a template that only works after `apply.sh` copies it next to the saved
-`claude-real` binary inside Claude Desktop's managed app bundle.
-
-Re-run the script after Claude Desktop updates, because updates create a fresh
-version directory. To restore the original binaries:
-
-```bash
-scripts/desktop-shim/apply.sh --revert
-```
-
-If another shim is already installed and `claude-real` is present, the ACR
-installer refuses to overwrite it by default. Use `--force` only when you have
-confirmed `claude-real` is the original Desktop-managed binary.
-
-## Limitations
-
-- Routed turns are internally completed before the response is emitted because
-  the escalation guard must inspect the full cheap-provider response for premium
-  tool calls. Streaming clients still receive client-format SSE, but
-  time-to-first-token on a routed turn equals the cheap completion latency.
-- Passthrough supports each configured agent upstream in that agent's native
-  format. The router does not translate passthrough bodies.
-- Claude Desktop support requires the optional embedded Claude Code shim above;
-  plain shell environment variables are not enough for Desktop-launched sessions.
+---
 
 ## Contributing
 
-See `CONTRIBUTING.md` for development setup and contribution guidelines,
-`CODE_OF_CONDUCT.md` for community standards, and `SECURITY.md` for reporting
-vulnerabilities.
+See `CONTRIBUTING.md` for dev setup, `CODE_OF_CONDUCT.md` for community
+standards, and `SECURITY.md` for reporting vulnerabilities. Run `make qa`
+(lint + type + tests, all blocking) before opening a PR.
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
