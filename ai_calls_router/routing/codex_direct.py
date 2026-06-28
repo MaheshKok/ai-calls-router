@@ -213,21 +213,180 @@ def _data_lines(block: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _response_from_sse(text: str) -> JsonObject | None:
-    """Return the final response object from a Responses SSE body."""
+def _event_index(event: JsonObject, key: str) -> int | None:
+    value = event.get(key)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _empty_text_part() -> JsonObject:
+    annotations: list[JsonValue] = []
+    return {"type": "output_text", "text": "", "annotations": annotations}
+
+
+def _content_list(item: JsonObject) -> list[JsonValue]:
+    content = item.get("content")
+    if isinstance(content, list):
+        return cast("list[JsonValue]", content)
+
+    new_content: list[JsonValue] = []
+    item["content"] = new_content
+    return new_content
+
+
+def _ensure_output_message(
+    output: dict[int, JsonObject],
+    output_index: int,
+) -> JsonObject:
+    item = output.get(output_index)
+    if isinstance(item, dict) and item.get("type") == "message":
+        return item
+    content: list[JsonValue] = []
+    new_item: JsonObject = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": content,
+    }
+    output[output_index] = new_item
+    return new_item
+
+
+def _ensure_text_part(
+    output: dict[int, JsonObject],
+    output_index: int,
+    content_index: int,
+) -> JsonObject:
+    item = _ensure_output_message(output, output_index)
+    content = _content_list(item)
+
+    while len(content) <= content_index:
+        content.append(_empty_text_part())
+
+    part = content[content_index]
+    if not isinstance(part, dict):
+        part_obj = _empty_text_part()
+        content[content_index] = part_obj
+    else:
+        part_obj = cast("JsonObject", part)
+
+    part_obj.setdefault("type", "output_text")
+    part_obj.setdefault("text", "")
+    part_obj.setdefault("annotations", [])
+    return part_obj
+
+
+def _put_content_part(output: dict[int, JsonObject], event: JsonObject) -> None:
+    output_index = _event_index(event, "output_index")
+    content_index = _event_index(event, "content_index")
+    part = event.get("part")
+    if output_index is None or content_index is None or not isinstance(part, dict):
+        return
+
+    item = _ensure_output_message(output, output_index)
+    content = _content_list(item)
+
+    while len(content) <= content_index:
+        content.append(_empty_text_part())
+    content[content_index] = copy.deepcopy(cast("JsonObject", part))
+
+
+def _put_output_item(output: dict[int, JsonObject], event: JsonObject) -> None:
+    output_index = _event_index(event, "output_index")
+    item = event.get("item")
+    if output_index is not None and isinstance(item, dict):
+        output[output_index] = copy.deepcopy(cast("JsonObject", item))
+
+
+def _append_text_delta(output: dict[int, JsonObject], event: JsonObject) -> None:
+    output_index = _event_index(event, "output_index")
+    content_index = _event_index(event, "content_index")
+    delta = event.get("delta")
+    if output_index is None or content_index is None or not isinstance(delta, str):
+        return
+
+    part = _ensure_text_part(output, output_index, content_index)
+    existing = part.get("text")
+    part["text"] = f"{existing if isinstance(existing, str) else ''}{delta}"
+
+
+def _put_text_done(output: dict[int, JsonObject], event: JsonObject) -> None:
+    output_index = _event_index(event, "output_index")
+    content_index = _event_index(event, "content_index")
+    text_value = event.get("text")
+    if output_index is not None and content_index is not None and isinstance(text_value, str):
+        _ensure_text_part(output, output_index, content_index)["text"] = text_value
+
+
+def _apply_sse_output_event(output: dict[int, JsonObject], event: JsonObject) -> None:
+    event_type = event.get("type")
+    if event_type == "response.output_item.added":
+        _put_output_item(output, event)
+    elif event_type in {"response.content_part.added", "response.content_part.done"}:
+        _put_content_part(output, event)
+    elif event_type == "response.output_text.delta":
+        _append_text_delta(output, event)
+    elif event_type == "response.output_text.done":
+        _put_text_done(output, event)
+
+
+def _sse_events(text: str) -> list[JsonObject]:
+    events: list[JsonObject] = []
     for block in text.split("\n\n"):
         data = _data_lines(block)
         if not data or data == "[DONE]":
             continue
         parsed = cast("JsonValue", json.loads(data))
-        if not isinstance(parsed, dict):
-            continue
-        response = parsed.get("response")
-        if parsed.get("type") == "response.completed" and isinstance(response, dict):
-            return response
-        if parsed.get("object") == "response" and isinstance(parsed.get("output"), list):
-            return parsed
+        if isinstance(parsed, dict):
+            events.append(cast("JsonObject", parsed))
+    return events
+
+
+def _completed_response(event: JsonObject) -> JsonObject | None:
+    if event.get("object") == "response" and isinstance(event.get("output"), list):
+        return event
+    response = event.get("response")
+    if event.get("type") == "response.completed" and isinstance(response, dict):
+        return cast("JsonObject", response)
     return None
+
+
+def _response_with_rebuilt_output(
+    final_response: JsonObject | None,
+    output: dict[int, JsonObject],
+) -> JsonObject | None:
+    if final_response is None:
+        return None
+
+    final_output = final_response.get("output")
+    if isinstance(final_output, list) and final_output:
+        return final_response
+
+    rebuilt: list[JsonValue] = []
+    for output_index in sorted(output):
+        item = output[output_index]
+        if item.get("type") == "message":
+            item["status"] = "completed"
+        rebuilt.append(item)
+
+    if not rebuilt:
+        return None
+
+    return {**final_response, "output": rebuilt}
+
+
+def _response_from_sse(text: str) -> JsonObject | None:
+    """Return the final response object from a Responses SSE body."""
+    output: dict[int, JsonObject] = {}
+    final_response: JsonObject | None = None
+
+    for event in _sse_events(text):
+        final_response = _completed_response(event)
+        if final_response is not None:
+            break
+        _apply_sse_output_event(output, event)
+    return _response_with_rebuilt_output(final_response, output)
 
 
 async def responses_call(  # noqa: PLR0911 - fail-open routing declines to passthrough.

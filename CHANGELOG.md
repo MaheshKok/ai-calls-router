@@ -28,6 +28,9 @@ entries are added here when a release pull request is merged.
 - Fixed a startup schema-validation failure (`Input should be 'api_key_env'`)
   that rejected `auth.mode: oauth` tiers and disabled routing, forcing all
   traffic to premium passthrough.
+- Fixed Codex OAuth Responses SSE parsing so routed turns rebuild
+  `response.output` from streamed text deltas when the final completed event
+  reports an empty output array.
 
 ### Notes
 
