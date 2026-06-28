@@ -227,6 +227,40 @@ class TestForward:
             "cache_creation_input_tokens": 5,
         }
 
+    async def test_responses_sse_usage_reported_after_full_relay(self) -> None:
+        sse = (
+            b"event: response.completed\n"
+            b'data: {"type": "response.completed", "response": {"usage": {'
+            b'"input_tokens": 100, "output_tokens": 12, '
+            b'"input_tokens_details": {"cached_tokens": 20}}}}\n\n'
+        )
+        captured: list[tuple[int, dict[str, int], float]] = []
+        upstream = _Upstream(content=sse, headers={"content-type": "text/event-stream"})
+        async with _client(upstream) as client:
+            response = await pt.forward(
+                client=client,
+                upstream=UPSTREAM,
+                method="POST",
+                path="/v1/responses",
+                headers=CLIENT_HEADERS,
+                body=b"{}",
+                on_complete=lambda status, usage, duration: captured.append(
+                    (status, usage, duration)
+                ),
+            )
+            body = await _drain(response)
+        assert body == sse
+        assert len(captured) == 1
+        status, usage, duration = captured[0]
+        assert status == 200
+        assert duration >= 0
+        assert usage == {
+            "input_tokens": 80,
+            "output_tokens": 12,
+            "cache_read_input_tokens": 20,
+            "cache_creation_input_tokens": 0,
+        }
+
     async def test_json_usage_reported_after_full_relay(self) -> None:
         body = (
             b'{"content": [{"type": "text", "text": "ok"}], '

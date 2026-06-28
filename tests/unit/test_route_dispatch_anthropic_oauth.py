@@ -156,6 +156,20 @@ async def test_success_routes_records_and_masks_model(monkeypatch: pytest.Monkey
     assert outcomes[0].premium_model == "claude-opus-4-8"
 
 
+async def test_prompt_cache_setting_reaches_messages_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    _stub_messages_call(
+        monkeypatch, result=(_text_response(), (10, 4, 0, 0), _shrink()), captured=captured
+    )
+    _stub_accounting(monkeypatch, [])
+
+    attempt = await _run(_decision(settings={"anthropic_prompt_cache": True}))
+
+    assert attempt is not None
+    assert attempt.reason == "routed"
+    assert captured["prompt_cache"] is True
+
+
 async def test_escalates_to_passthrough_when_response_calls_premium_tool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -80,6 +80,7 @@ class SettingsConfig(_SchemaModel):
     env_file: str | None = Field(default=None, min_length=1)
     tier_precedence: list[str] | None = None
     compress_routed: bool | None = None
+    anthropic_prompt_cache: bool | None = None
     premium_tools: list[str] | None = None
 
 

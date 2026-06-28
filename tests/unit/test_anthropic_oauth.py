@@ -150,6 +150,27 @@ async def test_messages_call_swaps_model_strips_thinking_and_forwards_oauth() ->
 
 
 @pytest.mark.asyncio
+async def test_messages_call_adds_prompt_cache_when_enabled() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_ok_response())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await anthropic_oauth.messages_call(
+            body=_body(),
+            tier_cfg=_tier(),
+            oauth_headers={},
+            prompt_cache=True,
+            client=client,
+        )
+
+    sent = json.loads(captured[0].content)
+    assert sent["cache_control"] == {"type": "ephemeral"}
+
+
+@pytest.mark.asyncio
 async def test_messages_call_downgrades_xhigh_effort_for_sonnet() -> None:
     # Claude Code forwards output_config.effort='xhigh', which Sonnet rejects
     # (HTTP 400); the routed payload must downgrade it to a supported level.

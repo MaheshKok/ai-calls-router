@@ -13,16 +13,18 @@ the optimizer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import TYPE_CHECKING, cast
 
-from ai_calls_router._lib.conversion import convert_messages_for_litellm
 from ai_calls_router.accounting import shrink_stats
 from ai_calls_router.accounting.shrink_stats import ShrinkStats
 from ai_calls_router.routing.compression import compress_litellm_messages
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
 
 logger = logging.getLogger("acr.compression")
@@ -32,6 +34,10 @@ logger = logging.getLogger("acr.compression")
 _DEEPSEEK_MARKER = "deepseek"
 
 _NOOP = ShrinkStats(path="none", chars_before=0, chars_after=0)
+_ANTHROPIC_BLOCK_COMPRESSOR_VERSION = "anthropic-block-v1"
+_ANTHROPIC_BLOCK_CACHE_MAX = 4096
+_ANTHROPIC_BLOCK_CACHE: dict[str, str] = {}
+_ANTHROPIC_AUTO_CACHE_CONTROL: JsonObject = {"type": "ephemeral"}
 
 
 def _is_deepseek_upstream(upstream: str) -> bool:
@@ -57,6 +63,44 @@ def _stats(before: int, after: int) -> ShrinkStats:
     if after < before:
         return ShrinkStats(path="compress", chars_before=before, chars_after=after)
     return ShrinkStats(path="none", chars_before=before, chars_after=after)
+
+
+def _blocks_have_cache_control(blocks: JsonValue) -> bool:
+    """Return whether any dict in a block list declares cache_control."""
+    return isinstance(blocks, list) and any(
+        isinstance(block, dict) and "cache_control" in block for block in blocks
+    )
+
+
+def _messages_have_cache_control(messages: JsonValue) -> bool:
+    """Return whether any message content block declares cache_control."""
+    if not isinstance(messages, list):
+        return False
+    return any(
+        _blocks_have_cache_control(msg.get("content")) for msg in messages if isinstance(msg, dict)
+    )
+
+
+def _has_anthropic_cache_control(body: JsonObject) -> bool:
+    """Return whether an Anthropic request already declares any cache policy."""
+    return (
+        "cache_control" in body
+        or _blocks_have_cache_control(body.get("tools"))
+        or _blocks_have_cache_control(body.get("system"))
+        or _messages_have_cache_control(body.get("messages"))
+    )
+
+
+def _anthropic_has_cacheable_content(body: JsonObject) -> bool:
+    """Return whether a Messages body has any cacheable prompt content."""
+    return any(body.get(key) for key in ("tools", "system", "messages"))
+
+
+def apply_anthropic_prompt_cache(body: JsonObject) -> tuple[JsonObject, bool]:
+    """Add Anthropic automatic prompt caching when safe and absent."""
+    if _has_anthropic_cache_control(body) or not _anthropic_has_cacheable_content(body):
+        return body, False
+    return {**body, "cache_control": dict(_ANTHROPIC_AUTO_CACHE_CONTROL)}, True
 
 
 def _flatten_text(value: JsonValue) -> str:
@@ -87,6 +131,101 @@ def _compressed_tool_content_by_id(messages: JsonArray) -> dict[str, str]:
         if isinstance(call_id, str) and isinstance(content, str):
             out[call_id] = content
     return out
+
+
+def _anthropic_tool_names_by_id(messages: list[JsonObject]) -> dict[str, str]:
+    """Map Anthropic tool_use ids to tool names for cache-key stability."""
+    names: dict[str, str] = {}
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            call_id = block.get("id")
+            name = block.get("name")
+            if isinstance(call_id, str) and isinstance(name, str):
+                names[call_id] = name
+    return names
+
+
+def _flatten_anthropic_tool_result_content(value: JsonValue) -> str:
+    """Flatten Anthropic tool_result content the same way conversion does."""
+    if isinstance(value, list):
+        return "\n".join(
+            str(block.get("text", ""))
+            for block in cast("JsonArray", value)
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return str(value)
+
+
+def _compressed_block_cache_key(
+    *,
+    tool_name: str,
+    tool_use_id: str,
+    original_block_content: JsonValue,
+    compressor_version: str,
+) -> str:
+    """Return the stable cache key for one Anthropic tool_result block."""
+    raw = json.dumps(
+        {
+            "tool_name": tool_name,
+            "tool_use_id": tool_use_id,
+            "original_block_content": original_block_content,
+            "compressor_version": compressor_version,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_anthropic_block(key: str, value: str) -> None:
+    # ponytail: process-local clear-all eviction; add LRU only if this grows in prod.
+    if len(_ANTHROPIC_BLOCK_CACHE) >= _ANTHROPIC_BLOCK_CACHE_MAX:
+        _ANTHROPIC_BLOCK_CACHE.clear()
+    _ANTHROPIC_BLOCK_CACHE[key] = value
+
+
+def _compress_anthropic_tool_result_block(
+    block: JsonObject,
+    *,
+    model: str,
+    tool_name: str,
+    compressor_version: str,
+    enable_text_ml: bool,
+) -> str | None:
+    """Compress one tool_result block as a pure function of its content key."""
+    call_id = block.get("tool_use_id")
+    if not isinstance(call_id, str):
+        return None
+    original_content = block.get("content", "")
+    key = _compressed_block_cache_key(
+        tool_name=tool_name,
+        tool_use_id=call_id,
+        original_block_content=original_content,
+        compressor_version=compressor_version,
+    )
+    if key in _ANTHROPIC_BLOCK_CACHE:
+        return _ANTHROPIC_BLOCK_CACHE[key]
+
+    original_text = _flatten_anthropic_tool_result_content(original_content)
+    compressed, _ = compress_litellm_messages(
+        cast(
+            "JsonArray",
+            [{"role": "tool", "tool_call_id": call_id, "content": original_text}],
+        ),
+        model=model,
+        enable_text_ml=enable_text_ml,
+    )
+    shrunk = _compressed_tool_content_by_id(compressed).get(call_id)
+    if not isinstance(shrunk, str) or len(shrunk) >= len(original_text):
+        return None
+    _cache_anthropic_block(key, shrunk)
+    return shrunk
 
 
 def _openai_tool_chars(messages: JsonArray) -> int:
@@ -162,6 +301,47 @@ def _swap_anthropic_blocks(
     return new_content, changed
 
 
+def _iter_anthropic_blocks(messages: list[JsonObject]) -> Iterator[JsonObject]:
+    """Yield every dict content block across all message contents."""
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict):
+                yield cast("JsonObject", block)
+
+
+def _collect_anthropic_compressed_blocks(
+    messages: list[JsonObject],
+    *,
+    model: str,
+    tool_names: dict[str, str],
+    compressor_version: str,
+    enable_text_ml: bool,
+) -> tuple[dict[str, str], bool]:
+    """Compress every tool_result block, returning shrunk-by-id and whether any was seen."""
+    by_id: dict[str, str] = {}
+    saw_tool_result = False
+    for block in _iter_anthropic_blocks(messages):
+        if block.get("type") != "tool_result":
+            continue
+        call_id = block.get("tool_use_id")
+        if not isinstance(call_id, str):
+            continue
+        saw_tool_result = True
+        shrunk = _compress_anthropic_tool_result_block(
+            block,
+            model=model,
+            tool_name=tool_names.get(call_id, ""),
+            compressor_version=compressor_version,
+            enable_text_ml=enable_text_ml,
+        )
+        if shrunk is not None:
+            by_id[call_id] = shrunk
+    return by_id, saw_tool_result
+
+
 def compress_anthropic(
     body: JsonObject, *, enable_text_ml: bool = False
 ) -> tuple[JsonObject, ShrinkStats]:
@@ -185,14 +365,23 @@ def compress_anthropic(
     messages = body.get("messages")
     if not isinstance(messages, list):
         return body, _NOOP
-    converted = convert_messages_for_litellm(cast("list[JsonObject]", messages))
-    compressed, _ = compress_litellm_messages(
-        cast("JsonArray", converted), model=_model_of(body), enable_text_ml=enable_text_ml
+    typed_messages = cast("list[JsonObject]", messages)
+    model = _model_of(body)
+    compressor_version = (
+        f"{_ANTHROPIC_BLOCK_COMPRESSOR_VERSION}:model={model}:text_ml={int(enable_text_ml)}"
     )
-    by_id = _compressed_tool_content_by_id(compressed)
+    by_id, saw_tool_result = _collect_anthropic_compressed_blocks(
+        typed_messages,
+        model=model,
+        tool_names=_anthropic_tool_names_by_id(typed_messages),
+        compressor_version=compressor_version,
+        enable_text_ml=enable_text_ml,
+    )
     if not by_id:
+        if saw_tool_result:
+            return body, shrink_stats.compute_shrink(path="none", before=body, after=body)
         return body, _NOOP
-    new_messages = _apply_anthropic_tool_results(cast("list[JsonObject]", messages), by_id)
+    new_messages = _apply_anthropic_tool_results(typed_messages, by_id)
     new_body = {**body, "messages": new_messages}
     stats = shrink_stats.compute_shrink(path="compress", before=body, after=new_body)
     if stats.chars_saved <= 0:
@@ -317,7 +506,12 @@ def _dispatch(
 
 
 def compress_forward_body(
-    body_bytes: bytes, *, request_path: str, upstream: str, enable_text_ml: bool = False
+    body_bytes: bytes,
+    *,
+    request_path: str,
+    upstream: str,
+    enable_text_ml: bool = False,
+    prompt_cache: bool = False,
 ) -> tuple[bytes, ShrinkStats]:
     """Compress a forwardable request body, skipping DeepSeek upstreams.
 
@@ -333,6 +527,7 @@ def compress_forward_body(
         upstream: Upstream base URL; DeepSeek targets are never compressed.
         enable_text_ml: Opt into headroom's lossy ML plain-text compressor; off
             by default so premium passthrough stays lossless.
+        prompt_cache: Add Anthropic automatic prompt caching to Messages bodies.
 
     Returns:
         A pair of the (possibly re-serialized) body bytes and a ShrinkStats.
@@ -346,10 +541,14 @@ def compress_forward_body(
     if not isinstance(parsed, dict):
         return body_bytes, _NOOP
     try:
-        new_body, stats = _dispatch(parsed, request_path, enable_text_ml=enable_text_ml)
+        cache_applied = False
+        cache_body = parsed
+        if prompt_cache and request_path == "/v1/messages":
+            cache_body, cache_applied = apply_anthropic_prompt_cache(parsed)
+        new_body, stats = _dispatch(cache_body, request_path, enable_text_ml=enable_text_ml)
     except Exception:
         logger.exception("forward compression failed; sending body uncompressed")
         return body_bytes, _NOOP
-    if stats.chars_saved <= 0:
+    if stats.chars_saved <= 0 and not cache_applied:
         return body_bytes, stats
     return json.dumps(new_body).encode("utf-8"), stats

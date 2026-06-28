@@ -180,11 +180,24 @@ class _UsageCapture:
             message_usage = message.get("usage")
             if isinstance(message_usage, dict):
                 self._apply_usage(message_usage)
+        response = payload.get("response")
+        if isinstance(response, dict):
+            response_usage = response.get("usage")
+            if isinstance(response_usage, dict):
+                self._apply_usage(response_usage)
 
     def _apply_usage(self, usage: JsonObject) -> None:
+        cache_read: int | None = None
+        details = usage.get("input_tokens_details")
+        if isinstance(details, dict):
+            cache_read = jsonnum.int_value(details.get("cached_tokens"), minimum=0)
+            self._usage["cache_read_input_tokens"] = cache_read
         for key in _USAGE_KEYS:
             if key in usage:
-                self._usage[key] = jsonnum.int_value(usage.get(key, 0), minimum=0)
+                value = jsonnum.int_value(usage.get(key, 0), minimum=0)
+                if key == "input_tokens" and cache_read is not None:
+                    value = max(value - cache_read, 0)
+                self._usage[key] = value
 
 
 def _finish_capture(

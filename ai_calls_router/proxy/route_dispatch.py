@@ -402,6 +402,7 @@ async def try_anthropic_oauth_route(
         oauth_headers=passthrough.filter_request_headers(request_headers),
         compress=bool(decision.settings.get("compress_routed", True)),
         enable_text_ml=bool(decision.tier_cfg.get("text_ml_compression")),
+        prompt_cache=bool(decision.settings.get("anthropic_prompt_cache", False)),
         client=client,
     )
     duration = time.monotonic() - started
