@@ -27,6 +27,7 @@ from ai_calls_router.routing.config_schema import (
     parse_tier_config,
 )
 from ai_calls_router.routing.engine import prepare_routed_body
+from ai_calls_router.routing.forward_compression import compress_anthropic
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -230,6 +231,8 @@ async def messages_call(
     body: JsonObject,
     tier_cfg: JsonObject,
     oauth_headers: Mapping[str, str],
+    compress: bool = False,
+    enable_text_ml: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> tuple[JsonObject, tuple[int, int, int, int], shrink_stats.ShrinkStats] | None:
     """POST a model-swapped Anthropic Messages body to the subscription endpoint.
@@ -237,28 +240,39 @@ async def messages_call(
     The body is rewritten for the tier (model swapped to the native id, stream
     dropped, max_tokens clamped, thinking blocks stripped) and sent to
     api.anthropic.com with the client's inbound OAuth headers, so the turn bills
-    the subscription's quota for the tier model. No compression runs on this
-    path. Any non-200 status or transport error returns None so the caller falls
-    back to premium passthrough.
+    the subscription's quota for the tier model. When ``compress`` is set, the
+    routed payload's tool_result text is shrunk by headroom before the POST; the
+    compression is deterministic, so a given tool_result yields identical bytes
+    every turn and the subscription's prompt-cache prefix stays stable. Any
+    non-200 status or transport error returns None so the caller falls back to
+    premium passthrough.
 
     Args:
         body: Anthropic-format request body from the client.
         tier_cfg: Tier config marked as an Anthropic-OAuth tier.
         oauth_headers: Hop-by-hop-filtered client headers carrying the OAuth
             bearer to forward upstream.
+        compress: When True, run headroom over the routed payload's tool_result
+            blocks before the upstream POST; when False, the payload is sent
+            uncompressed with a no-op shrink stat.
+        enable_text_ml: Opt this tier into headroom's lossy ML plain-text
+            compressor; off by default so only lossless compressors run.
         client: Optional shared HTTP client for tests or server reuse.
 
     Returns:
-        Parsed Anthropic JSON body, normalized token usage, and a no-op shrink,
+        Parsed Anthropic JSON body, normalized token usage, and the shrink stat,
         or None when the caller must passthrough.
     """
     if not is_anthropic_oauth_tier(tier_cfg):
         return None
-    shrink = shrink_stats.compute_shrink(path="none", before=body, after=body)
     payload = cast(
         "JsonObject",
         {**prepare_routed_body(body, tier_cfg), "model": native_model_id(tier_cfg)},
     )
+    if compress:
+        payload, shrink = compress_anthropic(payload, enable_text_ml=enable_text_ml)
+    else:
+        shrink = shrink_stats.compute_shrink(path="none", before=payload, after=payload)
     headers = _forward_headers(oauth_headers)
     logger.info(
         "acr: anthropic-oauth routed model=%s effort=%s",

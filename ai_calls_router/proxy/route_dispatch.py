@@ -400,6 +400,8 @@ async def try_anthropic_oauth_route(
         body=decision.anthropic_body,
         tier_cfg=decision.tier_cfg,
         oauth_headers=passthrough.filter_request_headers(request_headers),
+        compress=bool(decision.settings.get("compress_routed", True)),
+        enable_text_ml=bool(decision.tier_cfg.get("text_ml_compression")),
         client=client,
     )
     duration = time.monotonic() - started
