@@ -333,7 +333,7 @@ def _apply_sse_output_event(output: dict[int, JsonObject], event: JsonObject) ->
 
 def _sse_events(text: str) -> list[JsonObject]:
     events: list[JsonObject] = []
-    for block in text.split("\n\n"):
+    for block in re.split(r"\r?\n\r?\n", text):
         data = _data_lines(block)
         if not data or data == "[DONE]":
             continue

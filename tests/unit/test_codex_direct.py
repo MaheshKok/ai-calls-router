@@ -247,7 +247,7 @@ async def test_responses_call_oauth_uses_chatgpt_backend_headers() -> None:
         return httpx.Response(
             200,
             content="".join(
-                f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
+                f"event: {event['type']}\r\ndata: {json.dumps(event)}\r\n\r\n" for event in events
             ),
             headers={"Content-Type": "text/event-stream"},
         )
