@@ -8,6 +8,14 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 from [Conventional Commit](https://www.conventionalcommits.org/) messages, so new
 entries are added here when a release pull request is merged.
 
+## [0.5.3](https://github.com/MaheshKok/ai-calls-router/compare/ai-calls-router-v0.5.2...ai-calls-router-v0.5.3) (2026-06-28)
+
+
+### Bug Fixes
+
+* **codex:** parse CRLF SSE blocks ([d446d9e](https://github.com/MaheshKok/ai-calls-router/commit/d446d9e166e6ec3ea770f5ae09691888f632c661))
+* **codex:** rebuild OAuth SSE output ([dc36362](https://github.com/MaheshKok/ai-calls-router/commit/dc36362ee2640160b2af3da20e716255c35b00d8))
+
 ## [0.5.2](https://github.com/MaheshKok/ai-calls-router/compare/ai-calls-router-v0.5.1...ai-calls-router-v0.5.2) (2026-06-23)
 
 
