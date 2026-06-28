@@ -208,6 +208,29 @@ async def test_responses_call_oauth_uses_chatgpt_backend_headers() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
+        output_item = {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": "msg_2",
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            },
+        }
+        content_part = {
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        }
+        text_delta = {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "done",
+        }
         completed = {
             "type": "response.completed",
             "response": {
@@ -220,9 +243,12 @@ async def test_responses_call_oauth_uses_chatgpt_backend_headers() -> None:
                 "usage": None,
             },
         }
+        events = [output_item, content_part, text_delta, completed]
         return httpx.Response(
             200,
-            content=f"event: response.completed\ndata: {json.dumps(completed)}\n\n",
+            content="".join(
+                f"event: {event['type']}\r\ndata: {json.dumps(event)}\r\n\r\n" for event in events
+            ),
             headers={"Content-Type": "text/event-stream"},
         )
 
@@ -242,6 +268,15 @@ async def test_responses_call_oauth_uses_chatgpt_backend_headers() -> None:
     assert result is not None
     response, usage, shrink = result
     assert response["id"] == "resp_2"
+    assert response["output"] == [
+        {
+            "id": "msg_2",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "done", "annotations": []}],
+        }
+    ]
     assert usage == (0, 0, 0, 0)
     assert shrink.chars_before == len("done")
     assert shrink.chars_after == len("done")
