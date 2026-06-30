@@ -187,6 +187,12 @@ class _UsageCapture:
                 self._apply_usage(response_usage)
 
     def _apply_usage(self, usage: JsonObject) -> None:
+        # The cache_read subtraction below only fires when input_tokens_details is
+        # present, which is the OpenAI Responses shape: it reports cached_tokens as
+        # a SUBSET already counted inside input_tokens, so we subtract to avoid
+        # double-counting. Anthropic has no input_tokens_details and reports
+        # cache_read_input_tokens as a separate bucket already excluded from
+        # input_tokens, so cache_read stays None and no subtraction happens.
         cache_read: int | None = None
         details = usage.get("input_tokens_details")
         if isinstance(details, dict):

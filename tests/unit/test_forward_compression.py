@@ -272,6 +272,63 @@ def test_anthropic_block_cache_reuses_first_compressed_content(
     assert calls == 1
 
 
+def test_anthropic_non_shrinking_block_caches_negative_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A block that does not shrink must cache the negative result so a repeated
+    # identical block is not recompressed on every turn.
+    calls = 0
+
+    def _no_shrink(
+        messages: JsonArray, *, model: str, model_limit: int = 0, enable_text_ml: bool = False
+    ) -> tuple[JsonArray, ShrinkStats]:
+        nonlocal calls
+        calls += 1
+        return messages, ShrinkStats("none", 0, 0)  # content unchanged -> no shrink
+
+    _patch_compressor(monkeypatch, _no_shrink)
+    body = _anthropic_body(("call_1", "x" * 4000))
+
+    forward_compression.compress_anthropic(body)
+    forward_compression.compress_anthropic(body)
+
+    assert calls == 1  # second turn served the cached negative, never recompressed
+
+
+def test_anthropic_mixed_content_tool_result_is_left_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A tool_result mixing text + image must never collapse to a bare string,
+    # which would drop the image. The block is skipped before compression, so
+    # _boom (raises if it runs) proves the compressor was never reached.
+    _patch_compressor(monkeypatch, _boom)
+    mixed: JsonArray = [
+        {"type": "text", "text": "x" * 4000},
+        {"type": "image", "source": {"type": "base64", "data": "iVBOR"}},
+    ]
+    body: JsonObject = {
+        "model": "claude-test",
+        "max_tokens": 1000,
+        "messages": [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call_1", "name": "exec", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": mixed}],
+            },
+        ],
+    }
+
+    new_body, stats = forward_compression.compress_anthropic(body)
+
+    assert new_body is body
+    assert new_body["messages"][2]["content"][0]["content"] == mixed
+    assert stats.path == "none"
+
+
 def test_anthropic_does_not_mutate_input_body(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_compressor(monkeypatch, _shrink_tool_messages)
     body = _anthropic_body(("call_1", "x" * 4000))
@@ -439,3 +496,20 @@ def test_responses_input_to_openai_preserves_ids_and_skips_non_dict() -> None:
 )
 def test_flatten_text(value: object, expected: str) -> None:
     assert forward_compression._flatten_text(value) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("plain", "plain"),  # bare string passes through
+        ([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}], "a\nb"),  # pure text
+        ([{"type": "text", "text": "a"}, {"type": "image"}], None),  # mixed -> skip
+        ([{"type": "image"}], None),  # non-text only -> skip
+        (["not-a-dict"], None),  # non-dict block -> skip
+        ([], None),  # empty list -> skip (nothing to compress)
+        (42, "42"),  # non-list, non-str -> str()
+    ],
+)
+def test_flatten_anthropic_tool_result_content(value: object, expected: object) -> None:
+    result = forward_compression._flatten_anthropic_tool_result_content(value)  # type: ignore[arg-type]
+    assert result == expected

@@ -36,7 +36,10 @@ _DEEPSEEK_MARKER = "deepseek"
 _NOOP = ShrinkStats(path="none", chars_before=0, chars_after=0)
 _ANTHROPIC_BLOCK_COMPRESSOR_VERSION = "anthropic-block-v1"
 _ANTHROPIC_BLOCK_CACHE_MAX = 4096
-_ANTHROPIC_BLOCK_CACHE: dict[str, str] = {}
+# Maps a block cache key to its compressed text, or None when the block does not
+# shrink. Caching the negative result stops a repeated non-shrinking tool_result
+# from being recompressed every turn.
+_ANTHROPIC_BLOCK_CACHE: dict[str, str | None] = {}
 _ANTHROPIC_AUTO_CACHE_CONTROL: JsonObject = {"type": "ephemeral"}
 
 
@@ -150,14 +153,23 @@ def _anthropic_tool_names_by_id(messages: list[JsonObject]) -> dict[str, str]:
     return names
 
 
-def _flatten_anthropic_tool_result_content(value: JsonValue) -> str:
-    """Flatten Anthropic tool_result content the same way conversion does."""
+def _flatten_anthropic_tool_result_content(value: JsonValue) -> str | None:
+    """Flatten a pure-text Anthropic tool_result content into a string.
+
+    Returns None for a list that holds any non-text block (e.g. an image) so the
+    caller leaves the block untouched. The map-back replaces the whole block
+    content with a single string, which would silently drop non-text blocks if
+    we flattened a mixed list to text only.
+    """
+    if isinstance(value, str):
+        return value
     if isinstance(value, list):
-        return "\n".join(
-            str(block.get("text", ""))
-            for block in cast("JsonArray", value)
-            if isinstance(block, dict) and block.get("type") == "text"
-        )
+        blocks = cast("JsonArray", value)
+        if blocks and all(
+            isinstance(block, dict) and block.get("type") == "text" for block in blocks
+        ):
+            return "\n".join(str(cast("JsonObject", block).get("text", "")) for block in blocks)
+        return None
     return str(value)
 
 
@@ -183,11 +195,38 @@ def _compressed_block_cache_key(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _cache_anthropic_block(key: str, value: str) -> None:
+def _cache_anthropic_block(key: str, value: str | None) -> None:
     # ponytail: process-local clear-all eviction; add LRU only if this grows in prod.
     if len(_ANTHROPIC_BLOCK_CACHE) >= _ANTHROPIC_BLOCK_CACHE_MAX:
         _ANTHROPIC_BLOCK_CACHE.clear()
     _ANTHROPIC_BLOCK_CACHE[key] = value
+
+
+def _synthetic_tool_messages(*, call_id: str, tool_name: str, content: str) -> JsonArray:
+    """Build the assistant-call + tool-output pair headroom needs to name the tool.
+
+    headroom keys its excluded-tool decision on the assistant ``tool_calls`` message
+    that names the tool; a lone tool message leaves the name map empty, so excluded
+    file tools (Read/Edit) would be compressed against ``DEFAULT_EXCLUDE_TOOLS``.
+    Pairing the synthetic tool output with its naming assistant message restores
+    the exclusion. The assistant message carries no content so it adds no tool text.
+    """
+    return cast(
+        "JsonArray",
+        [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": tool_name, "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": call_id, "content": content},
+        ],
+    )
 
 
 def _compress_anthropic_tool_result_block(
@@ -213,16 +252,20 @@ def _compress_anthropic_tool_result_block(
         return _ANTHROPIC_BLOCK_CACHE[key]
 
     original_text = _flatten_anthropic_tool_result_content(original_content)
+    if original_text is None:
+        # Mixed/non-text content: leave the block untouched. Cache the negative so
+        # the same block is not re-flattened every turn.
+        _cache_anthropic_block(key, None)
+        return None
     compressed, _ = compress_litellm_messages(
-        cast(
-            "JsonArray",
-            [{"role": "tool", "tool_call_id": call_id, "content": original_text}],
-        ),
+        _synthetic_tool_messages(call_id=call_id, tool_name=tool_name, content=original_text),
         model=model,
         enable_text_ml=enable_text_ml,
     )
     shrunk = _compressed_tool_content_by_id(compressed).get(call_id)
     if not isinstance(shrunk, str) or len(shrunk) >= len(original_text):
+        # No shrink: cache the negative so a non-shrinking block is not recompressed.
+        _cache_anthropic_block(key, None)
         return None
     _cache_anthropic_block(key, shrunk)
     return shrunk
