@@ -43,6 +43,11 @@ settings:
   # when headroom-ai is not installed. Default: true.
   compress_routed: true
 
+  # Opt Anthropic /v1/messages requests into Anthropic automatic prompt caching.
+  # Adds top-level cache_control only when no conflicting cache policy is present.
+  # Default: false.
+  anthropic_prompt_cache: false
+
 # Agent-local serving tiers. `tools` maps each agent's tool vocabulary to a
 # semantic tier name; `agents.<group>.tiers.<tier>` decides the actual model for
 # that agent. This lets Claude Code `fast` route to DeepSeek while Hermes `fast`

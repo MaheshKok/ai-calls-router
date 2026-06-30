@@ -228,8 +228,13 @@ async def _serve_premium_passthrough(
     # compressor relays byte-identical when nothing shrank, so short decision
     # turns keep the upstream prompt cache intact.
     upstream = routing.agent_upstream(routes, group)
+    settings_value = routes.get("settings")
+    settings: JsonObject = settings_value if isinstance(settings_value, dict) else {}
     forward_bytes, shrink = forward_compression.compress_forward_body(
-        ctx.body_bytes, request_path=ctx.path, upstream=upstream
+        ctx.body_bytes,
+        request_path=ctx.path,
+        upstream=upstream,
+        prompt_cache=bool(settings.get("anthropic_prompt_cache", False)),
     )
     m.add_shrink(chars_before=shrink.chars_before, chars_after=shrink.chars_after)
     m.record_request(

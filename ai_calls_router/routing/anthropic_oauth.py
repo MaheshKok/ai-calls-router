@@ -27,7 +27,10 @@ from ai_calls_router.routing.config_schema import (
     parse_tier_config,
 )
 from ai_calls_router.routing.engine import prepare_routed_body
-from ai_calls_router.routing.forward_compression import compress_anthropic
+from ai_calls_router.routing.forward_compression import (
+    apply_anthropic_prompt_cache,
+    compress_anthropic,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -233,6 +236,7 @@ async def messages_call(
     oauth_headers: Mapping[str, str],
     compress: bool = False,
     enable_text_ml: bool = False,
+    prompt_cache: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> tuple[JsonObject, tuple[int, int, int, int], shrink_stats.ShrinkStats] | None:
     """POST a model-swapped Anthropic Messages body to the subscription endpoint.
@@ -257,6 +261,7 @@ async def messages_call(
             uncompressed with a no-op shrink stat.
         enable_text_ml: Opt this tier into headroom's lossy ML plain-text
             compressor; off by default so only lossless compressors run.
+        prompt_cache: Add Anthropic automatic prompt caching when safe.
         client: Optional shared HTTP client for tests or server reuse.
 
     Returns:
@@ -273,6 +278,8 @@ async def messages_call(
         payload, shrink = compress_anthropic(payload, enable_text_ml=enable_text_ml)
     else:
         shrink = shrink_stats.compute_shrink(path="none", before=payload, after=payload)
+    if prompt_cache:
+        payload, _ = apply_anthropic_prompt_cache(payload)
     headers = _forward_headers(oauth_headers)
     logger.info(
         "acr: anthropic-oauth routed model=%s effort=%s",
