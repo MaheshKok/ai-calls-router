@@ -57,13 +57,20 @@ settings:
 #   auth.mode: api_key_env uses auth.key_env from process env or settings.env_file.
 #
 # effort (optional, per tier): reasoning level forced on this tier's routed
-#   turns -- one of low | medium | high | max. Each tier decides independently,
-#   so a cheap tier can run low while another runs high. "xhigh" is rejected
-#   because only premium Opus accepts it (a routed Sonnet turn returns HTTP 400).
-#   Premium passthrough is never routed and keeps its own level (set in the
-#   client), so there is nothing to sync. Omit to leave the client's level
-#   as-is, downgrading only the Opus-only xhigh to high as a safety net. Only
-#   Anthropic routed models read effort; DeepSeek/OpenAI tiers ignore it.
+#   turns -- one of low | medium | high | xhigh | max. Each tier decides
+#   independently, so a cheap tier can run low while another runs xhigh. "xhigh"
+#   is accepted by Sonnet 5 and Opus but rejected by older routed models (e.g.
+#   Sonnet 4.6, HTTP 400); see supports_xhigh_effort. Premium passthrough is
+#   never routed and keeps its own level (set in the client), so there is nothing
+#   to sync. Omit to leave the client's level as-is, downgrading only an xhigh a
+#   non-xhigh-capable model rejects to high as a safety net. Only Anthropic
+#   routed models read effort; DeepSeek/OpenAI tiers ignore it.
+#
+# supports_xhigh_effort (optional, per tier): whether this tier's routed model
+#   accepts effort="xhigh". Default false. Set true for xhigh-capable models
+#   (Sonnet 5, Opus) so a client-sent xhigh passes through instead of being
+#   downgraded to high. A configured effort above wins regardless; this only
+#   governs the safety downgrade of a client-sent level.
 #
 # text_ml_compression (optional, per tier): set true to also run headroom's
 #   lossy ML plain-text compressor (Kompress) on this tier's tool-output text.
@@ -72,6 +79,30 @@ settings:
 #   (`pip install ai-calls-router[compression-ml]`); without it the flag is a
 #   silent no-op. Leave false for tiers serving coding agents, where dropping
 #   prose tokens from tool output can corrupt the model's context.
+#
+# supports_adaptive_thinking (optional, per tier): whether this tier's routed
+#   model accepts Anthropic's adaptive thinking. Default true. Set false for the
+#   Claude 4.5 family (e.g. claude-haiku-4-5): its subscription Messages endpoint
+#   returns HTTP 400 ("adaptive thinking is not supported on this model") for both
+#   a top-level thinking={type:adaptive} request (which Claude Code sends) and a
+#   non-empty effort it treats as adaptive, failing the routed turn open to
+#   premium. When false, the top-level adaptive thinking is disabled and the
+#   effort field is stripped before the routed POST. Because disabling thinking
+#   also invalidates a paired clear_thinking context-management edit (Anthropic
+#   400s: "clear_thinking_20251015 strategy requires thinking to be enabled or
+#   adaptive"), that edit is dropped from context_management.edits too. 4.6+
+#   models (Sonnet 4.6+, Opus 4.5+) accept adaptive thinking; leave this true
+#   (or omit) for them.
+#
+# context_window (optional, per tier): total token window (input+output) of this
+#   tier's routed model -- 200000 for Sonnet 5 / Haiku 4.5. When set, the router
+#   remembers each session's prior-turn usage and forces premium passthrough for
+#   a turn projected to overflow the window, instead of routing it, getting a 400
+#   ("prompt is too long"), and failing open to premium (a wasted round-trip
+#   repeated every turn of a long session). The projection lags one turn, so the
+#   first overflowing turn still routes-then-fails-open; the guard prevents the
+#   repeats. Omit to disable. Premium (Opus, ~1M) is never routed, so no window
+#   is needed for it.
 agents:
   claude_code:
     upstream: https://api.anthropic.com
@@ -132,6 +163,7 @@ agents:
       # Omitted max_tokens means ACR preserves Claude Code's incoming max_tokens.
       # crud stays capped because low-value admin/task-list turns should stay bounded.
       fast:
+        context_window: 200000
         provider: anthropic
         model: anthropic/claude-sonnet-4-6
         auth:
@@ -141,6 +173,7 @@ agents:
         input_cached_cost_per_1m: 0.30
         output_cost_per_1m: 15.0
       code:
+        context_window: 200000
         provider: anthropic
         model: anthropic/claude-sonnet-4-6
         auth:
@@ -150,6 +183,7 @@ agents:
         input_cached_cost_per_1m: 0.30
         output_cost_per_1m: 15.0
       crud:
+        context_window: 200000
         provider: anthropic
         model: anthropic/claude-sonnet-4-6
         auth:
@@ -160,6 +194,7 @@ agents:
         input_cached_cost_per_1m: 0.30
         output_cost_per_1m: 15.0
       structured:
+        context_window: 200000
         provider: anthropic
         model: anthropic/claude-sonnet-4-6
         auth:

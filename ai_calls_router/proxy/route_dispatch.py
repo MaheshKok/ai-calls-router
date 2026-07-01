@@ -22,7 +22,12 @@ from ai_calls_router._lib.responses_inbound import (
 )
 from ai_calls_router.accounting import savings, shrink_stats
 from ai_calls_router.proxy import chatgpt_oauth, passthrough
-from ai_calls_router.routing import anthropic_oauth, codex_direct, content_sanitize
+from ai_calls_router.routing import (
+    anthropic_oauth,
+    codex_direct,
+    content_sanitize,
+    context_budget,
+)
 from ai_calls_router.routing import decide as routing
 from ai_calls_router.routing import engine as routed_call
 from ai_calls_router.routing.config_schema import (
@@ -41,6 +46,11 @@ if TYPE_CHECKING:
     from ai_calls_router.routing.adapters.base import ClientAdapter
 
 logger = logging.getLogger("acr.server")
+
+# Output tokens reserved for the context-window guard when a tier pins no
+# max_tokens (Claude Code requests a large budget). Only used to compute the
+# guard trip point; the real per-turn clamp still happens in prepare_routed_body.
+_DEFAULT_OUTPUT_RESERVE = 32000
 
 
 @dataclass(frozen=True)
@@ -125,6 +135,33 @@ def premium_guard_attempt(
         model=requested_model,
         tool_names=names,
         tier=tier,
+    )
+
+
+def _context_overflow_attempt(decision: RouteDecision, session: str) -> RouteAttempt | None:
+    """Force premium when this session already filled the tier's context window.
+
+    Uses the prior turn's observed input+output (recorded after each completed
+    turn) to project the next turn's input; when that leaves no room for output
+    inside the tier's ``context_window`` it returns a premium-guard attempt so
+    the doomed routed hop is skipped. Returns None -- route normally -- for any
+    tier without a configured window or any session with no prior record. The
+    guard is an optimization above fail-open, never a correctness gate.
+    """
+    window = decision.tier_cfg.get("context_window")
+    if not isinstance(window, int) or window <= 0:
+        return None
+    max_tokens = decision.tier_cfg.get("max_tokens")
+    reserve = (
+        max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else _DEFAULT_OUTPUT_RESERVE
+    )
+    if not context_budget.would_overflow(session, context_window=window, output_reserve=reserve):
+        return None
+    return premium_guard_attempt(
+        reason="context_window_guard",
+        requested_model=decision.requested_model,
+        names=decision.names,
+        tier=decision.tier,
     )
 
 
@@ -659,6 +696,9 @@ async def try_route(
     if isinstance(decision, RouteAttempt):
         return decision
     session_id = session or ""
+    overflow = _context_overflow_attempt(decision, session_id)
+    if overflow is not None:
+        return overflow
     try:
         attempt = await try_native_or_oauth_route(
             decision,
