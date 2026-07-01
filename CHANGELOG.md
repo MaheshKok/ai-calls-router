@@ -102,6 +102,33 @@ entries are added here when a release pull request is merged.
 
 ### Added
 
+- Added a per-session context-window guard that prevents routed turns from
+  overflowing a tier's context window and 400ing (`prompt is too long`). A new
+  optional per-tier `context_window` field (e.g. `200000` for Sonnet 5 / Haiku
+  4.5) turns it on. The router remembers each session's prior-turn usage
+  (`input_tokens + output_tokens`, keyed by the existing `session_fingerprint`)
+  and forces premium passthrough for a turn projected to overflow, instead of
+  routing it, taking the 400, and failing open to premium every turn. The
+  projection lags one turn, so the first overflowing turn still
+  routes-then-fails-open and the guard suppresses the repeats. It is a
+  cache-safe optimisation: the guard only changes the routing decision, never
+  the request body, so byte-for-byte prefix stability is preserved and the
+  DeepSeek direct path is untouched. Missing/unknown sessions and any lookup
+  gap skip the guard, leaving fail-open as the correctness backstop. State is
+  process-local (bounded LRU, ~1024 sessions) and reset on restart. Omit
+  `context_window` to disable; premium (Opus, ~1M) is never routed and needs no
+  window.
+- Added opt-in Anthropic automatic prompt caching via
+  `settings.anthropic_prompt_cache` (default `false`). When enabled, routed and
+  forwarded `/v1/messages` bodies get a single top-level ephemeral
+  `cache_control`, applied only when the body carries cacheable content and
+  declares no conflicting cache policy. Off by default the forward body relays
+  byte-identical and the prompt cache is untouched.
+- Added a content-addressed `tool_result` compression cache. Each block is
+  compressed independently and memoized in a process-local cache keyed by a
+  sha256 over tool name, `tool_use_id`, original content, and compressor
+  version, so an identical block yields identical bytes every turn and the
+  cached prefix stays byte-stable.
 - Added ChatGPT-OAuth routed serving for Hermes. Decision and premium turns pass
   through to `https://chatgpt.com/backend-api/codex` with the client's own OAuth;
   cheap tool-result turns are served by smaller GPT models (`gpt-5.4-mini`,
@@ -113,8 +140,15 @@ entries are added here when a release pull request is merged.
   OpenAI Chat Completions or the Responses wire, with conversion between the
   Anthropic and Responses formats.
 
+### Changed
+
+- Renamed the dashboard `shrunk` column to `saved` (percent saved) and stopped
+  hiding zero-input placeholder rows, so cache behaviour is visible.
+
 ### Fixed
 
+- Fixed `cache_read` tokens being folded into `input_tokens` (double-counted) on
+  the passthrough usage capture; cached reads are now subtracted.
 - Fixed a startup schema-validation failure (`Input should be 'api_key_env'`)
   that rejected `auth.mode: oauth` tiers and disabled routing, forcing all
   traffic to premium passthrough.
