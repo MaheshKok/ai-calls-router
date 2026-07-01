@@ -27,6 +27,7 @@ from ai_calls_router.proxy import passthrough, route_dispatch
 from ai_calls_router.routing import (
     anthropic_oauth,
     content_sanitize,
+    context_budget,
     forward_compression,
     provider_config,
 )
@@ -159,6 +160,7 @@ def _premium_usage_callback(
     *,
     m: metrics.Metrics,
     request_id: str,
+    session: str | None,
 ) -> Callable[[int, dict[str, int], float], None]:
     """Build a callback that updates metrics after premium passthrough completes."""
 
@@ -167,6 +169,9 @@ def _premium_usage_callback(
         output_tokens = usage.get("output_tokens", 0)
         cache_read = usage.get("cache_read_input_tokens", 0)
         cache_creation = usage.get("cache_creation_input_tokens", 0)
+        # Teach the context-window guard the real premium size so the next turn
+        # of an overflowing session skips routing instead of failing open again.
+        context_budget.record_context_size(session, input_tokens, output_tokens)
         if input_tokens or output_tokens or cache_read or cache_creation:
             m.add_premium_tokens(
                 input_tokens=input_tokens,
@@ -238,7 +243,8 @@ async def _serve_premium_passthrough(
         status=0,
         tier=attempt.tier,
         route="premium_guard"
-        if attempt.reason in {"request_premium_guard", "response_premium_guard"}
+        if attempt.reason
+        in {"request_premium_guard", "response_premium_guard", "context_window_guard"}
         else "passthrough",
         model=attempt.model,
         user_agent=ctx.user_agent,
@@ -266,6 +272,7 @@ async def _serve_premium_passthrough(
         on_complete=_premium_usage_callback(
             m=m,
             request_id=logging_setup.current_request_id(),
+            session=session,
         ),
     )
 
@@ -328,6 +335,7 @@ async def handle(ctx: RequestContext, *, routes_loader: RoutesLoader) -> Respons
     )
     if attempt.response is not None:
         m.incr_routed()
+        context_budget.record_context_size(session, attempt.input_tokens, attempt.output_tokens)
         logger.info("outcome=routed %s agent=%s tier=%s", ctx.path, agent, attempt.tier)
         return attempt.response
 

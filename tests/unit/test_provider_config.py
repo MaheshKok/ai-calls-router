@@ -398,9 +398,9 @@ def test_assemble_routes_does_not_mutate_base() -> None:
     assert base == before
 
 
-@pytest.mark.parametrize("effort", ["low", "medium", "high", "max"])
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
 def test_tier_config_accepts_routed_effort_levels(effort: str) -> None:
-    parsed = parse_tier_config({"model": "anthropic/claude-sonnet-4-6", "effort": effort})
+    parsed = parse_tier_config({"model": "anthropic/claude-sonnet-5", "effort": effort})
 
     assert parsed.effort == effort
 
@@ -409,8 +409,8 @@ def test_tier_config_effort_defaults_to_none_when_absent() -> None:
     assert parse_tier_config({"model": "anthropic/claude-sonnet-4-6"}).effort is None
 
 
-@pytest.mark.parametrize("bad_effort", ["xhigh", "highest", "", "HIGH", 3])
+@pytest.mark.parametrize("bad_effort", ["highest", "", "HIGH", 3])
 def test_tier_config_rejects_efforts_a_routed_model_cannot_serve(bad_effort: object) -> None:
-    # xhigh is Opus-only (Sonnet returns HTTP 400); the rest are simply invalid.
+    # xhigh is now a valid level (Sonnet 5 / Opus accept it); these remain invalid.
     with pytest.raises(ConfigSchemaError):
-        parse_tier_config({"model": "anthropic/claude-sonnet-4-6", "effort": bad_effort})
+        parse_tier_config({"model": "anthropic/claude-sonnet-5", "effort": bad_effort})
