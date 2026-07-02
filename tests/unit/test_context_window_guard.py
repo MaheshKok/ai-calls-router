@@ -103,13 +103,19 @@ def test_missing_max_tokens_uses_default_reserve() -> None:
     assert route_dispatch._context_overflow_attempt(decision, "s") is not None
 
 
-def _usage(input_tokens: int, output_tokens: int) -> dict[str, int]:
+def _usage(
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_read: int = 0,
+    cache_creation: int = 0,
+) -> dict[str, int]:
     """Build a passthrough usage dict as the callback receives it."""
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "cache_read_input_tokens": 0,
-        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_creation,
     }
 
 
@@ -118,6 +124,20 @@ def test_premium_callback_records_session_size() -> None:
     m = cast("metrics.Metrics", MagicMock())
     callback = orchestrator._premium_usage_callback(m=m, request_id="r", session="s")
     callback(200, _usage(187712, 0), 1.0)
+    assert context_budget.would_overflow("s", context_window=200000, output_reserve=8192) is True
+
+
+def test_premium_callback_counts_cache_tokens_in_session_size() -> None:
+    """A cache-heavy passthrough is sized by input + cache buckets + output.
+
+    The tiny uncached suffix (input 200, output 0) alone would leave the session
+    routable; the 190K cached prefix in the two cache buckets is what pushes it
+    over the ceiling. Without the cache buckets the guard would never trip.
+    """
+    m = cast("metrics.Metrics", MagicMock())
+    callback = orchestrator._premium_usage_callback(m=m, request_id="r", session="s")
+    callback(200, _usage(200, 0, cache_read=185000, cache_creation=2600), 1.0)
+    # 200 + 185000 + 2600 + 0 = 187800 >= ceiling 187712 -> trips.
     assert context_budget.would_overflow("s", context_window=200000, output_reserve=8192) is True
 
 

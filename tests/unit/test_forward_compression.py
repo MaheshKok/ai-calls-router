@@ -295,6 +295,38 @@ def test_anthropic_non_shrinking_block_caches_negative_result(
     assert calls == 1  # second turn served the cached negative, never recompressed
 
 
+def test_block_cache_evicts_only_least_recently_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At the cap the LRU drops the oldest entry, not the whole cache.
+
+    Derived from the LRU contract: with a cap of 2, inserting a third key must
+    evict exactly one -- the least-recently-used -- and keep the other two. A
+    clear-all eviction (the old behaviour) would leave only the newest key.
+    """
+    monkeypatch.setattr(forward_compression, "_ANTHROPIC_BLOCK_CACHE_MAX", 2)
+    cache = forward_compression._ANTHROPIC_BLOCK_CACHE
+
+    forward_compression._cache_anthropic_block("a", "A")
+    forward_compression._cache_anthropic_block("b", "B")
+    forward_compression._cache_anthropic_block("c", "C")  # over cap -> evict oldest ("a")
+
+    assert "a" not in cache
+    assert list(cache.items()) == [("b", "B"), ("c", "C")]
+
+
+def test_block_cache_write_refreshes_recency(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-writing an existing key moves it to most-recent so the other is evicted next."""
+    monkeypatch.setattr(forward_compression, "_ANTHROPIC_BLOCK_CACHE_MAX", 2)
+    cache = forward_compression._ANTHROPIC_BLOCK_CACHE
+
+    forward_compression._cache_anthropic_block("a", "A")
+    forward_compression._cache_anthropic_block("b", "B")
+    forward_compression._cache_anthropic_block("a", "A2")  # refreshes "a"; "b" now oldest
+    forward_compression._cache_anthropic_block("c", "C")  # evicts "b", not "a"
+
+    assert "b" not in cache
+    assert list(cache.items()) == [("a", "A2"), ("c", "C")]
+
+
 def test_anthropic_mixed_content_tool_result_is_left_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

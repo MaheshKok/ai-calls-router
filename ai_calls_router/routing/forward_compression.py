@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections import OrderedDict
 from typing import TYPE_CHECKING, cast
 
 from ai_calls_router.accounting import shrink_stats
@@ -38,8 +39,9 @@ _ANTHROPIC_BLOCK_COMPRESSOR_VERSION = "anthropic-block-v1"
 _ANTHROPIC_BLOCK_CACHE_MAX = 4096
 # Maps a block cache key to its compressed text, or None when the block does not
 # shrink. Caching the negative result stops a repeated non-shrinking tool_result
-# from being recompressed every turn.
-_ANTHROPIC_BLOCK_CACHE: dict[str, str | None] = {}
+# from being recompressed every turn. LRU-ordered (like context_budget): recency
+# refreshed on read/write, oldest evicted at the cap so hot blocks stay warm.
+_ANTHROPIC_BLOCK_CACHE: OrderedDict[str, str | None] = OrderedDict()
 _ANTHROPIC_AUTO_CACHE_CONTROL: JsonObject = {"type": "ephemeral"}
 
 
@@ -196,10 +198,12 @@ def _compressed_block_cache_key(
 
 
 def _cache_anthropic_block(key: str, value: str | None) -> None:
-    # ponytail: process-local clear-all eviction; add LRU only if this grows in prod.
-    if len(_ANTHROPIC_BLOCK_CACHE) >= _ANTHROPIC_BLOCK_CACHE_MAX:
-        _ANTHROPIC_BLOCK_CACHE.clear()
+    # LRU: write refreshes recency; evict only the least-recently-used entry at
+    # the cap so a live session's hot blocks survive instead of a clear-all wipe.
     _ANTHROPIC_BLOCK_CACHE[key] = value
+    _ANTHROPIC_BLOCK_CACHE.move_to_end(key)
+    while len(_ANTHROPIC_BLOCK_CACHE) > _ANTHROPIC_BLOCK_CACHE_MAX:
+        _ANTHROPIC_BLOCK_CACHE.popitem(last=False)
 
 
 def _synthetic_tool_messages(*, call_id: str, tool_name: str, content: str) -> JsonArray:
@@ -249,6 +253,7 @@ def _compress_anthropic_tool_result_block(
         compressor_version=compressor_version,
     )
     if key in _ANTHROPIC_BLOCK_CACHE:
+        _ANTHROPIC_BLOCK_CACHE.move_to_end(key)
         return _ANTHROPIC_BLOCK_CACHE[key]
 
     original_text = _flatten_anthropic_tool_result_content(original_content)
@@ -390,11 +395,15 @@ def compress_anthropic(
 ) -> tuple[JsonObject, ShrinkStats]:
     """Compress the tool_result text of an Anthropic Messages body.
 
-    Anthropic ``tool_result`` blocks are protected by headroom's gates, so the
-    body is converted to OpenAI messages (which preserve ``tool_use_id`` as
-    ``tool_call_id``), compressed, and the shrunk tool text is written back into
-    the original blocks by id. Only tool_result content changes; assistant and
-    user text are left verbatim.
+    Each ``tool_result`` block is compressed independently, not via a whole-body
+    OpenAI conversion. For one block, ``_compress_anthropic_tool_result_block``
+    wraps its content in a synthetic assistant-call + tool-output message pair
+    (so headroom sees the tool name and applies its exclusion gates), runs
+    headroom, and writes the shrunk text back into that block by ``tool_use_id``.
+    Results -- including no-op and non-shrinking outcomes -- are memoized in a
+    content-addressed LRU cache keyed by ``(tool_name, tool_use_id, content,
+    compressor_version)``, so a repeated block is never recompressed. Only
+    tool_result content changes; assistant and user text are left verbatim.
 
     Args:
         body: Anthropic Messages request body (never mutated).
