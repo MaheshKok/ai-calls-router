@@ -53,17 +53,43 @@ class TierConfig(_SchemaModel):
     key_env: str | None = Field(default=None, min_length=1)
     auth: TierAuthConfig | None = None
     max_tokens: int | None = Field(default=None, gt=0)
-    # Optional reasoning level forced on this tier's routed turns. Restricted to
-    # the levels a routed Anthropic model accepts; "xhigh" is excluded because
-    # only premium Opus accepts it (Sonnet returns HTTP 400). Premium passthrough
-    # is never routed and keeps its own level, set in the client, independently.
-    effort: Literal["low", "medium", "high", "max"] | None = None
+    # Optional reasoning level forced on this tier's routed turns, one of the five
+    # Anthropic levels. "xhigh" is accepted by Sonnet 5 and Opus but rejected by
+    # older routed models (e.g. Sonnet 4.6, HTTP 400); pair it with
+    # supports_xhigh_effort on tiers that name an xhigh-capable model. Premium
+    # passthrough is never routed and keeps its own level, set in the client.
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    # Whether this tier's routed model accepts effort="xhigh". Default False. Set
+    # True for xhigh-capable models (Sonnet 5, Opus) so a client-sent xhigh passes
+    # through instead of being downgraded to high. A configured "effort" above
+    # wins regardless; this only governs the safety downgrade of a client level.
+    supports_xhigh_effort: bool = False
     # Opt this tier's routed turns into headroom's lossy ML plain-text compressor
     # (Kompress). Off by default: the lossless content compressors always run, so
     # installing the ML extra never changes behaviour until a tier sets this True.
     # Leave False for tiers serving coding agents where dropping prose tokens from
     # tool output could corrupt context.
     text_ml_compression: bool = False
+    # Whether this tier's routed model accepts Anthropic's adaptive thinking.
+    # Default True. Set False for the Claude 4.5 family (e.g. claude-haiku-4-5):
+    # its subscription Messages endpoint returns HTTP 400 ("adaptive thinking is
+    # not supported on this model") for both a top-level thinking={type:adaptive}
+    # request and a non-empty output_config.effort (which it treats as adaptive),
+    # failing the routed turn open to premium. When False, prepare_routed_body
+    # disables the top-level adaptive thinking and strips effort before the POST.
+    # No model registry carries this endpoint-specific fact (litellm's
+    # supports_reasoning is True for Haiku), so the tier owns it. 4.6+ models
+    # accept adaptive thinking and keep this True.
+    supports_adaptive_thinking: bool = True
+    # Total token context window (input+output) of this tier's routed model,
+    # e.g. 200000 for Sonnet 5 / Haiku 4.5. When set, the router uses the prior
+    # turn's observed usage to skip routing a turn projected to overflow the
+    # window -- which would 400 ("prompt is too long") and fail open to premium.
+    # Omit to disable the guard; routing then always attempts and relies on
+    # fail-open. Premium (Opus, ~1M) is never routed, so it needs no window here.
+    # gt=0 (like max_tokens): a non-positive window is a config error, not a
+    # silent disable -- only an unset value disables the guard.
+    context_window: int | None = Field(default=None, gt=0)
 
 
 class ServerConfig(_SchemaModel):
@@ -80,6 +106,7 @@ class SettingsConfig(_SchemaModel):
     env_file: str | None = Field(default=None, min_length=1)
     tier_precedence: list[str] | None = None
     compress_routed: bool | None = None
+    anthropic_prompt_cache: bool | None = None
     premium_tools: list[str] | None = None
 
 

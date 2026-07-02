@@ -228,12 +228,11 @@ function requestTime(ts) {
     hour: 'numeric', minute: '2-digit', second: '2-digit'
   });
 }
-function shrunkCell(x) {
+function savedCell(x) {
   const before = Number(x.shrink_chars_before || 0);
-  const after = Number(x.shrink_chars_after || 0);
+  const saved = Math.max(Number(x.shrink_chars_before || 0) - Number(x.shrink_chars_after || 0), 0);
+  const p = before > 0 ? saved / before * 100 : NaN;
   if (before <= 0) return '<span class="muted">--</span>';
-  const saved = Math.max(before - after, 0);
-  const p = saved / before * 100;
   return saved > 0 ? '<span class="good">' + pct(p) + '</span>' : '<span class="muted">' + pct(p) + '</span>';
 }
 function agentKey(agent) {
@@ -249,17 +248,9 @@ function rowTotalInput(x) {
   return Number(x.input_tokens || 0) + Number(x.cache_read_tokens || 0) + Number(x.cache_creation_tokens || 0);
 }
 
-function hasVisibleRequestData(x) {
-  return rowTotalInput(x) > 0;
-}
-
 function buildRecentRows(data) {
   const rows = data.last_requests || [];
-  // Skip rows whose total input is still 0: token usage is filled in by a
-  // later accounting pass, so a fresh row would otherwise read as a real
-  // zero-input request and confuse the viewer.
-  const scored = rows.filter(hasVisibleRequestData);
-  const recentRows = scored.slice(0, 20);
+  const recentRows = rows.slice(0, 20);
   const rowHtml = recentRows.length ? recentRows.map((x) => {
     const totalInput = rowTotalInput(x);
     const cacheMiss = Math.max(totalInput - Number(x.cache_read_tokens || 0), 0);
@@ -271,14 +262,14 @@ function buildRecentRows(data) {
       '<td>' + num(totalInput) + '</td>' +
       '<td>' + num(cacheMiss) + '</td>' +
       '<td>' + num(x.output_tokens || 0) + '</td>' +
-      '<td>' + shrunkCell(x) + '</td>' +
+      '<td>' + savedCell(x) + '</td>' +
       '<td>' + num(x.duration_ms) + '</td>' +
       '<td class="truncate muted">' + esc(agentKey(x.agent) || '--') + '</td>' +
       '</tr>'
     );
   }).join('') : '<tr><td colspan="9" class="empty">no requests yet</td></tr>';
   $('rows').innerHTML = rowHtml;
-  return { shown: recentRows.length, total: scored.length };
+  return { shown: recentRows.length, total: rows.length };
 }
 
 function buildModelRows(data) {

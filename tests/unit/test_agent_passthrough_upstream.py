@@ -146,6 +146,28 @@ def test_passthrough_preserves_request_without_long_context(
     assert request.headers["anthropic-beta"] == "oauth-2025-04-20"
 
 
+def test_passthrough_adds_prompt_cache_when_enabled(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream: Upstream,
+) -> None:
+    monkeypatch.setattr(server_mod.bootstrap, "ensure_provider_configs", lambda: [])
+    with make_client(
+        config_yaml=CONFIG_YAML.replace(
+            "settings:\n  tier_precedence: [premium, fast]",
+            "settings:\n  tier_precedence: [premium, fast]\n  anthropic_prompt_cache: true",
+        ),
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        upstream=upstream,
+    ) as cache_client:
+        cache_client.post("/v1/messages", json=_messages_opener())
+
+    sent = json.loads(upstream.requests[0].content)
+    assert sent["cache_control"] == {"type": "ephemeral"}
+
+
 def test_trailing_slash_upstream_is_normalized(*, client: TestClient, upstream: Upstream) -> None:
     client.post("/v1/chat/completions", json=_chat_opener())
     assert upstream.requests[0].url.host == "hermes.internal.example"

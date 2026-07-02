@@ -220,6 +220,11 @@ def test_dashboard_shows_date_time_column(client: TestClient) -> None:
     assert response.status_code == 200
     assert "<th>date/time</th>" in response.text
     assert "function requestTime(ts)" in response.text
+    assert "function savedCell(x)" in response.text
+    assert "x.shrink_chars_before" in response.text
+    assert "saved / before * 100" in response.text
+    assert "rows.filter" not in response.text
+    assert "const recentRows = rows.slice(0, 20);" in response.text
 
 
 class TestMessagesPassthrough:
