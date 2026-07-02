@@ -243,7 +243,15 @@ async def _serve_premium_passthrough(
     # turns keep the upstream prompt cache intact.
     upstream = routing.agent_upstream(routes, group)
     forward_bytes, shrink = forward_compression.compress_forward_body(
-        ctx.body_bytes, request_path=ctx.path, upstream=upstream
+        ctx.body_bytes,
+        request_path=ctx.path,
+        upstream=upstream,
+        # ponytail: experiment lever A — turn on headroom's lossy text_ml
+        # (Kompress) so prose/log tool outputs that were passing through as
+        # no-ops also shrink on the premium path. Deterministic per block, so
+        # cache-safe; flip off by dropping this kwarg. Only prose/log blocks are
+        # affected — code/JSON already compress losslessly.
+        enable_text_ml=True,
     )
     m.add_shrink(chars_before=shrink.chars_before, chars_after=shrink.chars_after)
     m.record_request(
