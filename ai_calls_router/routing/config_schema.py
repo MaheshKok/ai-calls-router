@@ -90,6 +90,17 @@ class TierConfig(_SchemaModel):
     # gt=0 (like max_tokens): a non-positive window is a config error, not a
     # silent disable -- only an unset value disables the guard.
     context_window: int | None = Field(default=None, gt=0)
+    # Whether this tier's routed model may keep Claude Code's context-1m
+    # long-context beta (Anthropic 1M window). Default False: the routed path
+    # strips context-1m so a cheap turn stays within the standard 200K window,
+    # which subscriptions without long-context entitlement require (they reject
+    # the opt-in as a credit request, HTTP 429, failing the turn open to premium).
+    # Set True ONLY for a subscription entitled to the routed model's 1M context
+    # (e.g. Sonnet 5 on a plan that includes long context); pair it with a
+    # context_window raised to the 1M ceiling so the overflow guard matches. If a
+    # small routed turn starts 429ing after enabling this, the plan lacks the
+    # entitlement -- flip it back False (config hot-reloads, no restart).
+    supports_long_context: bool = False
 
 
 class ServerConfig(_SchemaModel):
@@ -107,6 +118,16 @@ class SettingsConfig(_SchemaModel):
     tier_precedence: list[str] | None = None
     compress_routed: bool | None = None
     premium_tools: list[str] | None = None
+    # Whether premium (Opus) passthrough keeps Claude Code's context-1m
+    # long-context opt-in. Default None/False: passthrough strips the beta and
+    # the [1m] model suffix so an OAuth subscription without long-context
+    # entitlement does not 429 on a large decision turn. Passthrough is the final
+    # fallback -- there is no fail-open beneath it -- so an unentitled plan that
+    # keeps the opt-in hard-fails those turns. Set True ONLY for a plan entitled
+    # to Opus's 1M window (e.g. when raising Claude Code's auto-compact above the
+    # standard 200K so >200K decision turns must survive passthrough). Config
+    # hot-reloads: flip back to false if large passthrough turns start 429ing.
+    long_context_passthrough: bool | None = None
 
 
 class AgentConfig(_SchemaModel):

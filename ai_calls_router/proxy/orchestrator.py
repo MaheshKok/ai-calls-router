@@ -201,6 +201,27 @@ def _premium_usage_callback(
     return _record
 
 
+def _keep_long_context_passthrough(routes: JsonObject) -> bool:
+    """Return whether premium passthrough keeps Claude Code's 1M long-context opt-in.
+
+    Off by default: the passthrough path strips ``anthropic-beta: context-1m`` and
+    the ``[1m]`` model suffix so an OAuth subscription without long-context
+    entitlement does not 429 on a large decision turn. Passthrough is the final
+    fallback, so an unentitled plan that keeps the opt-in hard-fails those turns.
+    Enable only via ``settings.long_context_passthrough: true`` for an entitled
+    plan (e.g. when Claude Code auto-compacts above the standard 200K).
+
+    Args:
+        routes: Parsed config.yaml mapping.
+
+    Returns:
+        True only when the setting is the literal boolean ``true``; any missing or
+        malformed value keeps the safe stripping behavior.
+    """
+    settings = routes.get("settings")
+    return isinstance(settings, dict) and settings.get("long_context_passthrough") is True
+
+
 async def _serve_premium_passthrough(
     ctx: RequestContext,
     *,
@@ -229,8 +250,14 @@ async def _serve_premium_passthrough(
     )
     # Drop the 1M long-context opt-in (anthropic-beta: context-1m + opus[1m] model
     # suffix) before relaying: the routed path strips it, but an OAuth subscription
-    # without long-context credits 429s a passthrough turn that opts in.
-    sanitized = anthropic_oauth.strip_long_context_passthrough(ctx.body_bytes, ctx.headers)
+    # without long-context credits 429s a passthrough turn that opts in. A plan
+    # entitled to the premium 1M window keeps it via settings.long_context_passthrough
+    # (required once auto-compact lets >200K decision turns reach passthrough).
+    sanitized = (
+        None
+        if _keep_long_context_passthrough(routes)
+        else anthropic_oauth.strip_long_context_passthrough(ctx.body_bytes, ctx.headers)
+    )
     if sanitized is not None:
         long_context_body, long_context_headers = sanitized
         logger.warning(
