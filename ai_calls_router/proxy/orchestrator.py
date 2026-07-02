@@ -171,7 +171,16 @@ def _premium_usage_callback(
         cache_creation = usage.get("cache_creation_input_tokens", 0)
         # Teach the context-window guard the real premium size so the next turn
         # of an overflowing session skips routing instead of failing open again.
-        context_budget.record_context_size(session, input_tokens, output_tokens)
+        # Cache buckets are part of the prompt: a cache-heavy premium turn reports
+        # a tiny input_tokens, so omitting them undercounts the session by its
+        # cached prefix and the guard never trips.
+        context_budget.record_context_size(
+            session,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens=cache_read,
+            cache_creation_tokens=cache_creation,
+        )
         if input_tokens or output_tokens or cache_read or cache_creation:
             m.add_premium_tokens(
                 input_tokens=input_tokens,
@@ -335,7 +344,13 @@ async def handle(ctx: RequestContext, *, routes_loader: RoutesLoader) -> Respons
     )
     if attempt.response is not None:
         m.incr_routed()
-        context_budget.record_context_size(session, attempt.input_tokens, attempt.output_tokens)
+        context_budget.record_context_size(
+            session,
+            attempt.input_tokens,
+            attempt.output_tokens,
+            cache_read_tokens=attempt.cache_read_tokens,
+            cache_creation_tokens=attempt.cache_creation_tokens,
+        )
         logger.info("outcome=routed %s agent=%s tier=%s", ctx.path, agent, attempt.tier)
         return attempt.response
 

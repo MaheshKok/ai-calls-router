@@ -87,7 +87,9 @@ class TierConfig(_SchemaModel):
     # window -- which would 400 ("prompt is too long") and fail open to premium.
     # Omit to disable the guard; routing then always attempts and relies on
     # fail-open. Premium (Opus, ~1M) is never routed, so it needs no window here.
-    context_window: int | None = None
+    # gt=0 (like max_tokens): a non-positive window is a config error, not a
+    # silent disable -- only an unset value disables the guard.
+    context_window: int | None = Field(default=None, gt=0)
 
 
 class ServerConfig(_SchemaModel):
