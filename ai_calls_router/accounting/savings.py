@@ -178,6 +178,7 @@ def record_routing_savings(
     shrink_path: str = "",
     shrink_chars_before: int = 0,
     shrink_chars_after: int = 0,
+    tool_output_type: str = "",
 ) -> None:
     """Append one savings entry comparing routed cost against premium cost.
 
@@ -210,6 +211,8 @@ def record_routing_savings(
         shrink_path: Shrink pass that ran on this turn (``reduce``/``compress``).
         shrink_chars_before: tool_result characters before the shrink pass.
         shrink_chars_after: tool_result characters after the shrink pass.
+        tool_output_type: Comma-joined content-type labels from headroom's own
+            routing markers; metadata for the dashboard, never a cost input.
     """
     if not premium_model or premium_model == routed_model:
         return
@@ -261,6 +264,7 @@ def record_routing_savings(
             "shrink_path": shrink_path,
             "shrink_chars_before": max(int(shrink_chars_before), 0),
             "shrink_chars_after": max(int(shrink_chars_after), 0),
+            "tool_output_type": tool_output_type,
         }
         ledger = ledger if ledger is not None else config.ledger_path()
         with _ledger_lock:

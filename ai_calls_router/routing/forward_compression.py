@@ -52,11 +52,12 @@ def _model_of(body: JsonObject) -> str:
     return model if isinstance(model, str) else ""
 
 
-def _stats(before: int, after: int) -> ShrinkStats:
+def _stats(before: int, after: int, content_types: tuple[str, ...] = ()) -> ShrinkStats:
     """Build a ShrinkStats, labelling a real reduction as a compress pass."""
-    if after < before:
-        return ShrinkStats(path="compress", chars_before=before, chars_after=after)
-    return ShrinkStats(path="none", chars_before=before, chars_after=after)
+    path = "compress" if after < before else "none"
+    return ShrinkStats(
+        path=path, chars_before=before, chars_after=after, content_types=content_types
+    )
 
 
 def _flatten_text(value: JsonValue) -> str:
@@ -122,14 +123,15 @@ def compress_openai_chat(
     messages = body.get("messages")
     if not isinstance(messages, list):
         return body, _NOOP
-    compressed, _ = compress_litellm_messages(
+    compressed, inner = compress_litellm_messages(
         cast("JsonArray", messages), model=_model_of(body), enable_text_ml=enable_text_ml
     )
     before = _openai_tool_chars(cast("JsonArray", messages))
     after = _openai_tool_chars(compressed)
+    types = inner.content_types
     if after >= before:
-        return body, _stats(before, after)
-    return {**body, "messages": compressed}, _stats(before, after)
+        return body, _stats(before, after, types)
+    return {**body, "messages": compressed}, _stats(before, after, types)
 
 
 def _apply_anthropic_tool_results(messages: list[JsonObject], by_id: dict[str, str]) -> JsonArray:
@@ -186,17 +188,20 @@ def compress_anthropic(
     if not isinstance(messages, list):
         return body, _NOOP
     converted = convert_messages_for_litellm(cast("list[JsonObject]", messages))
-    compressed, _ = compress_litellm_messages(
+    compressed, inner = compress_litellm_messages(
         cast("JsonArray", converted), model=_model_of(body), enable_text_ml=enable_text_ml
     )
+    types = inner.content_types
     by_id = _compressed_tool_content_by_id(compressed)
     if not by_id:
-        return body, _NOOP
+        return body, ShrinkStats("none", 0, 0, types)
     new_messages = _apply_anthropic_tool_results(cast("list[JsonObject]", messages), by_id)
     new_body = {**body, "messages": new_messages}
-    stats = shrink_stats.compute_shrink(path="compress", before=body, after=new_body)
+    stats = shrink_stats.compute_shrink(
+        path="compress", before=body, after=new_body, content_types=types
+    )
     if stats.chars_saved <= 0:
-        return body, ShrinkStats("none", stats.chars_before, stats.chars_after)
+        return body, ShrinkStats("none", stats.chars_before, stats.chars_after, types)
     return new_body, stats
 
 
@@ -289,17 +294,20 @@ def compress_responses(
     if not isinstance(input_items, list):
         return body, _NOOP
     converted = _responses_input_to_openai(cast("list[JsonValue]", input_items))
-    compressed, _ = compress_litellm_messages(
+    compressed, inner = compress_litellm_messages(
         cast("JsonArray", converted), model=_model_of(body), enable_text_ml=enable_text_ml
     )
+    types = inner.content_types
     by_id = _compressed_tool_content_by_id(compressed)
     if not by_id:
-        return body, _NOOP
+        return body, ShrinkStats("none", 0, 0, types)
     new_input = _apply_responses_outputs(cast("list[JsonValue]", input_items), by_id)
     new_body = {**body, "input": new_input}
-    stats = shrink_stats.compute_shrink(path="compress", before=body, after=new_body)
+    stats = shrink_stats.compute_shrink(
+        path="compress", before=body, after=new_body, content_types=types
+    )
     if stats.chars_saved <= 0:
-        return body, ShrinkStats("none", stats.chars_before, stats.chars_after)
+        return body, ShrinkStats("none", stats.chars_before, stats.chars_after, types)
     return new_body, stats
 
 

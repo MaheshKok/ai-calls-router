@@ -188,6 +188,42 @@ def test_shrink_stats_is_frozen() -> None:
         stats.chars_before = 99  # type: ignore[misc]
 
 
+# ── ShrinkStats.content_types / content_type_label ──────────────────────────
+
+
+def test_content_types_default_is_empty_tuple() -> None:
+    # Every legacy constructor omits content_types; it must default to ().
+    assert ShrinkStats(path="none", chars_before=0, chars_after=0).content_types == ()
+
+
+def test_content_type_label_empty_when_no_content_types() -> None:
+    assert ShrinkStats(path="none", chars_before=0, chars_after=0).content_type_label == ""
+
+
+def test_content_type_label_joins_multiple_with_comma_space() -> None:
+    stats = ShrinkStats(
+        path="compress",
+        chars_before=10,
+        chars_after=5,
+        content_types=("excluded", "smart_crusher"),
+    )
+    assert stats.content_type_label == "excluded, smart_crusher"
+
+
+def test_content_type_label_single_type_has_no_separator() -> None:
+    stats = ShrinkStats(path="compress", chars_before=10, chars_after=5, content_types=("noop",))
+    assert stats.content_type_label == "noop"
+
+
+def test_compute_shrink_threads_content_types_onto_stat() -> None:
+    body = {"messages": [_tool_result_msg("aaaaaaaaaa")]}
+    stats = compute_shrink(
+        path="compress", before=body, after=body, content_types=("smart_crusher",)
+    )
+    assert stats.content_types == ("smart_crusher",)
+    assert stats.content_type_label == "smart_crusher"
+
+
 # ── compute_shrink ──────────────────────────────────────────────────────────
 
 

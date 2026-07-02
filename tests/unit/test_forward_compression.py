@@ -244,6 +244,124 @@ def test_openai_chat_replaces_messages_when_shrunk(monkeypatch: pytest.MonkeyPat
     assert stats.chars_saved > 0
 
 
+# ── content_types propagation from the inner compressor stat ────────────────
+
+
+def _typed_compressor(content_types: tuple[str, ...], *, shrink: bool) -> object:
+    """Build a stub compressor that reports headroom's content_types.
+
+    Args:
+        content_types: The labels the inner ShrinkStats should carry.
+        shrink: When True, collapse each tool content to ``_SHRUNK`` (a real
+            reduction); when False, return the messages unchanged so the outer
+            compressor takes its no-op branch while classification is still set.
+    """
+
+    def _fn(
+        messages: JsonArray, *, model: str, model_limit: int = 0, enable_text_ml: bool = False
+    ) -> tuple[JsonArray, ShrinkStats]:
+        if not shrink:
+            return messages, ShrinkStats("none", 0, 0, content_types)
+        out: list[JsonObject] = []
+        for msg in messages:
+            if (
+                isinstance(msg, dict)
+                and msg.get("role") == "tool"
+                and isinstance(msg.get("content"), str)
+            ):
+                out.append({**msg, "content": _SHRUNK})
+            else:
+                out.append(msg)  # type: ignore[arg-type]
+        return out, ShrinkStats("compress", 0, 0, content_types)
+
+    return _fn
+
+
+def test_openai_chat_propagates_content_types_on_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_compressor(monkeypatch, _typed_compressor(("smart_crusher",), shrink=True))
+    body: JsonObject = {
+        "model": "gpt-test",
+        "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "x" * 4000},
+        ],
+    }
+    _, stats = forward_compression.compress_openai_chat(body)
+    assert stats.path == "compress"
+    assert stats.content_types == ("smart_crusher",)
+
+
+def test_openai_chat_propagates_content_types_when_nothing_shrank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Even when headroom leaves the output verbatim (an excluded tool), the label
+    # it assigned must ride the no-op stat so the dashboard shows *why* saved is 0.
+    _patch_compressor(monkeypatch, _typed_compressor(("excluded",), shrink=False))
+    body: JsonObject = {
+        "model": "gpt-test",
+        "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "x" * 4000},
+        ],
+    }
+    new_body, stats = forward_compression.compress_openai_chat(body)
+    assert new_body is body
+    assert stats.path == "none"
+    assert stats.content_types == ("excluded",)
+
+
+def test_anthropic_propagates_content_types_on_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_compressor(monkeypatch, _typed_compressor(("smart_crusher",), shrink=True))
+    _, stats = forward_compression.compress_anthropic(_anthropic_body(("call_1", "x" * 4000)))
+    assert stats.chars_saved > 0
+    assert stats.content_types == ("smart_crusher",)
+
+
+def test_anthropic_all_excluded_reports_content_types_at_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # tool_result blocks exist (by_id is non-empty) but headroom shrank nothing:
+    # the returned stat is path="none" yet still carries the ("excluded",) label.
+    _patch_compressor(monkeypatch, _typed_compressor(("excluded",), shrink=False))
+    new_body, stats = forward_compression.compress_anthropic(
+        _anthropic_body(("call_1", "x" * 4000))
+    )
+    assert new_body is not None
+    assert stats.path == "none"
+    assert stats.chars_saved == 0
+    assert stats.content_types == ("excluded",)
+
+
+def test_responses_propagates_content_types_on_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_compressor(monkeypatch, _typed_compressor(("smart_crusher",), shrink=True))
+    _, stats = forward_compression.compress_responses(_responses_body(("call_1", "x" * 4000)))
+    assert stats.chars_saved > 0
+    assert stats.content_types == ("smart_crusher",)
+
+
+def test_responses_all_excluded_reports_content_types_at_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_compressor(monkeypatch, _typed_compressor(("excluded",), shrink=False))
+    new_body, stats = forward_compression.compress_responses(
+        _responses_body(("call_1", "x" * 4000))
+    )
+    assert new_body is not None
+    assert stats.path == "none"
+    assert stats.content_types == ("excluded",)
+
+
+def test_forward_body_surfaces_content_types_on_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
+    # End-to-end: the compress_forward_body wrapper hands the caller the label so
+    # the metrics writer can persist it, not just the per-wire helpers.
+    _patch_compressor(monkeypatch, _typed_compressor(("smart_crusher",), shrink=True))
+    raw = json.dumps(_anthropic_body(("call_1", "x" * 5000))).encode()
+    _, stats = forward_compression.compress_forward_body(
+        raw, request_path="/v1/messages", upstream="https://api.anthropic.com"
+    )
+    assert stats.content_types == ("smart_crusher",)
+
+
 # ── enable_text_ml flag forwarding ─────────────────────────────────────────
 
 

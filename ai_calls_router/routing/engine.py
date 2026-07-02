@@ -442,6 +442,7 @@ async def record_route_outcome(outcome: RouteOutcome) -> None:
         shrink_path=shrink.path,
         shrink_chars_before=shrink.chars_before,
         shrink_chars_after=shrink.chars_after,
+        tool_output_type=shrink.content_type_label,
     )
     mtr = metrics_mod.get_metrics()
     mtr.add_routed_tokens(
@@ -472,6 +473,7 @@ async def record_route_outcome(outcome: RouteOutcome) -> None:
         session_id=outcome.session_id,
         shrink_chars_before=shrink.chars_before,
         shrink_chars_after=shrink.chars_after,
+        tool_output_type=shrink.content_type_label,
         request_id=outcome.request_id,
     )
 

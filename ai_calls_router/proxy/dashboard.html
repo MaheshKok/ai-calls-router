@@ -205,9 +205,9 @@ td .muted, td.muted { color: var(--faint); }
     <div class="table-scroll">
       <table>
         <thead id="table-head">
-          <tr><th>date/time</th><th>model</th><th>tools</th><th>input</th><th>cache miss</th><th>output</th><th>saved</th><th>ms</th><th>agent</th></tr>
+          <tr><th>date/time</th><th>model</th><th>tools</th><th>type</th><th>input</th><th>cache miss</th><th>output</th><th>saved</th><th>ms</th><th>agent</th></tr>
         </thead>
-        <tbody id="rows"><tr><td colspan="9" class="empty">no requests yet</td></tr></tbody>
+        <tbody id="rows"><tr><td colspan="10" class="empty">no requests yet</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -268,6 +268,7 @@ function buildRecentRows(data) {
       '<td class="muted">' + requestTime(x.ts) + '</td>' +
       '<td class="truncate">' + esc(shortModel(x.model) || '--') + '</td>' +
       '<td class="truncate muted">' + esc((x.tool_names || []).join(', ') || '--') + '</td>' +
+      '<td class="truncate muted">' + esc(x.tool_output_type || '--') + '</td>' +
       '<td>' + num(totalInput) + '</td>' +
       '<td>' + num(cacheMiss) + '</td>' +
       '<td>' + num(x.output_tokens || 0) + '</td>' +
@@ -276,7 +277,7 @@ function buildRecentRows(data) {
       '<td class="truncate muted">' + esc(agentKey(x.agent) || '--') + '</td>' +
       '</tr>'
     );
-  }).join('') : '<tr><td colspan="9" class="empty">no requests yet</td></tr>';
+  }).join('') : '<tr><td colspan="10" class="empty">no requests yet</td></tr>';
   $('rows').innerHTML = rowHtml;
   return { shown: recentRows.length, total: scored.length };
 }

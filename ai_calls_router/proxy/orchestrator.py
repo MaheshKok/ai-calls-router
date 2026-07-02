@@ -256,6 +256,7 @@ async def _serve_premium_passthrough(
         request_id=logging_setup.current_request_id(),
         shrink_chars_before=shrink.chars_before,
         shrink_chars_after=shrink.chars_after,
+        tool_output_type=shrink.content_type_label,
     )
     return await serve_passthrough(
         ctx,
