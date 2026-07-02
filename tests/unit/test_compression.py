@@ -61,21 +61,28 @@ def _shrink_tool_content(messages: list[dict[str, object]]) -> list[dict[str, ob
 class _FakeCompressor:
     """Records calls and returns a CompressResult-shaped object."""
 
-    def __init__(self, transform: object) -> None:
+    def __init__(self, transform: object, transforms_applied: object = None) -> None:
         """Store the transform applied to the messages on each call.
 
         Args:
             transform: Callable mapping the input messages to compressed output.
+            transforms_applied: Optional value for the result's
+                ``transforms_applied`` attribute; when None the attribute is
+                omitted entirely so the defensive getattr path is exercised.
         """
         self.calls: list[dict[str, object]] = []
         self._transform = transform
+        self._transforms_applied = transforms_applied
 
     def __call__(self, messages: list[dict[str, object]], **kwargs: object) -> object:
         """Record kwargs and return an object exposing ``.messages``."""
         self.calls.append({"messages": messages, **kwargs})
         from types import SimpleNamespace
 
-        return SimpleNamespace(messages=self._transform(messages))
+        result = SimpleNamespace(messages=self._transform(messages))
+        if self._transforms_applied is not None:
+            result.transforms_applied = self._transforms_applied
+        return result
 
 
 @pytest.fixture(autouse=True)
@@ -284,6 +291,131 @@ class TestTextMlToggle:
         assert call["model"] == "gpt-5.5"
         assert call["model_limit"] == 999
         assert call["optimize"] is True
+
+
+class TestSummarizeContentTypes:
+    """summarize_content_types reduces headroom's router:* markers to a label tuple.
+
+    Contract (from the docstring): strip the ``router:`` prefix; for a nested
+    ``tool_result``/``text_block`` head the label is the SECOND segment, otherwise
+    the FIRST; dedupe preserving first-seen order. Expected tuples are derived by
+    hand from that rule, never by echoing the implementation.
+    """
+
+    def test_single_strategy_marker_maps_to_its_label(self) -> None:
+        assert compression.summarize_content_types(["router:smart_crusher:0.34"]) == (
+            "smart_crusher",
+        )
+
+    def test_duplicate_markers_are_deduped(self) -> None:
+        assert compression.summarize_content_types(
+            ["router:excluded:tool", "router:excluded:tool"]
+        ) == ("excluded",)
+
+    def test_nested_heads_take_the_second_segment(self) -> None:
+        # tool_result/text_block are containers; the real strategy is the child.
+        assert compression.summarize_content_types(
+            ["router:tool_result:smart_crusher", "router:text_block:kompress"]
+        ) == ("smart_crusher", "kompress")
+
+    def test_first_seen_order_is_preserved(self) -> None:
+        assert compression.summarize_content_types(
+            ["router:protected:user_message", "router:smart_crusher:0.34"]
+        ) == ("protected", "smart_crusher")
+
+    def test_bare_marker_without_strategy_maps_to_its_head(self) -> None:
+        assert compression.summarize_content_types(["router:noop"]) == ("noop",)
+
+    def test_empty_marker_list_yields_empty_tuple(self) -> None:
+        assert compression.summarize_content_types([]) == ()
+
+    def test_nested_head_without_child_falls_back_to_head(self) -> None:
+        # A malformed nested marker missing its strategy segment must not IndexError;
+        # it degrades to the head label rather than crashing the serve path.
+        assert compression.summarize_content_types(["router:tool_result"]) == ("tool_result",)
+
+    def test_mixed_nested_and_flat_dedupe_across_forms(self) -> None:
+        # tool_result:smart_crusher and a bare smart_crusher collapse to one label.
+        assert compression.summarize_content_types(
+            ["router:tool_result:smart_crusher", "router:smart_crusher:0.5"]
+        ) == ("smart_crusher",)
+
+
+class TestContentTypesPropagation:
+    """compress_litellm_messages surfaces headroom's markers on the returned stat.
+
+    The wrapper reads ``result.transforms_applied`` (router:* markers) and reduces
+    them via summarize_content_types onto ShrinkStats.content_types. Fail-open and
+    header-absent paths must leave content_types empty.
+    """
+
+    def test_success_carries_reduced_markers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _FakeCompressor(
+            _shrink_tool_content,
+            transforms_applied=[
+                "router:protected:user_message",
+                "router:smart_crusher:0.34",
+                "not-a-router-marker",
+            ],
+        )
+        monkeypatch.setattr(compression, "_load_compressor", lambda: fake)
+
+        _, stats = compression.compress_litellm_messages(
+            _openai_messages("x" * 400), model="gpt-5.5"
+        )
+
+        assert stats.content_types == ("protected", "smart_crusher")
+
+    def test_result_without_transforms_applied_yields_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The fake omits transforms_applied entirely (transforms_applied=None): the
+        # defensive getattr must degrade to no markers, not raise.
+        fake = _FakeCompressor(_shrink_tool_content)
+        monkeypatch.setattr(compression, "_load_compressor", lambda: fake)
+
+        _, stats = compression.compress_litellm_messages(
+            _openai_messages("x" * 400), model="gpt-5.5"
+        )
+
+        assert stats.content_types == ()
+
+    def test_absent_headroom_yields_empty_content_types(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(compression, "_load_compressor", lambda: None)
+
+        _, stats = compression.compress_litellm_messages(
+            _openai_messages("z" * 250), model="gpt-5.5"
+        )
+
+        assert stats.content_types == ()
+
+    def test_raising_compressor_yields_empty_content_types(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(messages: list[dict[str, object]], **_: object) -> object:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(compression, "_load_compressor", lambda: _boom)
+
+        _, stats = compression.compress_litellm_messages(
+            _openai_messages("w" * 200), model="gpt-5.5"
+        )
+
+        assert stats.content_types == ()
+
+    def test_non_list_transforms_applied_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A build that exposes transforms_applied as a non-list (e.g. a string) must
+        # be treated as no markers, not iterated character-by-character.
+        fake = _FakeCompressor(_shrink_tool_content, transforms_applied="router:smart_crusher:0.3")
+        monkeypatch.setattr(compression, "_load_compressor", lambda: fake)
+
+        _, stats = compression.compress_litellm_messages(
+            _openai_messages("x" * 400), model="gpt-5.5"
+        )
+
+        assert stats.content_types == ()
 
 
 class TestLoadCompressor:

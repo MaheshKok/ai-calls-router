@@ -13,16 +13,19 @@ the optimizer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+from collections import OrderedDict
 from typing import TYPE_CHECKING, cast
 
-from ai_calls_router._lib.conversion import convert_messages_for_litellm
 from ai_calls_router.accounting import shrink_stats
 from ai_calls_router.accounting.shrink_stats import ShrinkStats
 from ai_calls_router.routing.compression import compress_litellm_messages
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from ai_calls_router._lib.types import JsonArray, JsonObject, JsonValue
 
 logger = logging.getLogger("acr.compression")
@@ -32,6 +35,19 @@ logger = logging.getLogger("acr.compression")
 _DEEPSEEK_MARKER = "deepseek"
 
 _NOOP = ShrinkStats(path="none", chars_before=0, chars_after=0)
+# v2: cache value shape changed from ``str | None`` to ``(shrunk, content_types)``
+# so headroom's per-block classification rides the cache. The version is part of
+# the cache key, so any stale v1 entry is simply never hit.
+_ANTHROPIC_BLOCK_COMPRESSOR_VERSION = "anthropic-block-v2"
+_ANTHROPIC_BLOCK_CACHE_MAX = 4096
+# Maps a block cache key to ``(compressed-text-or-None, content_types)``. A None
+# text caches the negative result so a repeated non-shrinking tool_result is not
+# recompressed every turn; the content_types ride alongside so a cache hit still
+# reports headroom's classification. LRU-ordered (like context_budget): recency
+# refreshed on read/write, oldest evicted at the cap so hot blocks stay warm.
+_BlockCacheValue = tuple["str | None", tuple[str, ...]]
+_ANTHROPIC_BLOCK_CACHE: OrderedDict[str, _BlockCacheValue] = OrderedDict()
+_ANTHROPIC_AUTO_CACHE_CONTROL: JsonObject = {"type": "ephemeral"}
 
 
 def _is_deepseek_upstream(upstream: str) -> bool:
@@ -52,11 +68,50 @@ def _model_of(body: JsonObject) -> str:
     return model if isinstance(model, str) else ""
 
 
-def _stats(before: int, after: int) -> ShrinkStats:
+def _stats(before: int, after: int, content_types: tuple[str, ...] = ()) -> ShrinkStats:
     """Build a ShrinkStats, labelling a real reduction as a compress pass."""
-    if after < before:
-        return ShrinkStats(path="compress", chars_before=before, chars_after=after)
-    return ShrinkStats(path="none", chars_before=before, chars_after=after)
+    path = "compress" if after < before else "none"
+    return ShrinkStats(
+        path=path, chars_before=before, chars_after=after, content_types=content_types
+    )
+
+
+def _blocks_have_cache_control(blocks: JsonValue) -> bool:
+    """Return whether any dict in a block list declares cache_control."""
+    return isinstance(blocks, list) and any(
+        isinstance(block, dict) and "cache_control" in block for block in blocks
+    )
+
+
+def _messages_have_cache_control(messages: JsonValue) -> bool:
+    """Return whether any message content block declares cache_control."""
+    if not isinstance(messages, list):
+        return False
+    return any(
+        _blocks_have_cache_control(msg.get("content")) for msg in messages if isinstance(msg, dict)
+    )
+
+
+def _has_anthropic_cache_control(body: JsonObject) -> bool:
+    """Return whether an Anthropic request already declares any cache policy."""
+    return (
+        "cache_control" in body
+        or _blocks_have_cache_control(body.get("tools"))
+        or _blocks_have_cache_control(body.get("system"))
+        or _messages_have_cache_control(body.get("messages"))
+    )
+
+
+def _anthropic_has_cacheable_content(body: JsonObject) -> bool:
+    """Return whether a Messages body has any cacheable prompt content."""
+    return any(body.get(key) for key in ("tools", "system", "messages"))
+
+
+def apply_anthropic_prompt_cache(body: JsonObject) -> tuple[JsonObject, bool]:
+    """Add Anthropic automatic prompt caching when safe and absent."""
+    if _has_anthropic_cache_control(body) or not _anthropic_has_cacheable_content(body):
+        return body, False
+    return {**body, "cache_control": dict(_ANTHROPIC_AUTO_CACHE_CONTROL)}, True
 
 
 def _flatten_text(value: JsonValue) -> str:
@@ -87,6 +142,153 @@ def _compressed_tool_content_by_id(messages: JsonArray) -> dict[str, str]:
         if isinstance(call_id, str) and isinstance(content, str):
             out[call_id] = content
     return out
+
+
+def _anthropic_tool_names_by_id(messages: list[JsonObject]) -> dict[str, str]:
+    """Map Anthropic tool_use ids to tool names for cache-key stability."""
+    names: dict[str, str] = {}
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            call_id = block.get("id")
+            name = block.get("name")
+            if isinstance(call_id, str) and isinstance(name, str):
+                names[call_id] = name
+    return names
+
+
+def _flatten_anthropic_tool_result_content(value: JsonValue) -> str | None:
+    """Flatten a pure-text Anthropic tool_result content into a string.
+
+    Returns None for a list that holds any non-text block (e.g. an image) so the
+    caller leaves the block untouched. The map-back replaces the whole block
+    content with a single string, which would silently drop non-text blocks if
+    we flattened a mixed list to text only.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        blocks = cast("JsonArray", value)
+        if blocks and all(
+            isinstance(block, dict) and block.get("type") == "text" for block in blocks
+        ):
+            return "\n".join(str(cast("JsonObject", block).get("text", "")) for block in blocks)
+        return None
+    return str(value)
+
+
+def _compressed_block_cache_key(
+    *,
+    tool_name: str,
+    tool_use_id: str,
+    original_block_content: JsonValue,
+    compressor_version: str,
+) -> str:
+    """Return the stable cache key for one Anthropic tool_result block."""
+    raw = json.dumps(
+        {
+            "tool_name": tool_name,
+            "tool_use_id": tool_use_id,
+            "original_block_content": original_block_content,
+            "compressor_version": compressor_version,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_anthropic_block(key: str, value: _BlockCacheValue) -> None:
+    # LRU: write refreshes recency; evict only the least-recently-used entry at
+    # the cap so a live session's hot blocks survive instead of a clear-all wipe.
+    _ANTHROPIC_BLOCK_CACHE[key] = value
+    _ANTHROPIC_BLOCK_CACHE.move_to_end(key)
+    while len(_ANTHROPIC_BLOCK_CACHE) > _ANTHROPIC_BLOCK_CACHE_MAX:
+        _ANTHROPIC_BLOCK_CACHE.popitem(last=False)
+
+
+def _synthetic_tool_messages(*, call_id: str, tool_name: str, content: str) -> JsonArray:
+    """Build the assistant-call + tool-output pair headroom needs to name the tool.
+
+    headroom keys its excluded-tool decision on the assistant ``tool_calls`` message
+    that names the tool; a lone tool message leaves the name map empty, so excluded
+    file tools (Read/Edit) would be compressed against ``DEFAULT_EXCLUDE_TOOLS``.
+    Pairing the synthetic tool output with its naming assistant message restores
+    the exclusion. The assistant message carries no content so it adds no tool text.
+    """
+    return cast(
+        "JsonArray",
+        [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": tool_name, "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": call_id, "content": content},
+        ],
+    )
+
+
+def _compress_anthropic_tool_result_block(
+    block: JsonObject,
+    *,
+    model: str,
+    tool_name: str,
+    compressor_version: str,
+    enable_text_ml: bool,
+) -> _BlockCacheValue:
+    """Compress one tool_result block as a pure function of its content key.
+
+    Returns a ``(shrunk-text-or-None, content_types)`` pair. The content_types
+    are headroom's own ``router:*`` classification for the block; they ride the
+    stat even when the block does not shrink, so the dashboard shows *why* an
+    excluded tool saved nothing. The pair is memoized so a repeated block returns
+    the identical text and classification without recompressing.
+    """
+    call_id = block.get("tool_use_id")
+    if not isinstance(call_id, str):
+        return None, ()
+    original_content = block.get("content", "")
+    key = _compressed_block_cache_key(
+        tool_name=tool_name,
+        tool_use_id=call_id,
+        original_block_content=original_content,
+        compressor_version=compressor_version,
+    )
+    if key in _ANTHROPIC_BLOCK_CACHE:
+        _ANTHROPIC_BLOCK_CACHE.move_to_end(key)
+        return _ANTHROPIC_BLOCK_CACHE[key]
+
+    original_text = _flatten_anthropic_tool_result_content(original_content)
+    if original_text is None:
+        # Mixed/non-text content: leave the block untouched. Cache the negative so
+        # the same block is not re-flattened every turn.
+        _cache_anthropic_block(key, (None, ()))
+        return None, ()
+    compressed, inner = compress_litellm_messages(
+        _synthetic_tool_messages(call_id=call_id, tool_name=tool_name, content=original_text),
+        model=model,
+        enable_text_ml=enable_text_ml,
+    )
+    types = inner.content_types
+    shrunk = _compressed_tool_content_by_id(compressed).get(call_id)
+    if not isinstance(shrunk, str) or len(shrunk) >= len(original_text):
+        # No shrink: cache the negative (with its classification) so a
+        # non-shrinking block is not recompressed but still reports its type.
+        _cache_anthropic_block(key, (None, types))
+        return None, types
+    _cache_anthropic_block(key, (shrunk, types))
+    return shrunk, types
 
 
 def _openai_tool_chars(messages: JsonArray) -> int:
@@ -122,14 +324,15 @@ def compress_openai_chat(
     messages = body.get("messages")
     if not isinstance(messages, list):
         return body, _NOOP
-    compressed, _ = compress_litellm_messages(
+    compressed, inner = compress_litellm_messages(
         cast("JsonArray", messages), model=_model_of(body), enable_text_ml=enable_text_ml
     )
     before = _openai_tool_chars(cast("JsonArray", messages))
     after = _openai_tool_chars(compressed)
+    types = inner.content_types
     if after >= before:
-        return body, _stats(before, after)
-    return {**body, "messages": compressed}, _stats(before, after)
+        return body, _stats(before, after, types)
+    return {**body, "messages": compressed}, _stats(before, after, types)
 
 
 def _apply_anthropic_tool_results(messages: list[JsonObject], by_id: dict[str, str]) -> JsonArray:
@@ -162,16 +365,68 @@ def _swap_anthropic_blocks(
     return new_content, changed
 
 
+def _iter_anthropic_blocks(messages: list[JsonObject]) -> Iterator[JsonObject]:
+    """Yield every dict content block across all message contents."""
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict):
+                yield cast("JsonObject", block)
+
+
+def _collect_anthropic_compressed_blocks(
+    messages: list[JsonObject],
+    *,
+    model: str,
+    tool_names: dict[str, str],
+    compressor_version: str,
+    enable_text_ml: bool,
+) -> tuple[dict[str, str], bool, tuple[str, ...]]:
+    """Compress every tool_result block.
+
+    Returns the shrunk-text-by-id map, whether any tool_result block was seen,
+    and the order-preserving distinct content_types aggregated across all blocks
+    (so the outer stat reports headroom's classification even when nothing shrank).
+    """
+    by_id: dict[str, str] = {}
+    saw_tool_result = False
+    all_types: list[str] = []
+    for block in _iter_anthropic_blocks(messages):
+        if block.get("type") != "tool_result":
+            continue
+        call_id = block.get("tool_use_id")
+        if not isinstance(call_id, str):
+            continue
+        saw_tool_result = True
+        shrunk, types = _compress_anthropic_tool_result_block(
+            block,
+            model=model,
+            tool_name=tool_names.get(call_id, ""),
+            compressor_version=compressor_version,
+            enable_text_ml=enable_text_ml,
+        )
+        all_types.extend(types)
+        if shrunk is not None:
+            by_id[call_id] = shrunk
+    return by_id, saw_tool_result, tuple(dict.fromkeys(all_types))
+
+
 def compress_anthropic(
     body: JsonObject, *, enable_text_ml: bool = False
 ) -> tuple[JsonObject, ShrinkStats]:
     """Compress the tool_result text of an Anthropic Messages body.
 
-    Anthropic ``tool_result`` blocks are protected by headroom's gates, so the
-    body is converted to OpenAI messages (which preserve ``tool_use_id`` as
-    ``tool_call_id``), compressed, and the shrunk tool text is written back into
-    the original blocks by id. Only tool_result content changes; assistant and
-    user text are left verbatim.
+    Each ``tool_result`` block is compressed independently, not via a whole-body
+    OpenAI conversion. For one block, ``_compress_anthropic_tool_result_block``
+    wraps its content in a synthetic assistant-call + tool-output message pair
+    (so headroom sees the tool name and applies its exclusion gates), runs
+    headroom, and writes the shrunk text back into that block by ``tool_use_id``.
+    Results -- including no-op and non-shrinking outcomes -- are memoized in a
+    content-addressed LRU cache keyed by ``(tool_name, tool_use_id, content,
+    compressor_version)``, so a repeated block is never recompressed. Only
+    tool_result content changes; assistant and user text are left verbatim.
 
     Args:
         body: Anthropic Messages request body (never mutated).
@@ -185,18 +440,31 @@ def compress_anthropic(
     messages = body.get("messages")
     if not isinstance(messages, list):
         return body, _NOOP
-    converted = convert_messages_for_litellm(cast("list[JsonObject]", messages))
-    compressed, _ = compress_litellm_messages(
-        cast("JsonArray", converted), model=_model_of(body), enable_text_ml=enable_text_ml
+    typed_messages = cast("list[JsonObject]", messages)
+    model = _model_of(body)
+    compressor_version = (
+        f"{_ANTHROPIC_BLOCK_COMPRESSOR_VERSION}:model={model}:text_ml={int(enable_text_ml)}"
     )
-    by_id = _compressed_tool_content_by_id(compressed)
+    by_id, saw_tool_result, types = _collect_anthropic_compressed_blocks(
+        typed_messages,
+        model=model,
+        tool_names=_anthropic_tool_names_by_id(typed_messages),
+        compressor_version=compressor_version,
+        enable_text_ml=enable_text_ml,
+    )
     if not by_id:
+        if saw_tool_result:
+            return body, shrink_stats.compute_shrink(
+                path="none", before=body, after=body, content_types=types
+            )
         return body, _NOOP
-    new_messages = _apply_anthropic_tool_results(cast("list[JsonObject]", messages), by_id)
+    new_messages = _apply_anthropic_tool_results(typed_messages, by_id)
     new_body = {**body, "messages": new_messages}
-    stats = shrink_stats.compute_shrink(path="compress", before=body, after=new_body)
+    stats = shrink_stats.compute_shrink(
+        path="compress", before=body, after=new_body, content_types=types
+    )
     if stats.chars_saved <= 0:
-        return body, ShrinkStats("none", stats.chars_before, stats.chars_after)
+        return body, ShrinkStats("none", stats.chars_before, stats.chars_after, types)
     return new_body, stats
 
 
@@ -289,17 +557,20 @@ def compress_responses(
     if not isinstance(input_items, list):
         return body, _NOOP
     converted = _responses_input_to_openai(cast("list[JsonValue]", input_items))
-    compressed, _ = compress_litellm_messages(
+    compressed, inner = compress_litellm_messages(
         cast("JsonArray", converted), model=_model_of(body), enable_text_ml=enable_text_ml
     )
+    types = inner.content_types
     by_id = _compressed_tool_content_by_id(compressed)
     if not by_id:
-        return body, _NOOP
+        return body, ShrinkStats("none", 0, 0, types)
     new_input = _apply_responses_outputs(cast("list[JsonValue]", input_items), by_id)
     new_body = {**body, "input": new_input}
-    stats = shrink_stats.compute_shrink(path="compress", before=body, after=new_body)
+    stats = shrink_stats.compute_shrink(
+        path="compress", before=body, after=new_body, content_types=types
+    )
     if stats.chars_saved <= 0:
-        return body, ShrinkStats("none", stats.chars_before, stats.chars_after)
+        return body, ShrinkStats("none", stats.chars_before, stats.chars_after, types)
     return new_body, stats
 
 
@@ -317,15 +588,20 @@ def _dispatch(
 
 
 def compress_forward_body(
-    body_bytes: bytes, *, request_path: str, upstream: str, enable_text_ml: bool = False
+    body_bytes: bytes,
+    *,
+    request_path: str,
+    upstream: str,
+    enable_text_ml: bool = False,
+    prompt_cache: bool = False,
 ) -> tuple[bytes, ShrinkStats]:
     """Compress a forwardable request body, skipping DeepSeek upstreams.
 
     Best-effort: a DeepSeek upstream, an unparseable or non-object body, an
     unknown wire, or any compression error returns the original bytes unchanged
     with a no-op stat. The body is only re-serialized when compression actually
-    removed characters, so non-compressing turns relay byte-identical and keep
-    the upstream prompt cache intact.
+    removed characters (or prompt caching was applied), so non-compressing turns
+    relay byte-identical and keep the upstream prompt cache intact.
 
     Args:
         body_bytes: Raw request body to relay upstream.
@@ -333,6 +609,8 @@ def compress_forward_body(
         upstream: Upstream base URL; DeepSeek targets are never compressed.
         enable_text_ml: Opt into headroom's lossy ML plain-text compressor; off
             by default so premium passthrough stays lossless.
+        prompt_cache: Add Anthropic automatic prompt caching to a Messages body
+            that does not already declare a cache policy; off by default.
 
     Returns:
         A pair of the (possibly re-serialized) body bytes and a ShrinkStats.
@@ -346,10 +624,14 @@ def compress_forward_body(
     if not isinstance(parsed, dict):
         return body_bytes, _NOOP
     try:
-        new_body, stats = _dispatch(parsed, request_path, enable_text_ml=enable_text_ml)
+        cache_applied = False
+        cache_body = parsed
+        if prompt_cache and request_path == "/v1/messages":
+            cache_body, cache_applied = apply_anthropic_prompt_cache(parsed)
+        new_body, stats = _dispatch(cache_body, request_path, enable_text_ml=enable_text_ml)
     except Exception:
         logger.exception("forward compression failed; sending body uncompressed")
         return body_bytes, _NOOP
-    if stats.chars_saved <= 0:
+    if stats.chars_saved <= 0 and not cache_applied:
         return body_bytes, stats
     return json.dumps(new_body).encode("utf-8"), stats

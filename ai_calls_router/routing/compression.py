@@ -52,6 +52,72 @@ class _Compressor(Protocol):
 # search, html) still run; only the lossy ModernBERT token-dropping stage is off.
 _DISABLE_TEXT_ML = "disabled"
 
+# Marker segments whose strategy/label is the second segment, not the first
+# (``router:tool_result:smart_crusher`` classifies as ``smart_crusher``).
+_NESTED_MARKER_HEADS = frozenset({"tool_result", "text_block"})
+
+
+def _strategy_token(marker: str) -> str:
+    """Reduce one headroom ``router:*`` marker to its strategy/label token.
+
+    Args:
+        marker: A routing marker such as ``"router:smart_crusher:0.34"``,
+            ``"router:excluded:tool"``, or ``"router:tool_result:kompress"``.
+
+    Returns:
+        The strategy or protection label (``"smart_crusher"``, ``"excluded"``,
+        ``"kompress"``, ...), or ``""`` when the marker has no label segment.
+    """
+    parts = marker.split(":")
+    rest = parts[1:] if parts and parts[0] == "router" else parts
+    if not rest:
+        return ""
+    if rest[0] in _NESTED_MARKER_HEADS and len(rest) >= 2:
+        return rest[1]
+    return rest[0]
+
+
+def summarize_content_types(markers: list[str]) -> tuple[str, ...]:
+    """Reduce headroom's ``router:*`` markers to distinct content-type labels.
+
+    This surfaces headroom's own per-message classification for the dashboard; it
+    never re-derives the type from tool names or shrink path. Labels are deduped
+    while preserving first-seen order so the column reads left-to-right in the
+    order headroom applied them.
+
+    Args:
+        markers: Routing markers filtered to the ``router:`` namespace.
+
+    Returns:
+        The distinct strategy/label tokens (e.g. ``("smart_crusher",)`` or
+        ``("protected", "smart_crusher")``), empty when no markers were given.
+    """
+    seen: list[str] = []
+    for marker in markers:
+        label = _strategy_token(marker)
+        if label and label not in seen:
+            seen.append(label)
+    return tuple(seen)
+
+
+def _routing_markers(result: object) -> list[str]:
+    """Extract ``router:*`` markers from a headroom ``CompressResult``.
+
+    Mirrors ``headroom.pipeline.summarize_routing_markers`` but reads defensively:
+    a headroom build without ``transforms_applied`` yields no markers rather than
+    breaking the serve path.
+
+    Args:
+        result: The object returned by ``headroom.compress``.
+
+    Returns:
+        The ``router:``-prefixed marker strings, or ``[]`` when absent.
+    """
+    transforms = getattr(result, "transforms_applied", None)
+    if not isinstance(transforms, list):
+        return []
+    return [m for m in transforms if isinstance(m, str) and m.startswith("router:")]
+
 
 @functools.lru_cache(maxsize=1)
 def _load_compressor() -> _Compressor | None:
@@ -147,4 +213,10 @@ def compress_litellm_messages(
         return messages, ShrinkStats(path="none", chars_before=before, chars_after=before)
     compressed = result.messages
     after = _messages_chars(compressed)
-    return compressed, ShrinkStats(path="compress", chars_before=before, chars_after=after)
+    content_types = summarize_content_types(_routing_markers(result))
+    return compressed, ShrinkStats(
+        path="compress",
+        chars_before=before,
+        chars_after=after,
+        content_types=content_types,
+    )

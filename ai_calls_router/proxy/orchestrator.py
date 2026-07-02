@@ -27,6 +27,7 @@ from ai_calls_router.proxy import passthrough, route_dispatch
 from ai_calls_router.routing import (
     anthropic_oauth,
     content_sanitize,
+    context_budget,
     forward_compression,
     provider_config,
 )
@@ -159,6 +160,7 @@ def _premium_usage_callback(
     *,
     m: metrics.Metrics,
     request_id: str,
+    session: str | None,
 ) -> Callable[[int, dict[str, int], float], None]:
     """Build a callback that updates metrics after premium passthrough completes."""
 
@@ -167,6 +169,18 @@ def _premium_usage_callback(
         output_tokens = usage.get("output_tokens", 0)
         cache_read = usage.get("cache_read_input_tokens", 0)
         cache_creation = usage.get("cache_creation_input_tokens", 0)
+        # Teach the context-window guard the real premium size so the next turn
+        # of an overflowing session skips routing instead of failing open again.
+        # Cache buckets are part of the prompt: a cache-heavy premium turn reports
+        # a tiny input_tokens, so omitting them undercounts the session by its
+        # cached prefix and the guard never trips.
+        context_budget.record_context_size(
+            session,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens=cache_read,
+            cache_creation_tokens=cache_creation,
+        )
         if input_tokens or output_tokens or cache_read or cache_creation:
             m.add_premium_tokens(
                 input_tokens=input_tokens,
@@ -185,6 +199,27 @@ def _premium_usage_callback(
         )
 
     return _record
+
+
+def _keep_long_context_passthrough(routes: JsonObject) -> bool:
+    """Return whether premium passthrough keeps Claude Code's 1M long-context opt-in.
+
+    Off by default: the passthrough path strips ``anthropic-beta: context-1m`` and
+    the ``[1m]`` model suffix so an OAuth subscription without long-context
+    entitlement does not 429 on a large decision turn. Passthrough is the final
+    fallback, so an unentitled plan that keeps the opt-in hard-fails those turns.
+    Enable only via ``settings.long_context_passthrough: true`` for an entitled
+    plan (e.g. when Claude Code auto-compacts above the standard 200K).
+
+    Args:
+        routes: Parsed config.yaml mapping.
+
+    Returns:
+        True only when the setting is the literal boolean ``true``; any missing or
+        malformed value keeps the safe stripping behavior.
+    """
+    settings = routes.get("settings")
+    return isinstance(settings, dict) and settings.get("long_context_passthrough") is True
 
 
 async def _serve_premium_passthrough(
@@ -215,8 +250,14 @@ async def _serve_premium_passthrough(
     )
     # Drop the 1M long-context opt-in (anthropic-beta: context-1m + opus[1m] model
     # suffix) before relaying: the routed path strips it, but an OAuth subscription
-    # without long-context credits 429s a passthrough turn that opts in.
-    sanitized = anthropic_oauth.strip_long_context_passthrough(ctx.body_bytes, ctx.headers)
+    # without long-context credits 429s a passthrough turn that opts in. A plan
+    # entitled to the premium 1M window keeps it via settings.long_context_passthrough
+    # (required once auto-compact lets >200K decision turns reach passthrough).
+    sanitized = (
+        None
+        if _keep_long_context_passthrough(routes)
+        else anthropic_oauth.strip_long_context_passthrough(ctx.body_bytes, ctx.headers)
+    )
     if sanitized is not None:
         long_context_body, long_context_headers = sanitized
         logger.warning(
@@ -229,7 +270,15 @@ async def _serve_premium_passthrough(
     # turns keep the upstream prompt cache intact.
     upstream = routing.agent_upstream(routes, group)
     forward_bytes, shrink = forward_compression.compress_forward_body(
-        ctx.body_bytes, request_path=ctx.path, upstream=upstream
+        ctx.body_bytes,
+        request_path=ctx.path,
+        upstream=upstream,
+        # ponytail: experiment lever A — turn on headroom's lossy text_ml
+        # (Kompress) so prose/log tool outputs that were passing through as
+        # no-ops also shrink on the premium path. Deterministic per block, so
+        # cache-safe; flip off by dropping this kwarg. Only prose/log blocks are
+        # affected — code/JSON already compress losslessly.
+        enable_text_ml=True,
     )
     m.add_shrink(chars_before=shrink.chars_before, chars_after=shrink.chars_after)
     m.record_request(
@@ -238,7 +287,8 @@ async def _serve_premium_passthrough(
         status=0,
         tier=attempt.tier,
         route="premium_guard"
-        if attempt.reason in {"request_premium_guard", "response_premium_guard"}
+        if attempt.reason
+        in {"request_premium_guard", "response_premium_guard", "context_window_guard"}
         else "passthrough",
         model=attempt.model,
         user_agent=ctx.user_agent,
@@ -256,6 +306,7 @@ async def _serve_premium_passthrough(
         request_id=logging_setup.current_request_id(),
         shrink_chars_before=shrink.chars_before,
         shrink_chars_after=shrink.chars_after,
+        tool_output_type=shrink.content_type_label,
     )
     return await serve_passthrough(
         ctx,
@@ -265,6 +316,7 @@ async def _serve_premium_passthrough(
         on_complete=_premium_usage_callback(
             m=m,
             request_id=logging_setup.current_request_id(),
+            session=session,
         ),
     )
 
@@ -327,6 +379,13 @@ async def handle(ctx: RequestContext, *, routes_loader: RoutesLoader) -> Respons
     )
     if attempt.response is not None:
         m.incr_routed()
+        context_budget.record_context_size(
+            session,
+            attempt.input_tokens,
+            attempt.output_tokens,
+            cache_read_tokens=attempt.cache_read_tokens,
+            cache_creation_tokens=attempt.cache_creation_tokens,
+        )
         logger.info("outcome=routed %s agent=%s tier=%s", ctx.path, agent, attempt.tier)
         return attempt.response
 

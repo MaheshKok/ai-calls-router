@@ -276,6 +276,309 @@ class TestPrepareRoutedBody:
         assert body == snapshot
 
 
+class TestPrepareRoutedBodyAdaptiveEffortGate:
+    """A tier that declares supports_adaptive_thinking: false (its routed model
+    rejects Anthropic adaptive thinking, e.g. Haiku 4.5) must have
+    output_config.effort stripped before the native subscription POST, so the
+    endpoint does not 400 ("adaptive thinking is not supported on this model")
+    and fall open to premium. The gate is driven by config, not the model id, so
+    a tier without the flag (default true) keeps the effort field regardless of
+    which model it names.
+    """
+
+    NO_EFFORT_TIER: dict[str, object] = {
+        "model": "anthropic/claude-haiku-4-5",
+        "max_tokens": 8192,
+        "supports_adaptive_thinking": False,
+    }
+
+    def test_flag_false_strips_requested_effort_entirely(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "low"}
+        routed = rc.prepare_routed_body(body, self.NO_EFFORT_TIER)
+        assert "output_config" not in routed
+
+    def test_flag_false_strips_effort_but_keeps_other_output_config_keys(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "high", "format": {"type": "json"}}
+        routed = rc.prepare_routed_body(body, self.NO_EFFORT_TIER)
+        assert routed["output_config"] == {"format": {"type": "json"}}
+
+    def test_flag_false_strips_effort_even_with_tier_effort_override(self) -> None:
+        # The tier's effort pin must not re-introduce the rejected field.
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        routed = rc.prepare_routed_body(body, {**self.NO_EFFORT_TIER, "effort": "low"})
+        assert "output_config" not in routed
+
+    def test_flag_false_without_output_config_adds_nothing(self) -> None:
+        routed = rc.prepare_routed_body(_request_body(), {**self.NO_EFFORT_TIER, "effort": "low"})
+        assert "output_config" not in routed
+
+    def test_flag_false_ignores_model_name(self) -> None:
+        # The gate keys on config, not the model string: a non-Haiku model with
+        # the flag set still has effort stripped. This is the property that the
+        # old "haiku" substring predicate could not express.
+        body = _request_body()
+        body["output_config"] = {"effort": "high"}
+        routed = rc.prepare_routed_body(
+            body, {"model": "anthropic/claude-sonnet-5", "supports_adaptive_thinking": False}
+        )
+        assert "output_config" not in routed
+
+    def test_flag_false_does_not_mutate_input(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "low"}
+        snapshot = copy.deepcopy(body)
+        rc.prepare_routed_body(body, self.NO_EFFORT_TIER)
+        assert body == snapshot
+
+    def test_flag_absent_keeps_requested_effort(self) -> None:
+        # Default (flag omitted) preserves adaptive effort, even when the tier
+        # names Haiku -- the fact is not inferred from the model id.
+        body = _request_body()
+        body["output_config"] = {"effort": "high"}
+        routed = rc.prepare_routed_body(
+            body, {"model": "anthropic/claude-haiku-4-5", "max_tokens": 8192}
+        )
+        assert routed["output_config"]["effort"] == "high"
+
+    def test_flag_true_keeps_requested_effort(self) -> None:
+        # Explicit true behaves like the default: effort is preserved.
+        body = _request_body()
+        body["output_config"] = {"effort": "high"}
+        routed = rc.prepare_routed_body(
+            body,
+            {"model": "anthropic/claude-haiku-4-5", "supports_adaptive_thinking": True},
+        )
+        assert routed["output_config"]["effort"] == "high"
+
+    def test_flag_absent_xhigh_still_downgraded(self) -> None:
+        # The pre-existing xhigh safety net still applies when the flag is absent.
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        routed = rc.prepare_routed_body(
+            body, {"model": "anthropic/claude-sonnet-5", "max_tokens": 8192}
+        )
+        assert routed["output_config"]["effort"] == "high"
+
+
+class TestPrepareRoutedBodyAdaptiveThinkingStrip:
+    """The real Haiku failure: Claude Code sends a top-level
+    thinking={type:adaptive} on premium turns, and the 4.5 family 400s on it
+    ("adaptive thinking is not supported on this model"), failing open to Opus.
+    A tier with supports_adaptive_thinking: false must switch that top-level
+    adaptive thinking to {type:disabled} (config-driven, not model-id inferred),
+    while adaptive-capable tiers and non-adaptive thinking values are untouched.
+    """
+
+    HAIKU_TIER: dict[str, object] = {
+        "model": "anthropic/claude-haiku-4-5",
+        "max_tokens": 8192,
+        "supports_adaptive_thinking": False,
+    }
+
+    def test_flag_false_disables_top_level_adaptive_thinking(self) -> None:
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert routed["thinking"] == {"type": "disabled"}
+
+    def test_flag_false_without_thinking_adds_nothing(self) -> None:
+        routed = rc.prepare_routed_body(_request_body(), self.HAIKU_TIER)
+        assert "thinking" not in routed
+
+    def test_flag_false_keeps_budget_thinking(self) -> None:
+        # Haiku accepts budget (type=enabled) thinking; only adaptive is rejected.
+        body = _request_body()
+        body["thinking"] = {"type": "enabled", "budget_tokens": 1024}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert routed["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+
+    def test_flag_false_keeps_already_disabled_thinking(self) -> None:
+        body = _request_body()
+        body["thinking"] = {"type": "disabled"}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert routed["thinking"] == {"type": "disabled"}
+
+    def test_flag_false_ignores_model_name(self) -> None:
+        # Config drives the strip, not the model string: a non-Haiku model with
+        # the flag set still has adaptive thinking disabled.
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        routed = rc.prepare_routed_body(
+            body, {"model": "anthropic/claude-sonnet-5", "supports_adaptive_thinking": False}
+        )
+        assert routed["thinking"] == {"type": "disabled"}
+
+    def test_flag_absent_preserves_adaptive_thinking(self) -> None:
+        # Default (adaptive-capable, e.g. Sonnet 5): the client's adaptive
+        # thinking passes through so the routed model still reasons.
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        routed = rc.prepare_routed_body(
+            body, {"model": "anthropic/claude-sonnet-5", "max_tokens": 8192}
+        )
+        assert routed["thinking"] == {"type": "adaptive"}
+
+    def test_flag_true_preserves_adaptive_thinking(self) -> None:
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        routed = rc.prepare_routed_body(
+            body,
+            {"model": "anthropic/claude-sonnet-5", "supports_adaptive_thinking": True},
+        )
+        assert routed["thinking"] == {"type": "adaptive"}
+
+    def test_flag_false_does_not_mutate_input(self) -> None:
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        snapshot = copy.deepcopy(body)
+        rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert body == snapshot
+
+
+class TestPrepareRoutedBodyClearThinkingStrip:
+    """Claude Code pairs top-level thinking={type:adaptive} with a
+    context_management.edits entry of type clear_thinking_20251015. When a tier
+    disables thinking (supports_adaptive_thinking: false), that edit becomes
+    invalid and Anthropic 400s ("`clear_thinking_20251015` strategy requires
+    `thinking` to be enabled or adaptive"), failing the routed turn open to Opus.
+    prepare_routed_body must drop the clear_thinking edit whenever the routed
+    thinking is not enabled, preserving other strategies and dropping the whole
+    context_management block only when the edit was its sole content -- and never
+    touching an adaptive-capable tier's body.
+    """
+
+    HAIKU_TIER: dict[str, object] = {
+        "model": "anthropic/claude-haiku-4-5",
+        "max_tokens": 8192,
+        "supports_adaptive_thinking": False,
+    }
+
+    @staticmethod
+    def _clear_thinking() -> dict[str, object]:
+        return {"type": "clear_thinking_20251015", "keep": {"type": "thinking_turns", "value": 2}}
+
+    def test_flag_false_drops_context_management_when_edit_is_sole_content(self) -> None:
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        body["context_management"] = {"edits": [self._clear_thinking()]}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert "context_management" not in routed
+
+    def test_flag_false_removes_only_clear_thinking_and_preserves_order(self) -> None:
+        before = {"type": "clear_tool_uses_20250919", "keep": {"value": 3}}
+        after = {"type": "clear_tool_uses_20250919", "keep": {"value": 1}}
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        body["context_management"] = {"edits": [before, self._clear_thinking(), after]}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert routed["context_management"]["edits"] == [before, after]
+
+    def test_flag_false_preserves_other_context_management_keys(self) -> None:
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        body["context_management"] = {"edits": [self._clear_thinking()], "extra": {"k": "v"}}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert routed["context_management"] == {"extra": {"k": "v"}}
+
+    def test_flag_false_strips_future_dated_clear_thinking(self) -> None:
+        # Prefix match: a re-dated variant is the same thinking-bound strategy.
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        body["context_management"] = {"edits": [{"type": "clear_thinking_20260101"}]}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert "context_management" not in routed
+
+    def test_flag_false_strips_edit_when_thinking_absent(self) -> None:
+        # No thinking key: Haiku defaults to off, so the edit is still invalid.
+        body = _request_body()
+        body["context_management"] = {"edits": [self._clear_thinking()]}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert "context_management" not in routed
+
+    def test_flag_false_strips_edit_when_thinking_already_disabled(self) -> None:
+        body = _request_body()
+        body["thinking"] = {"type": "disabled"}
+        body["context_management"] = {"edits": [self._clear_thinking()]}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert "context_management" not in routed
+
+    def test_flag_false_keeps_edit_when_thinking_enabled_budget(self) -> None:
+        # Budget thinking is enabled -> the strategy is valid -> keep it.
+        body = _request_body()
+        body["thinking"] = {"type": "enabled", "budget_tokens": 1024}
+        body["context_management"] = {"edits": [self._clear_thinking()]}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert routed["context_management"]["edits"] == [self._clear_thinking()]
+
+    def test_flag_false_leaves_unrelated_edits_untouched(self) -> None:
+        # A context_management with no clear_thinking edit is passed through as-is.
+        edits = [{"type": "clear_tool_uses_20250919", "keep": {"value": 3}}]
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        body["context_management"] = {"edits": list(edits)}
+        routed = rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert routed["context_management"]["edits"] == edits
+
+    def test_flag_absent_preserves_clear_thinking_edit(self) -> None:
+        # Adaptive-capable tier (Sonnet 5): thinking stays adaptive, so the
+        # clear_thinking strategy is valid and context_management is untouched.
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        body["context_management"] = {"edits": [self._clear_thinking()]}
+        routed = rc.prepare_routed_body(
+            body, {"model": "anthropic/claude-sonnet-5", "max_tokens": 8192}
+        )
+        assert routed["context_management"]["edits"] == [self._clear_thinking()]
+
+    def test_flag_false_does_not_mutate_input(self) -> None:
+        body = _request_body()
+        body["thinking"] = {"type": "adaptive"}
+        body["context_management"] = {"edits": [self._clear_thinking(), {"type": "keep"}]}
+        snapshot = copy.deepcopy(body)
+        rc.prepare_routed_body(body, self.HAIKU_TIER)
+        assert body == snapshot
+
+
+class TestPrepareRoutedBodyXhighEffort:
+    """xhigh is a valid routed level for xhigh-capable tiers. A tier may pin
+    effort: xhigh, and supports_xhigh_effort: true lets a client-sent xhigh pass
+    through instead of hitting the high-downgrade safety net.
+    """
+
+    XHIGH_TIER: dict[str, object] = {
+        "model": "anthropic/claude-sonnet-5",
+        "max_tokens": 8192,
+        "supports_xhigh_effort": True,
+    }
+
+    def test_tier_effort_xhigh_is_applied(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "high"}
+        routed = rc.prepare_routed_body(body, {**self.XHIGH_TIER, "effort": "xhigh"})
+        assert routed["output_config"]["effort"] == "xhigh"
+
+    def test_client_xhigh_preserved_when_tier_supports_xhigh(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        routed = rc.prepare_routed_body(body, self.XHIGH_TIER)
+        assert routed["output_config"]["effort"] == "xhigh"
+
+    def test_tier_effort_pin_still_wins_over_client_xhigh(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "xhigh"}
+        routed = rc.prepare_routed_body(body, {**self.XHIGH_TIER, "effort": "low"})
+        assert routed["output_config"]["effort"] == "low"
+
+    def test_supports_xhigh_flag_does_not_touch_other_levels(self) -> None:
+        body = _request_body()
+        body["output_config"] = {"effort": "high"}
+        routed = rc.prepare_routed_body(body, self.XHIGH_TIER)
+        assert routed["output_config"]["effort"] == "high"
+
+
 class TestEscalates:
     def _response_with_tool(self, name: str) -> dict[str, object]:
         return {

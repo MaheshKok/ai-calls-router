@@ -120,11 +120,27 @@ class ShrinkStats:
             ``"compress"``, or ``"none"`` when no pass ran.
         chars_before: tool_result characters before the pass.
         chars_after: tool_result characters after the pass.
+        content_types: Distinct content-type labels reduced from headroom's own
+            ``router:*`` routing markers for this request (e.g. ``("excluded",)``
+            or ``("smart_crusher", "kompress")``). Empty when no classification
+            was captured (native no-op paths, headroom absent). This is captured
+            metadata only -- it never influences what is sent upstream.
     """
 
     path: str
     chars_before: int
     chars_after: int
+    content_types: tuple[str, ...] = ()
+
+    @property
+    def content_type_label(self) -> str:
+        """Comma-joined content-type label for the metrics DB column.
+
+        Returns:
+            ``", ".join(self.content_types)`` -- the empty string when no
+            content types were captured.
+        """
+        return ", ".join(self.content_types)
 
     @property
     def chars_saved(self) -> int:
@@ -195,7 +211,13 @@ class ShrinkStats:
         return int(self.chars_after / chars_per_token)
 
 
-def compute_shrink(*, path: str, before: JsonObject, after: JsonObject) -> ShrinkStats:
+def compute_shrink(
+    *,
+    path: str,
+    before: JsonObject,
+    after: JsonObject,
+    content_types: tuple[str, ...] = (),
+) -> ShrinkStats:
     """Measure the tool_result shrink between a body and its shrunk form.
 
     Args:
@@ -203,6 +225,8 @@ def compute_shrink(*, path: str, before: JsonObject, after: JsonObject) -> Shrin
         before: Request body before the shrink pass.
         after: Request body returned by the shrink pass (may be ``before`` itself
             when the pass was a no-op).
+        content_types: Content-type labels captured from headroom's routing
+            markers to attach to the measurement (empty by default).
 
     Returns:
         A ShrinkStats with the tool_result character counts of both bodies.
@@ -211,4 +235,5 @@ def compute_shrink(*, path: str, before: JsonObject, after: JsonObject) -> Shrin
         path=path,
         chars_before=tool_result_chars(before),
         chars_after=tool_result_chars(after),
+        content_types=content_types,
     )

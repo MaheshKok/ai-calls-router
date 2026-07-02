@@ -201,15 +201,29 @@ def strip_long_context_passthrough(
 _FORWARDABLE_OAUTH_HEADERS = frozenset({"authorization", "anthropic-version", "anthropic-beta"})
 
 
-def _forward_headers(oauth_headers: Mapping[str, str]) -> dict[str, str]:
+def _forward_headers(
+    oauth_headers: Mapping[str, str], *, keep_long_context: bool = False
+) -> dict[str, str]:
     """Return the allowlisted upstream headers for a routed OAuth turn.
 
     Only the OAuth bearer, anthropic-version, and anthropic-beta tokens are
     forwarded; every other client header is dropped so nothing unrelated reaches
-    api.anthropic.com. The 1M-context beta is stripped from anthropic-beta: a
-    routed cheap turn must not opt into long context, which the subscription
-    rejects for the routed model as a credit request (HTTP 429) instead of
-    covering it. The JSON content type is forced for the re-serialized body.
+    api.anthropic.com. By default the 1M-context beta is stripped from
+    anthropic-beta: a routed cheap turn must not opt into long context, which the
+    subscription rejects for the routed model as a credit request (HTTP 429)
+    instead of covering it. When ``keep_long_context`` is set (the tier declares
+    ``supports_long_context`` for an entitled plan), the beta is forwarded intact
+    so the routed model serves its full 1M window. The JSON content type is forced
+    for the re-serialized body.
+
+    Args:
+        oauth_headers: Hop-by-hop-filtered client headers to draw the forwardable
+            OAuth tokens from.
+        keep_long_context: When True, forward the context-1m beta unchanged
+            instead of stripping it.
+
+    Returns:
+        The allowlisted upstream headers for the routed POST.
     """
     headers: dict[str, str] = {}
     for key, value in oauth_headers.items():
@@ -217,9 +231,9 @@ def _forward_headers(oauth_headers: Mapping[str, str]) -> dict[str, str]:
         if lowered not in _FORWARDABLE_OAUTH_HEADERS:
             continue
         if lowered == "anthropic-beta":
-            filtered = _without_long_context_beta(value)
-            if filtered:
-                headers[key] = filtered
+            beta = value if keep_long_context else _without_long_context_beta(value)
+            if beta:
+                headers[key] = beta
             continue
         headers[key] = value
     headers["Content-Type"] = "application/json"
@@ -273,7 +287,10 @@ async def messages_call(
         payload, shrink = compress_anthropic(payload, enable_text_ml=enable_text_ml)
     else:
         shrink = shrink_stats.compute_shrink(path="none", before=payload, after=payload)
-    headers = _forward_headers(oauth_headers)
+    headers = _forward_headers(
+        oauth_headers,
+        keep_long_context=parse_tier_config(tier_cfg).supports_long_context,
+    )
     logger.info(
         "acr: anthropic-oauth routed model=%s effort=%s",
         payload.get("model"),

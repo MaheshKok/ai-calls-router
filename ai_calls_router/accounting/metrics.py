@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS request_events (
     cache_creation_tokens INTEGER NOT NULL,
     duration_ms INTEGER NOT NULL,
     shrink_chars_before INTEGER NOT NULL,
-    shrink_chars_after INTEGER NOT NULL
+    shrink_chars_after INTEGER NOT NULL,
+    tool_output_type TEXT NOT NULL DEFAULT ''
 )
 """
 _REQUEST_EVENT_INSERT = """
@@ -64,19 +65,28 @@ INSERT INTO request_events (
     ts, request_id, method, path, status, tier, route, model, premium_model,
     provider, user_agent, agent, session_id, decision_reason, client_ip,
     tool_names, input_tokens, output_tokens, cache_read_tokens,
-    cache_creation_tokens, duration_ms, shrink_chars_before, shrink_chars_after
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    cache_creation_tokens, duration_ms, shrink_chars_before, shrink_chars_after,
+    tool_output_type
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 _REQUEST_EVENT_RECENT = """
 SELECT
     ts, request_id, method, path, status, tier, route, model, premium_model,
     provider, user_agent, agent, session_id, decision_reason, client_ip,
     tool_names, input_tokens, output_tokens, cache_read_tokens,
-    cache_creation_tokens, duration_ms, shrink_chars_before, shrink_chars_after
+    cache_creation_tokens, duration_ms, shrink_chars_before, shrink_chars_after,
+    tool_output_type
 FROM request_events
 ORDER BY ts DESC, id DESC
 LIMIT ?
 """
+
+# Columns added after the original schema shipped. Each is applied idempotently
+# on connect via ALTER TABLE, guarded by PRAGMA table_info -- SQLite has no
+# migration framework here and the DB is long-lived across daemon restarts.
+_REQUEST_EVENT_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("tool_output_type", "TEXT NOT NULL DEFAULT ''"),
+)
 
 # Routes a premium passthrough turn is recorded under. These turns never reach
 # the savings ledger (they have no routed_model), so their token usage lives
@@ -147,6 +157,7 @@ def _request_entry(
     request_id: str = "",
     shrink_chars_before: int = 0,
     shrink_chars_after: int = 0,
+    tool_output_type: str = "",
 ) -> JsonObject:
     """Build one dashboard recent-request row."""
     return cast(
@@ -175,6 +186,7 @@ def _request_entry(
             "duration_ms": duration_ms,
             "shrink_chars_before": max(int(shrink_chars_before), 0),
             "shrink_chars_after": max(int(shrink_chars_after), 0),
+            "tool_output_type": tool_output_type,
         },
     )
 
@@ -241,6 +253,7 @@ def _entry_db_values(entry: JsonObject) -> tuple[DbValue, ...]:
         _entry_int(entry, "duration_ms"),
         _entry_int(entry, "shrink_chars_before"),
         _entry_int(entry, "shrink_chars_after"),
+        _entry_text(entry, "tool_output_type"),
     )
 
 
@@ -270,6 +283,7 @@ def _entry_from_db_row(row: DbRow) -> JsonObject:
         duration_ms=_db_row_int(row, 20),
         shrink_chars_before=_db_row_int(row, 21),
         shrink_chars_after=_db_row_int(row, 22),
+        tool_output_type=_db_row_text(row, 23),
     )
 
 
@@ -299,7 +313,24 @@ def _recent_entry_from_ledger_record(rec: savings_ledger.LedgerEntry) -> JsonObj
         duration_ms=0,
         shrink_chars_before=jsonnum.int_value(rec.get("shrink_chars_before", 0)),
         shrink_chars_after=jsonnum.int_value(rec.get("shrink_chars_after", 0)),
+        tool_output_type=str(rec.get("tool_output_type") or ""),
     )
+
+
+def _migrate_request_db(db: sqlite3.Connection) -> None:
+    """Add columns that shipped after the original schema, idempotently.
+
+    SQLite has no migration framework here and the DB is long-lived across
+    daemon restarts, so each late-added column is applied with a guarded
+    ``ALTER TABLE`` matching the ``CREATE TABLE IF NOT EXISTS`` convention.
+
+    Args:
+        db: An open connection to the request-history database.
+    """
+    cols = {row[1] for row in db.execute("PRAGMA table_info(request_events)")}
+    for name, ddl in _REQUEST_EVENT_ADDED_COLUMNS:
+        if name not in cols:
+            db.execute(f"ALTER TABLE request_events ADD COLUMN {name} {ddl}")
 
 
 def _ensure_request_db(db_path: Path) -> None:
@@ -308,6 +339,7 @@ def _ensure_request_db(db_path: Path) -> None:
     with sqlite3.connect(db_path) as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute(_REQUEST_EVENT_CREATE)
+        _migrate_request_db(db)
         db.execute("CREATE INDEX IF NOT EXISTS idx_request_events_ts ON request_events(ts)")
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_request_events_request_id ON request_events(request_id)"
@@ -551,6 +583,7 @@ class _Metrics:
         request_id: str = "",
         shrink_chars_before: int = 0,
         shrink_chars_after: int = 0,
+        tool_output_type: str = "",
     ) -> None:
         entry = _request_entry(
             ts=int(time.time()),
@@ -576,6 +609,7 @@ class _Metrics:
             request_id=request_id,
             shrink_chars_before=shrink_chars_before,
             shrink_chars_after=shrink_chars_after,
+            tool_output_type=tool_output_type,
         )
         with self._lock:
             self._last_requests.insert(0, entry)

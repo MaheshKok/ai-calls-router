@@ -118,11 +118,12 @@ def _clamp_max_tokens(body: JsonObject, tier_cfg: JsonObject, routed: JsonObject
             routed["max_tokens"] = tier_max
 
 
-# Opus accepts output_config.effort='xhigh'; Sonnet and other routed Anthropic
-# models reject it (HTTP 400, supported: high/low/max/medium). A tier may pin its
-# own routed reasoning level via tier_cfg "effort"; absent that, only the Opus-
-# only 'xhigh' is downgraded so a routed turn never fails open on effort alone.
-# Each tier decides independently; premium passthrough keeps its own level.
+# Anthropic effort levels: low < medium < high (default) < xhigh < max. Older
+# routed models (e.g. Sonnet 4.6) reject 'xhigh' with HTTP 400; Sonnet 5 and Opus
+# accept it. A tier naming an xhigh-capable model sets supports_xhigh_effort so a
+# client 'xhigh' passes through untouched; otherwise it is downgraded to 'high' as
+# a safety net so a routed turn never fails open on effort alone. A configured
+# tier "effort" always wins over both; premium passthrough keeps its own level.
 _UNSUPPORTED_ROUTED_EFFORT = "xhigh"
 _ROUTED_EFFORT_FALLBACK = "high"
 
@@ -132,11 +133,13 @@ def _routed_effort(tier_cfg: JsonObject, current_effort: object) -> str | None:
 
     A configured tier ``effort`` always wins (returning None only when it already
     matches the request, to avoid a needless copy). Without a tier override, the
-    sole adjustment is the ``xhigh`` safety downgrade; any already-supported level
-    is left untouched.
+    sole adjustment is the ``xhigh`` safety downgrade, and that is skipped for a
+    tier that declares ``supports_xhigh_effort: true``; any already-supported
+    level is left untouched.
 
     Args:
-        tier_cfg: Tier config; reads an optional ``effort`` override.
+        tier_cfg: Tier config; reads optional ``effort`` and
+            ``supports_xhigh_effort``.
         current_effort: The effort the client requested, if any.
 
     Returns:
@@ -145,20 +148,115 @@ def _routed_effort(tier_cfg: JsonObject, current_effort: object) -> str | None:
     configured = tier_cfg.get("effort")
     if isinstance(configured, str) and configured:
         return configured if configured != current_effort else None
-    if current_effort == _UNSUPPORTED_ROUTED_EFFORT:
+    supports_xhigh = tier_cfg.get("supports_xhigh_effort", False) is True
+    if current_effort == _UNSUPPORTED_ROUTED_EFFORT and not supports_xhigh:
         return _ROUTED_EFFORT_FALLBACK
     return None
 
 
 def _normalize_effort(body: JsonObject, tier_cfg: JsonObject, routed: JsonObject) -> None:
-    """Apply the tier's routed effort, or the xhigh safety downgrade, to the body."""
+    """Apply the tier's routed effort, downgrade the xhigh a routed model rejects,
+    or strip the effort field entirely when the tier declares its model rejects
+    Anthropic adaptive thinking (``supports_adaptive_thinking: false``, e.g. Haiku
+    4.5).
+
+    The capability is owned in tier config, not inferred from the model id:
+    Anthropic's subscription Messages endpoint turns a non-empty
+    ``output_config.effort`` into adaptive thinking, which the 4.5 family rejects
+    with HTTP 400 ("adaptive thinking is not supported on this model"). No model
+    registry (litellm's ``supports_reasoning`` is True for Haiku) carries this
+    endpoint-specific fact, so the tier states it explicitly.
+    """
     output_config = body.get("output_config")
     if not isinstance(output_config, dict):
+        return
+    if tier_cfg.get("supports_adaptive_thinking", True) is False:
+        trimmed = {key: value for key, value in output_config.items() if key != "effort"}
+        if trimmed:
+            routed["output_config"] = trimmed
+        else:
+            routed.pop("output_config", None)
         return
     target = _routed_effort(tier_cfg, output_config.get("effort"))
     if target is None:
         return
     routed["output_config"] = {**output_config, "effort": target}
+
+
+# Context-editing strategy that operates on thinking blocks. Anthropic 400s
+# ("`clear_thinking_20251015` strategy requires `thinking` to be enabled or
+# adaptive") when this edit is present but the routed turn has thinking disabled.
+# Matched by prefix so a future-dated variant (clear_thinking_YYYYMMDD) is covered.
+_CLEAR_THINKING_EDIT_PREFIX = "clear_thinking"
+
+
+def _strip_clear_thinking_edit(body: JsonObject, routed: JsonObject) -> None:
+    """Remove the clear_thinking context-management edit from a routed body.
+
+    Claude Code pairs its adaptive-thinking request with a top-level
+    ``context_management.edits`` entry of type ``clear_thinking_20251015``. Once a
+    routed turn disables thinking (see ``_normalize_thinking``), Anthropic rejects
+    that edit with HTTP 400 ("strategy requires thinking to be enabled or
+    adaptive"), failing the turn open to premium. Only the clear_thinking edit is
+    dropped; other strategies (e.g. clear_tool_uses) do not depend on thinking and
+    are preserved in order. ``context_management`` is dropped entirely when the
+    edit was its only content. The filter is deterministic, so a given input body
+    yields identical bytes every turn and the subscription cache prefix stays
+    stable. The input body is never mutated.
+    """
+    ctx = body.get("context_management")
+    if not isinstance(ctx, dict):
+        return
+    edits = ctx.get("edits")
+    if not isinstance(edits, list):
+        return
+    kept = [
+        edit
+        for edit in cast("JsonArray", edits)
+        if not (
+            isinstance(edit, dict)
+            and isinstance(edit.get("type"), str)
+            and cast("str", edit["type"]).startswith(_CLEAR_THINKING_EDIT_PREFIX)
+        )
+    ]
+    if len(kept) == len(edits):
+        return
+    if kept:
+        routed["context_management"] = {**ctx, "edits": kept}
+        return
+    remaining = {key: value for key, value in ctx.items() if key != "edits"}
+    if remaining:
+        routed["context_management"] = remaining
+    else:
+        routed.pop("context_management", None)
+
+
+def _normalize_thinking(body: JsonObject, tier_cfg: JsonObject, routed: JsonObject) -> None:
+    """Disable a top-level adaptive-thinking request for tiers whose routed model
+    rejects it (``supports_adaptive_thinking: false``, e.g. Haiku 4.5).
+
+    Claude Code sends premium Opus/Sonnet turns with a top-level
+    ``thinking: {"type": "adaptive"}`` parameter. The 4.5 family only supports
+    budget thinking and returns HTTP 400 ("adaptive thinking is not supported on
+    this model") for the adaptive form, failing the routed turn open to premium.
+    A routed turn on such a tier is switched to ``{"type": "disabled"}`` -- the
+    same choice the DeepSeek direct path makes -- deterministically, so the routed
+    prefix stays cache-stable. Adaptive-capable tiers (default) keep the client's
+    thinking config untouched; a non-adaptive ``thinking`` (budget/disabled) the
+    routed model already accepts is also left as-is.
+
+    Disabling thinking also invalidates a paired ``clear_thinking`` context-edit
+    (which requires thinking enabled/adaptive), so that edit is stripped too --
+    unless the client left thinking ``enabled`` (budget), where it stays valid.
+    """
+    if tier_cfg.get("supports_adaptive_thinking", True) is not False:
+        return
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "adaptive":
+        routed["thinking"] = {"type": "disabled"}
+    thinking_enabled = isinstance(thinking, dict) and thinking.get("type") == "enabled"
+    if not thinking_enabled:
+        _strip_clear_thinking_edit(body, routed)
 
 
 def prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
@@ -167,10 +265,13 @@ def prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
     Swaps in the tier model, removes the stream flag (routed calls are
     buffered), clamps max_tokens to the tier limit when the requested value
     is missing, non-int, or larger, strips thinking/redacted_thinking blocks
-    the routed provider cannot interpret, and sets the reasoning effort to the
-    tier's configured ``effort`` (falling back to downgrading the Opus-only
-    'xhigh' the routed model rejects). Assistant messages emptied by the
-    stripping are dropped. The input body is never mutated.
+    the routed provider cannot interpret, disables a top-level adaptive
+    ``thinking`` request for tiers whose model rejects it, and sets the reasoning
+    effort to the tier's configured ``effort`` (falling back to downgrading an
+    xhigh the routed model rejects unless the tier is xhigh-capable, or stripping
+    the effort field entirely for models that reject Anthropic adaptive thinking,
+    such as Haiku). Assistant messages emptied by the stripping are dropped. The
+    input body is never mutated.
 
     Args:
         body: Anthropic-format request body from the client.
@@ -185,6 +286,7 @@ def prepare_routed_body(body: JsonObject, tier_cfg: JsonObject) -> JsonObject:
     routed.pop("stream", None)
     _clamp_max_tokens(body, tier_cfg, routed)
     _strip_thinking_from_messages(body, routed)
+    _normalize_thinking(body, tier_cfg, routed)
     _normalize_effort(body, tier_cfg, routed)
     return routed
 
@@ -442,6 +544,7 @@ async def record_route_outcome(outcome: RouteOutcome) -> None:
         shrink_path=shrink.path,
         shrink_chars_before=shrink.chars_before,
         shrink_chars_after=shrink.chars_after,
+        tool_output_type=shrink.content_type_label,
     )
     mtr = metrics_mod.get_metrics()
     mtr.add_routed_tokens(
@@ -472,6 +575,7 @@ async def record_route_outcome(outcome: RouteOutcome) -> None:
         session_id=outcome.session_id,
         shrink_chars_before=shrink.chars_before,
         shrink_chars_after=shrink.chars_after,
+        tool_output_type=shrink.content_type_label,
         request_id=outcome.request_id,
     )
 

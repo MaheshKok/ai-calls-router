@@ -559,3 +559,78 @@ async def test_messages_call_forwards_text_ml_flag_to_compressor(
         )
 
     assert seen == [True]
+
+
+def test_forward_headers_strips_long_context_beta_by_default() -> None:
+    # Default: a routed cheap turn must not opt into 1M context (the subscription
+    # 429s it), so context-1m is dropped while the other beta tokens survive.
+    headers = anthropic_oauth._forward_headers(
+        {"anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07"}
+    )
+
+    assert headers["anthropic-beta"] == "oauth-2025-04-20"
+
+
+def test_forward_headers_keeps_long_context_beta_when_enabled() -> None:
+    # keep_long_context=True (an entitled tier) forwards context-1m intact so the
+    # routed model serves its full 1M window.
+    headers = anthropic_oauth._forward_headers(
+        {"anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07"},
+        keep_long_context=True,
+    )
+
+    assert headers["anthropic-beta"] == "oauth-2025-04-20,context-1m-2025-08-07"
+
+
+def test_forward_headers_keep_long_context_preserves_sole_beta_token() -> None:
+    # When context-1m is the only beta token, the default drops the header
+    # entirely; keeping it must leave the header present and unchanged.
+    stripped = anthropic_oauth._forward_headers({"anthropic-beta": "context-1m-2025-08-07"})
+    kept = anthropic_oauth._forward_headers(
+        {"anthropic-beta": "context-1m-2025-08-07"}, keep_long_context=True
+    )
+
+    assert "anthropic-beta" not in stripped
+    assert kept["anthropic-beta"] == "context-1m-2025-08-07"
+
+
+def test_forward_headers_drops_non_allowlisted_headers_regardless_of_flag() -> None:
+    # The allowlist is independent of keep_long_context: unrelated client headers
+    # never reach upstream even when long context is kept.
+    headers = anthropic_oauth._forward_headers(
+        {"authorization": "Bearer x", "cookie": "secret", "x-forwarded-for": "1.2.3.4"},
+        keep_long_context=True,
+    )
+
+    assert headers["authorization"] == "Bearer x"
+    assert "cookie" not in headers
+    assert "x-forwarded-for" not in headers
+
+
+@pytest.mark.asyncio
+async def test_messages_call_keeps_long_context_when_tier_entitled() -> None:
+    # End-to-end wiring: a tier with supports_long_context must forward the
+    # context-1m beta to api.anthropic.com; a default tier must strip it.
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_ok_response())
+
+    beta = "oauth-2025-04-20,context-1m-2025-08-07"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await anthropic_oauth.messages_call(
+            body=_body(),
+            tier_cfg=_tier(supports_long_context=True),
+            oauth_headers={"anthropic-beta": beta},
+            client=client,
+        )
+        await anthropic_oauth.messages_call(
+            body=_body(),
+            tier_cfg=_tier(),
+            oauth_headers={"anthropic-beta": beta},
+            client=client,
+        )
+
+    assert captured[0].headers["anthropic-beta"] == beta
+    assert captured[1].headers["anthropic-beta"] == "oauth-2025-04-20"

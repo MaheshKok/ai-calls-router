@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from ai_calls_router.accounting.metrics import _Metrics
+from ai_calls_router.accounting.metrics import (
+    _ensure_request_db,
+    _load_request_events,
+    _Metrics,
+)
 
 
 def _make_record(
@@ -941,3 +946,166 @@ class TestRequestsTotal:
         assert snap["requests"]["routed"] == 2
         assert snap["requests"]["passthrough"] == 1
         assert snap["requests"]["errors"] == 1
+
+
+# ── tool_output_type: migration + persistence ───────────────────────────────
+
+# The request_events schema exactly as it shipped BEFORE tool_output_type was
+# added (23 data columns). Written by hand rather than derived from the current
+# constant so the test pins the real legacy shape a live metrics.db would have.
+_LEGACY_REQUEST_EVENTS_DDL = """
+CREATE TABLE request_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    request_id TEXT NOT NULL,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    tier TEXT NOT NULL,
+    route TEXT NOT NULL,
+    model TEXT NOT NULL,
+    premium_model TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    user_agent TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    decision_reason TEXT NOT NULL,
+    client_ip TEXT NOT NULL,
+    tool_names TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_creation_tokens INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    shrink_chars_before INTEGER NOT NULL,
+    shrink_chars_after INTEGER NOT NULL
+)
+"""
+
+_LEGACY_INSERT = """
+INSERT INTO request_events (
+    ts, request_id, method, path, status, tier, route, model, premium_model,
+    provider, user_agent, agent, session_id, decision_reason, client_ip,
+    tool_names, input_tokens, output_tokens, cache_read_tokens,
+    cache_creation_tokens, duration_ms, shrink_chars_before, shrink_chars_after
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def _seed_legacy_db(db_path: Path) -> None:
+    """Create a pre-migration request_events table with one row, no column."""
+    with sqlite3.connect(db_path) as db:
+        db.execute(_LEGACY_REQUEST_EVENTS_DDL)
+        db.execute(
+            _LEGACY_INSERT,
+            (
+                1718000000,
+                "legacy-req",
+                "POST",
+                "/v1/messages",
+                200,
+                "deepseek",
+                "routed",
+                "deepseek-chat",
+                "claude-opus",
+                "deepseek",
+                "claude-code/2.0.0",
+                "claude-code-cli",
+                "sess-legacy",
+                "routed",
+                "127.0.0.1",
+                "[]",
+                100,
+                40,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ),
+        )
+
+
+def _table_columns(db_path: Path) -> list[str]:
+    """Return current request_events column names in declaration order."""
+    with sqlite3.connect(db_path) as db:
+        return [row[1] for row in db.execute("PRAGMA table_info(request_events)")]
+
+
+class TestToolOutputTypeMigration:
+    """A DB predating tool_output_type must gain the column without data loss."""
+
+    def test_legacy_db_lacks_column_before_migration(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "metrics.db"
+        _seed_legacy_db(db_path)
+        assert "tool_output_type" not in _table_columns(db_path)
+
+    def test_ensure_request_db_adds_missing_column(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "metrics.db"
+        _seed_legacy_db(db_path)
+        _ensure_request_db(db_path)
+        assert "tool_output_type" in _table_columns(db_path)
+
+    def test_migration_is_idempotent(self, tmp_path: Path) -> None:
+        # A second connect must not raise "duplicate column name".
+        db_path = tmp_path / "metrics.db"
+        _seed_legacy_db(db_path)
+        _ensure_request_db(db_path)
+        _ensure_request_db(db_path)
+        assert _table_columns(db_path).count("tool_output_type") == 1
+
+    def test_legacy_row_survives_and_reads_back_blank(self, tmp_path: Path) -> None:
+        # The pre-existing row must remain and default to an empty label.
+        db_path = tmp_path / "metrics.db"
+        _seed_legacy_db(db_path)
+        rows = _load_request_events(db_path, max_recent=10)
+        assert len(rows) == 1
+        assert rows[0]["request_id"] == "legacy-req"
+        assert rows[0]["tool_output_type"] == ""
+
+
+class TestToolOutputTypePersistence:
+    """record_request must persist and reload the classification label."""
+
+    def _record(self, m: _Metrics, *, request_id: str, **kwargs: object) -> None:
+        m.record_request(
+            method="POST",
+            path="/v1/messages",
+            status=200,
+            tier="deepseek",
+            route="routed",
+            model="deepseek-chat",
+            user_agent="claude-code/2.0.0",
+            client_ip="127.0.0.1",
+            tool_names=[],
+            input_tokens=10,
+            output_tokens=5,
+            cache_read=0,
+            cache_creation=0,
+            duration=0.0,
+            request_id=request_id,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    def test_label_visible_in_live_snapshot(self, tmp_path: Path) -> None:
+        m = _Metrics(db_path=tmp_path / "metrics.db")
+        self._record(m, request_id="req-live", tool_output_type="excluded, smart_crusher")
+        assert m.snapshot()["last_requests"][0]["tool_output_type"] == "excluded, smart_crusher"
+
+    def test_label_survives_restart(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "metrics.db"
+        m = _Metrics(db_path=db_path)
+        self._record(m, request_id="req-restart", tool_output_type="smart_crusher")
+
+        replay = _Metrics(db_path=db_path)
+        replay.bootstrap(ledger_path=None, max_recent=10)
+        assert replay.snapshot()["last_requests"][0]["tool_output_type"] == "smart_crusher"
+
+    def test_defaults_to_blank_when_omitted(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "metrics.db"
+        m = _Metrics(db_path=db_path)
+        self._record(m, request_id="req-blank")
+
+        replay = _Metrics(db_path=db_path)
+        replay.bootstrap(ledger_path=None, max_recent=10)
+        assert replay.snapshot()["last_requests"][0]["tool_output_type"] == ""

@@ -146,6 +146,50 @@ def test_passthrough_preserves_request_without_long_context(
     assert request.headers["anthropic-beta"] == "oauth-2025-04-20"
 
 
+@pytest.mark.parametrize(
+    ("routes", "expected"),
+    [
+        ({"settings": {"long_context_passthrough": True}}, True),
+        ({"settings": {"long_context_passthrough": False}}, False),
+        ({"settings": {}}, False),  # flag absent -> safe stripping
+        ({}, False),  # no settings block at all
+        (
+            {"settings": {"long_context_passthrough": "true"}},
+            False,
+        ),  # string is not the literal bool
+        ({"settings": ["not", "a", "mapping"]}, False),  # malformed settings
+    ],
+)
+def test_keep_long_context_passthrough_only_true_for_literal_flag(
+    *, routes: dict[str, object], expected: bool
+) -> None:
+    # Only settings.long_context_passthrough is True (the boolean) keeps the opt-in;
+    # every missing or malformed value falls back to safe stripping.
+    assert orchestrator_mod._keep_long_context_passthrough(routes) is expected
+
+
+def test_passthrough_keeps_long_context_when_setting_enabled(
+    *, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upstream: Upstream
+) -> None:
+    # With settings.long_context_passthrough: true (an entitled plan), the [1m]
+    # model suffix and context-1m beta must reach the upstream unchanged so a
+    # >200K Opus decision turn survives passthrough instead of being capped.
+    monkeypatch.setattr(server_mod.bootstrap, "ensure_provider_configs", lambda: [])
+    config_yaml = CONFIG_YAML.replace(
+        "settings:\n  tier_precedence: [premium, fast]",
+        "settings:\n  tier_precedence: [premium, fast]\n  long_context_passthrough: true",
+    )
+    beta = "oauth-2025-04-20,context-1m-2025-08-07"
+    with make_client(
+        config_yaml=config_yaml, tmp_path=tmp_path, monkeypatch=monkeypatch, upstream=upstream
+    ) as client:
+        body = {**_messages_opener(), "model": "claude-opus-4-8[1m]"}
+        client.post("/v1/messages", json=body, headers={"anthropic-beta": beta})
+    request = upstream.requests[0]
+    assert json.loads(request.content)["model"] == "claude-opus-4-8[1m]"
+    assert request.headers["anthropic-beta"] == beta
+
+
 def test_trailing_slash_upstream_is_normalized(*, client: TestClient, upstream: Upstream) -> None:
     client.post("/v1/chat/completions", json=_chat_opener())
     assert upstream.requests[0].url.host == "hermes.internal.example"
